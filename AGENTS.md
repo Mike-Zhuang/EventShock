@@ -24,12 +24,15 @@
 
 ### 强制要求
 
-- Python 环境统一使用 Conda 管理。
-- 优先复用与项目版本和依赖兼容的已有 Conda 环境；没有合适环境时，创建项目专用的新 Conda 环境。
-- 禁止创建或使用 `venv`、`.venv`、`virtualenv` 等非 Conda 虚拟环境。
-- 禁止执行 `python -m venv`、`python3 -m venv` 或 `virtualenv`。
+- 项目的开发、测试、容器和部署运行时统一使用 **CPython 3.12.13**；当前基线不使用 Python 3.13 或 3.14。
+- 项目包在 `pyproject.toml` 中必须声明 `requires-python = ">=3.12,<3.13"`。该声明约束 Python 3.12 系列，不负责锁定补丁版本；3.12.13 还必须由环境、容器和 CI 配置分别精确锁定。
+- 本地 Python 环境统一使用 Conda 管理。优先复用版本和依赖均兼容的项目专用 Conda 环境；没有合适环境时，创建名为 `eventshock` 的专用环境。
+- 禁止创建或使用 `uv`、`venv`、`.venv`、`virtualenv`、Poetry 虚拟环境等非 Conda 本地环境。
+- 禁止执行 `uv venv`、`python -m venv`、`python3 -m venv` 或 `virtualenv`。
 - 不得将项目依赖安装到系统 Python 或 Conda 的 `base` 环境中。
 - 未经用户明确要求，不得修改全局 Conda channel、pip index、代理或其他用户级环境配置。
+- Docker 容器是本地 Conda 规则之外的隔离运行环境，基础镜像必须使用 `python:3.12.13-slim-bookworm` 锁定 Python 补丁版本，且容器内不得再创建虚拟环境。若发布流程要求镜像内容不可变，还必须锁定经过审查的镜像 digest，并定期更新安全修复。
+- GitHub Actions 的 Linux 必过任务必须使用 `runs-on: ubuntu-24.04`，Python 矩阵精确写为 `python-version: ["3.12.13"]`；不得假定该精确版本可直接用于 macOS 或 Windows runner。项目稳定后如需评估 Python 3.13，应新增独立的非阻塞兼容性任务，不得替换当前基线。
 
 ### 标准流程
 
@@ -39,24 +42,38 @@
 conda env list
 ```
 
-如果存在兼容的环境，直接激活：
+如果列表中没有 `eventshock` 环境，创建并激活项目专用环境：
 
 ```bash
-conda activate <environment-name>
+conda create --name eventshock python=3.12.13
+conda activate eventshock
 ```
 
-如果不存在兼容环境，则按项目要求的 Python 版本创建专用环境：
+如果 `eventshock` 已存在，只激活现有环境，不要再次执行同名 `conda create`：
 
 ```bash
-conda create --name <environment-name> python=<python-version>
-conda activate <environment-name>
+conda activate eventshock
 ```
 
-激活后必须确认实际解释器来自目标 Conda 环境：
+激活后必须确认实际解释器来自 `eventshock` 环境，且版本精确为 3.12.13：
 
 ```bash
 python -c "import sys; print(sys.executable)"
 python --version
+python -c "import sys; assert sys.version_info[:3] == (3, 12, 13), sys.version"
+```
+
+如果精确版本检查失败，立即停止，不得继续安装依赖，也不得擅自升级、删除或重建同名环境；任何迁移或重建都必须先取得用户明确确认。如果创建环境时当前平台的软件源找不到 3.12.13，应先检查平台和软件源；确需使用 conda-forge 时可采用仅对本次命令生效的 `--channel conda-forge`，不得因此降低版本要求或修改全局 channel。
+
+后续创建或修改版本配置时，必须保持以下五处一致：
+
+```text
+.python-version: 3.12.13
+environment.yml: dependencies 中包含 python=3.12.13
+pyproject.toml: requires-python = ">=3.12,<3.13"
+Dockerfile: FROM python:3.12.13-slim-bookworm
+GitHub Actions: python-version: ["3.12.13"]
+GitHub Actions runner: ubuntu-24.04
 ```
 
 安装 Python 包时，应先复用项目已有依赖清单。确需使用 pip 时，使用以下形式，确保包安装到当前解释器：
