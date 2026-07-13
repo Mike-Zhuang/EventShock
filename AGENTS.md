@@ -26,17 +26,17 @@
 
 - 项目的开发、测试、容器和部署运行时统一使用 **CPython 3.12.13**；当前基线不使用 Python 3.13 或 3.14。
 - 项目包在 `pyproject.toml` 中必须声明 `requires-python = ">=3.12,<3.13"`。该声明约束 Python 3.12 系列，不负责锁定补丁版本；3.12.13 还必须由环境、容器和 CI 配置分别精确锁定。
-- 本地 Python 环境统一使用 Conda 管理。优先复用版本和依赖均兼容的项目专用 Conda 环境；没有合适环境时，创建名为 `eventshock` 的专用环境。
-- 禁止创建或使用 `uv`、`venv`、`.venv`、`virtualenv`、Poetry 虚拟环境等非 Conda 本地环境。
-- 禁止执行 `uv venv`、`python -m venv`、`python3 -m venv` 或 `virtualenv`。
-- 不得将项目依赖安装到系统 Python 或 Conda 的 `base` 环境中。
+- 除非开发者认为自己对 Python 及包管理器足够熟悉，并能够自行保证项目级环境隔离与依赖一致性，否则本地 Python 环境统一使用 Conda 管理。优先复用版本和依赖均兼容的项目专用 Conda 环境；没有合适环境时，创建名为 `eventshock` 的专用环境。
+- 满足上述例外条件的开发者可以使用 `uv`、`venv`、`virtualenv`、Poetry 或其他环境管理工具，但仍必须使用项目专用的隔离环境，并精确锁定 CPython 3.12.13。
+- Agent 只有在能够通过仓库配置与实际检查确认替代方案满足上述版本、隔离和依赖一致性要求时，才能套用例外；如有任何不确定，必须使用默认 Conda 方案。
+- 无论使用哪种工具，都不得将项目依赖直接安装到共享的系统 Python、Conda 的 `base` 环境或其他项目的环境中。
 - 未经用户明确要求，不得修改全局 Conda channel、pip index、代理或其他用户级环境配置。
-- Docker 容器是本地 Conda 规则之外的隔离运行环境，基础镜像必须使用 `python:3.12.13-slim-bookworm` 锁定 Python 补丁版本，且容器内不得再创建虚拟环境。若发布流程要求镜像内容不可变，还必须锁定经过审查的镜像 digest，并定期更新安全修复。
+- Docker 容器是本地环境管理策略之外的隔离运行环境，基础镜像必须使用 `python:3.12.13-slim-bookworm` 锁定 Python 补丁版本，且容器内不得再创建虚拟环境。若发布流程要求镜像内容不可变，还必须锁定经过审查的镜像 digest，并定期更新安全修复。
 - GitHub Actions 的 Linux 必过任务必须使用 `runs-on: ubuntu-24.04`，Python 矩阵精确写为 `python-version: ["3.12.13"]`；不得假定该精确版本可直接用于 macOS 或 Windows runner。项目稳定后如需评估 Python 3.13，应新增独立的非阻塞兼容性任务，不得替换当前基线。
 
-### 标准流程
+### 默认 Conda 流程
 
-执行 Python 相关命令前，先检查项目中的 `environment.yml`、`requirements.txt`、`pyproject.toml`、`.python-version` 或其他版本声明，再执行：
+Agent 在无法确认替代方案满足上述例外条件时，默认执行以下 Conda 流程。用户明确指定替代工具或仓库已经存在明确的替代环境配置时，先验证其符合版本、隔离和依赖一致性要求，再改用相应流程。执行 Python 相关命令前，先检查项目中的 `environment.yml`、`requirements.txt`、`pyproject.toml`、`.python-version` 或其他版本声明，再执行：
 
 ```bash
 conda env list
@@ -55,7 +55,7 @@ conda activate eventshock
 conda activate eventshock
 ```
 
-激活后必须确认实际解释器来自 `eventshock` 环境，且版本精确为 3.12.13：
+无论使用默认 Conda 流程还是经允许的替代工具，激活或选择项目隔离环境后都必须确认实际解释器属于该环境，且版本精确为 3.12.13：
 
 ```bash
 python -c "import sys; print(sys.executable)"
@@ -63,7 +63,9 @@ python --version
 python -c "import sys; assert sys.version_info[:3] == (3, 12, 13), sys.version"
 ```
 
-如果精确版本检查失败，立即停止，不得继续安装依赖，也不得擅自升级、删除或重建同名环境；任何迁移或重建都必须先取得用户明确确认。如果创建环境时当前平台的软件源找不到 3.12.13，应先检查平台和软件源；确需使用 conda-forge 时可采用仅对本次命令生效的 `--channel conda-forge`，不得因此降低版本要求或修改全局 channel。
+如果精确版本检查失败，立即停止，不得继续安装依赖，也不得擅自升级、删除或重建现有环境；任何迁移或重建都必须先取得用户明确确认。使用默认 Conda 流程时，如果当前平台的软件源找不到 3.12.13，应先检查平台和软件源；确需使用 conda-forge 时可采用仅对本次命令生效的 `--channel conda-forge`，不得因此降低版本要求或修改全局 channel。
+
+使用经允许的替代工具时，也必须复用或创建项目专用隔离环境，运行上述解释器路径与版本检查，并将依赖变更同步到仓库采用的依赖清单或锁文件中。
 
 后续创建或修改版本配置时，必须保持以下五处一致：
 

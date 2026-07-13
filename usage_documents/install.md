@@ -25,17 +25,19 @@
 
 安装过程中保持默认选项即可，安装路径可自行选择。
 
-### Python（Miniconda）
+### Python（默认方案：Miniconda）
 
-项目统一使用 Conda 管理本地 Python 环境，建议通过 Miniconda 安装。开发、测试、Docker 和部署运行时均以 **CPython 3.12.13** 为精确版本基线；后续创建 `pyproject.toml` 时，项目包的兼容范围必须声明为 `>=3.12,<3.13`。
+除非你认为自己对 Python 及包管理器足够熟悉，并能够自行保证项目级环境隔离与依赖一致性，否则必须按照本节使用 Conda 管理本地 Python 环境，建议通过 Miniconda 安装。熟悉者可以选择 `uv`、`venv`、`virtualenv`、Poetry 或其他环境管理工具，但仍必须使用项目专用的隔离环境。开发、测试、Docker 和部署运行时均以 **CPython 3.12.13** 为精确版本基线；后续创建 `pyproject.toml` 时，项目包的兼容范围必须声明为 `>=3.12,<3.13`。
 
-当前阶段不要使用系统 Python 3.14，也不要把 Python 3.13 作为项目环境；同时禁止使用 `uv`、`venv`、`.venv` 或 `virtualenv` 创建本地环境。这是为了减少成员与部署环境的差异并统一 Python 补丁版本，并不表示 Python 3.13 或 3.14 本身不可用。完整复现还需要锁定依赖、平台和容器镜像摘要。
+这里放宽的只是熟悉者对本地环境管理工具的选择，不是 Python 版本、环境隔离或依赖一致性要求。当前阶段不要把 Python 3.13 或 3.14 作为项目环境，也不得将项目依赖直接安装到共享的系统 Python、Conda 的 `base` 环境或其他项目的环境中。这是为了减少成员与部署环境的差异并统一 Python 补丁版本，并不表示 Python 3.13 或 3.14 本身不可用。完整复现还需要锁定依赖、平台和容器镜像摘要。
+
+下面的 Miniconda 安装、软件源配置及 `eventshock` 环境创建步骤是默认方案；不满足上述例外条件的开发者必须执行。选择其他工具的熟悉开发者可以跳过 Conda 专用步骤，但不能跳过解释器版本、环境路径和依赖一致性验证。
 
 选择 3.12.13 的依据如下：
 
 - [Mesa 3.5.1](https://pypi.org/project/Mesa/3.5.1/) 要求 Python 3.12 及以上；[Ray 2.56.0](https://pypi.org/project/ray/2.56.0/) 和 [PyTorch](https://pytorch.org/get-started/locally/) 均提供适用于 Python 3.12 的正式发行包，因此 3.12 是当前计划依赖的稳定共同基线。
 - 精确锁定补丁版本可以减少成员电脑、CI 和容器之间的解释器差异。`requires-python = ">=3.12,<3.13"` 只表达项目包支持 Python 3.12 系列，不能代替环境中的 3.12.13 精确锁定。
-- [Python 3.12.13](https://www.python.org/downloads/release/python-31213/) 是 Python 3.12 的安全更新版本，Python.org 不再为这一阶段的 3.12 版本提供二进制安装包，因此本地开发应按本文使用 Conda 安装，不要改用系统 Python。
+- [Python 3.12.13](https://www.python.org/downloads/release/python-31213/) 是 Python 3.12 的安全更新版本，Python.org 不再为这一阶段的 3.12 版本提供二进制安装包，因此不熟悉环境管理的开发者应按本文使用 Conda 安装；选择其他工具的熟悉开发者仍需自行确认能够获得并锁定 3.12.13。
 
 下载地址：
 [Free Download | Anaconda](https://www.anaconda.com/download)
@@ -95,7 +97,7 @@ conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/
 pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-#### 创建并验证项目 Conda 环境
+#### 默认方案：创建并验证项目 Conda 环境
 
 先查看已有环境：
 
@@ -116,7 +118,7 @@ conda activate eventshock
 conda activate eventshock
 ```
 
-激活后必须运行以下命令。解释器路径应位于 `eventshock` Conda 环境中，版本输出必须为 `Python 3.12.13`；最后一条命令无输出即表示精确版本检查通过。
+无论选择哪种环境管理工具，激活或选择项目隔离环境后都必须运行以下命令。使用默认 Conda 方案时，解释器路径应位于 `eventshock` 环境中；使用其他工具时，路径应位于相应的项目专用隔离环境中。版本输出必须为 `Python 3.12.13`，最后一条命令无输出即表示精确版本检查通过。
 
 ```bash
 python -c "import sys; print(sys.executable)"
@@ -132,7 +134,7 @@ python -c "import sys; assert sys.version_info[:3] == (3, 12, 13), sys.version"
 conda create --name eventshock --channel conda-forge python=3.12.13
 ```
 
-不要复用版本不同的旧环境，也不要把依赖安装到系统 Python 或 Conda 的 `base` 环境。安装项目依赖时优先使用仓库提供的依赖清单；确需用 pip 时，使用 `python -m pip`，确保安装到当前 Conda 解释器。
+不要复用版本不同的旧环境，也不要把依赖直接安装到共享的系统 Python、Conda 的 `base` 环境或其他项目的环境中。安装项目依赖时优先使用仓库提供的依赖清单；确需用 pip 时，使用 `python -m pip`，确保安装到当前项目隔离环境的解释器。
 
 #### 后续配置文件的版本契约
 
@@ -199,13 +201,13 @@ jobs:
 
 ![1763995478622](doc_images/README/1763995478622.png)
 
-安装扩展后，在 VS Code 中打开命令面板，运行 `Python: Select Interpreter`，选择 `eventshock` 对应的 Conda 解释器。随后在 VS Code 终端中再次运行：
+安装扩展后，在 VS Code 中打开命令面板，运行 `Python: Select Interpreter`，选择当前项目隔离环境对应的解释器；使用默认 Conda 方案时，选择 `eventshock` 对应的 Conda 解释器。随后在 VS Code 终端中再次运行：
 
 ```bash
 python --version
 python -c "import sys; print(sys.executable)"
 ```
 
-确认版本仍为 `Python 3.12.13`，且路径指向 `eventshock` 环境。
+确认版本仍为 `Python 3.12.13`，且路径指向当前项目使用的隔离环境。
 
 按以上配置完成后，即可开始项目开发。

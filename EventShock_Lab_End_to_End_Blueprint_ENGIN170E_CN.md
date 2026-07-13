@@ -3256,7 +3256,7 @@ Ray Actor 是有状态 worker，适合封装远程状态服务或并行运行独
 
 这项决定服务于团队环境一致性，不表示 Python 3.13 或 3.14 完全不可用。核心功能稳定后，可通过独立、非阻塞的 CI 任务评估 3.13；在此之前不得让个人开发环境或生产环境偏离 3.12.13。
 
-本地环境只使用 Conda：
+除非开发者认为自己对 Python 及包管理器足够熟悉，并能够自行保证项目级环境隔离与依赖一致性，否则本地环境必须使用 Conda。熟悉者可以选择其他环境管理工具，但所有方案都必须使用 CPython 3.12.13。默认 Conda 流程如下：
 
 ```bash
 conda create --name eventshock python=3.12.13
@@ -3468,8 +3468,8 @@ eventshock/
 
 Python：
 
-- Conda 管理本地 Python 环境，解释器精确固定为 3.12.13；
-- `environment.yml` 记录 Conda 环境与项目依赖；
+- 本地 Python 环境默认由 Conda 管理；熟悉 Python 及包管理器并能够保证隔离与依赖一致性的开发者可以选择其他工具，但解释器仍须精确固定为 3.12.13；
+- `environment.yml` 记录默认 Conda 环境与项目依赖基线；
 - `.python-version` 和 `pyproject.toml` 分别记录精确解释器版本与包兼容范围；
 - Ruff lint/format；
 - mypy 或 Pyright；
@@ -3689,7 +3689,7 @@ FROM python:3.12.13-slim-bookworm
 
 该补丁版本标签仍不是不可变引用。正式发布若需要字节级可复现，应在验证多架构镜像后附加 digest，并通过受审查的依赖更新流程定期刷新；不要为了永久固定旧 digest 而放弃基础镜像安全更新。[^docker-base-pin]
 
-本地开发仍按[开发环境安装说明](usage_documents/install.md)使用 Conda；容器是隔离的部署运行时，容器内部不再创建 `venv`。
+本地开发默认按[开发环境安装说明](usage_documents/install.md)使用 Conda；熟悉 Python 及包管理器并能够保证隔离与依赖一致性的开发者可以选择其他项目级隔离工具。容器是独立的部署运行时，容器内部不再创建 `venv`。
 
 ## 20.3 任务切分
 
@@ -5845,7 +5845,7 @@ def test_future_information_is_rejected(pack):
 ## Why agents / why hybrid
 ## Human-AI decision map
 ## Screenshots
-## Prerequisites (Python 3.12.13 + Conda)
+## Prerequisites (Python 3.12.13; Conda is the default setup)
 ## Quick start (synthetic)
 ## Run a paired experiment
 ## Event Pack format
@@ -5903,7 +5903,7 @@ Appendices
 ## 29.13 最终“一条命令”体验
 
 ```bash
-# Local synthetic demo
+# Local synthetic demo (default Conda setup)
 conda activate eventshock
 make bootstrap
 make demo-up
@@ -5916,7 +5916,7 @@ eventshock experiment run configs/experiments/demo_matched.yaml
 eventshock experiment report <experiment_id> --open
 ```
 
-`make bootstrap` 必须复用并验证当前的 `eventshock` Conda 环境，不得创建 `.venv` 或调用系统 Python。任何没有私有数据和外部密钥的人都应能跑 synthetic path；使用真实 LLM/市场数据时再通过 `.env` 和许可说明启用。
+`make bootstrap` 必须复用并验证当前已激活的项目隔离环境，不得擅自创建或切换环境。默认方案使用 `eventshock` Conda 环境；熟悉 Python 及包管理器的开发者可以使用满足 CPython 3.12.13、项目级隔离和依赖一致性要求的其他工具。任何没有私有数据和外部密钥的人都应能跑 synthetic path；使用真实 LLM/市场数据时再通过 `.env` 和许可说明启用。
 
 ---
 

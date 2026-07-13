@@ -50,7 +50,7 @@ dist/
 *.egg
 pip-wheel-metadata/
 
-# Conda 本地环境及误创建的其他虚拟环境
+# 本地 Python 隔离环境目录（不得提交到仓库）
 .conda/
 conda-env/
 .venv/
