@@ -7,6 +7,12 @@
 3. 所有改动必须通过 Pull Request 合并，且 PR 必须包含变更说明。
 4. 未经 Review Approve，不允许合并。
 
+## 开发环境
+
+项目约定开发、测试、容器和部署运行时统一为 **CPython 3.12.13**；后续创建 `pyproject.toml` 时，必须声明兼容范围 `>=3.12,<3.13`。本地 Python 环境必须使用 Conda 管理，不使用系统 Python、`uv`、`venv` 或 `virtualenv`；Docker 和 GitHub Actions 的 Linux 必过任务也必须锁定到 3.12.13，避免不同环境使用不同补丁版本。
+
+完整的安装、环境创建和版本验证步骤见[开发环境安装说明](usage_documents/install.md)。
+
 ## 许可证
 
 本仓库采用 [PolyForm Strict License 1.0.0](LICENSE)。源码公开可见不等同于开放源代码软件；本项目属于源码可用（source-available）项目。
