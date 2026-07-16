@@ -2,7 +2,7 @@
 
 ## 报告范围
 
-本报告记录截至 2026-07-15 当前工作区实际执行的自动检查、浏览器验收、服务器配置验证、代码中可见的控制以及未完成证据。它不把文档存在、测试定义存在、AI 自检或一次课程服务器部署视为真实用户研究、领域专家验证、安全批准或生产级运行证明。
+本报告记录截至 2026-07-15（America/Los_Angeles；部分服务器日志为 2026-07-16 UTC/Asia-Shanghai）当前工作区实际执行的自动检查、浏览器验收、服务器配置验证、代码中可见的控制以及未完成证据。它不把文档存在、测试定义存在、AI 自检或一次课程服务器部署视为真实用户研究、领域专家验证、安全批准或生产级运行证明。
 
 当前结论：`NOT_RELEASE_APPROVED`。
 
@@ -19,13 +19,16 @@
 | 前端生产构建 | `npm run build` | passed，5,986 modules transformed | 证明 Vite 发布工件可生成 |
 | 前端依赖审计 | `npm audit --audit-level=high` | 0 vulnerabilities reported | 仅限 npm 当前数据库和锁文件 |
 | 部署脚本语法 | `bash -n scripts/*.sh`、管理脚本 `py_compile` | passed | 不代替真实定时任务与回滚演练 |
-| Caddy 配置 | 固定 digest 的 Caddy 2.11.4 容器执行 `caddy validate` | valid configuration | 验证默认上游配置可解析，不证明所有网络路径 |
-| 浏览器主流程 | 英文默认、中文切换、SpaceX 18 条 claim 审核与冻结、Rule-only Scenario、Preflight、10 组 matched seeds、SSE 请求、Results、Trace、单实验作废、390px 响应式与控制台检查 | 通过手工浏览器验收；作废后 Results 显示 tombstone，控制台无 warning/error | 不是正式可用性研究或无障碍审计；没有真实智谱密钥 |
-| 当前公网实例 | DNS、TLS、容器健康与 `/api/health` 已在先前手工发布上检查 | reachable | 最新 GitHub 拉取式发布和宝塔监测仍须在目标 SHA 上另行验收 |
+| Caddy 与宝塔 Nginx 真实链路 | 固定 digest 的 Caddy 2.11.4；Caddy 容器请求 `host.docker.internal:18080/api/health`；公网 `/api/health` | 两条健康响应均为 `status=ok`、`service=eventshock-api`，且 `releaseCommit` 与已部署 GitHub SHA 一致 | 单次链路验收，不是长期可用性、容量或故障转移证明 |
+| 本地浏览器主流程 | 英文默认、中文切换、SpaceX 18 条 claim 审核与冻结、Rule-only Scenario、Preflight、10 组 matched seeds、SSE 请求、Results、Trace、单实验作废、390px 响应式与控制台检查 | 通过手工浏览器验收；作废后 Results 显示 tombstone，控制台无 warning/error | 不是正式可用性研究或无障碍审计；没有真实智谱密钥 |
+| 公网浏览器主流程 | 正式域名完成英文默认/中文切换、GLM 配置入口、SpaceX 18 条 claim 人工批准与冻结、单变量场景保存/冻结、Preflight、10 组 matched seeds、SSE、Results、Trace 与 Export 页面 | `exp-a553126d27e64245` 完成 10/10 配对种子；结果显示区间、方向一致率、有效 N 与限制；浏览器控制台无 warning/error | 这是开发者控制的课程验收，不是真实目标用户研究；没有调用真实智谱 API，也未把展示数值当成历史预测 |
+| 公网入口与内部端口 | DNS/TLS、安全响应头、监听器、外部 `18080` 探测、UFW | Caddy 独占公网 80/443；app 为 `127.0.0.1:18000`；Nginx 为 `172.17.0.1:18080` 和 `127.0.0.1:888`；公网 `18080` 不可达 | 未执行独立渗透测试，云账户与宿主机整体基线仍需人工安全审查 |
+| 宝塔 PHP 项目与流量统计 | 宝塔站点 API、Nginx access log、`free_site_total` 服务/socket/config/请求数 | `eventshock.mikezhuang.cn` 以 `project_type=PHP` 注册为真实反向代理；5 次公网请求使 access log 13→19、`site_total` 13→19，完整浏览器流程后计数为 125 | 已证明真实请求经过 Nginx；未以用户登录宝塔网页截图作为视觉证据，也不是长期监控证明 |
+| scoped UFW | 动态 Docker network/bridge 与 `ufw status` | 只有 `br-607487476fbf` 上 `172.19.0.0/16 -> 172.17.0.1:18080/tcp` 的 `EventShock-Caddy-Nginx` 规则；没有 broad/public 18080 | 规则绑定当前 Compose network；人工重建网络后必须重新注册并复核 |
 | 智谱真实 API | 未使用真实密钥或真实计费请求 | `NOT_RUN` | Mock 契约不能证明实时供应商质量、成本、延迟或保留政策 |
-| GitHub / 宝塔自动部署 | 当前代码尚未 push 并通过远端 CI，也尚未创建宝塔任务 | `PENDING_DEPLOYMENT_EVIDENCE` | 脚本存在不能替代 GitHub Check、宝塔 UI、任务日志与目标 SHA 证据 |
+| GitHub / 宝塔自动部署 | implementation commit 先 push GitHub；push 与 draft PR 两个 CI run 的 Backend、Frontend、Production container 共 6 个检查通过；宝塔原生任务随后拉取部署 | 10 分钟任务 ID 1、原生脚本/日志和 root crontab 均存在；`GetLogs` 可读，日志含 `DEPLOY_SUCCESS` 与 `Successful`；本地、GitHub、sync state、current release 与健康 SHA 一致 | 证明一次成功拉取式部署和面板 API 可读日志；仍缺失败发布/恢复的正式演练和宝塔网页人工视觉确认 |
 
-上表只记录实际发生的动作。自动化回归已通过，但人工与外部证据仍缺失，因此发布门禁继续保持阻断。
+上表只记录实际发生的动作。自动化、受控公网流程和单机部署链路已通过，但真实用户、领域专家、真实 GLM、人工红队、许可与灾难恢复证据仍缺失，因此发布门禁继续保持阻断。
 
 ## 已关闭的历史回归问题
 
