@@ -91,6 +91,29 @@ def testGitHubSyncQuarantinesFailedCommitWithBoundedBackoff() -> None:
     assert 'rm -f -- "${FAILED_STATE_FILE}"' in script
 
 
+def testGitHubSyncTreatsMissingFailureStateAsNoBackoff() -> None:
+    script = readScript("sync-from-github.sh")
+    functionBody = script.split("check_deployment_backoff() {", 1)[1].split(
+        "\n}\n\nrecord_deployment_failure() {", 1
+    )[0]
+    probe = f"""
+failed_state_value() {{ return 1; }}
+log() {{ :; }}
+check_deployment_backoff() {{{functionBody}
+}}
+check_deployment_backoff "{"a" * 40}"
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", probe],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def testDeployServerBacksUpSqliteAtomicallyAndRetainsThreeBackups() -> None:
     script = readScript("deploy-server.sh")
 

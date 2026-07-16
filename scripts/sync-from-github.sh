@@ -216,7 +216,9 @@ check_deployment_backoff() {
     rm -f -- "${FAILED_STATE_FILE}"
     return
   fi
-  [[ "${failedCommit}" == "${targetCommit}" ]] || return
+  # 没有该提交的失败记录就是正常路径，必须显式返回成功；裸 return 会继承
+  # 上一个 [[ ... ]] 的失败状态，导致首次部署在 CI 通过后静默退出。
+  [[ "${failedCommit}" == "${targetCommit}" ]] || return 0
   nextRetry="$(failed_state_value nextRetryAtEpoch 2>/dev/null || true)"
   [[ "${nextRetry}" =~ ^[0-9]+$ ]] || fail "failed deployment state is malformed"
   now="$(date +%s)"
