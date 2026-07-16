@@ -1,0 +1,199 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "gamestop-meme-2021-v1",
+  "caseId": "gamestop-market-structure-2021",
+  "title": "GameStop January 2021: Social-Amplification Validation Case",
+  "titleZh": "GameStop 2021 年 1 月事件：社交放大历史验证案例",
+  "summary": "A retrospective validation case grounded in GameStop SEC filings and the SEC staff's October 2021 market-structure report. Official records describe the event; all simulated market data, network propagation, beliefs, orders, and intervention effects remain synthetic.",
+  "summaryZh": "基于 GameStop SEC 文件与 SEC 工作人员 2021 年 10 月市场结构报告构建的事后验证案例。官方记录描述事件事实；所有仿真行情、网络传播、信念、订单和干预效果均为合成数据。",
+  "synthetic": true,
+  "syntheticLabel": "RETROSPECTIVE SEC FACTS; SYNTHETIC MARKET DATA AND SOCIAL MECHANISMS",
+  "syntheticLabelZh": "事后 SEC 事实；合成行情与社交传播机制",
+  "asOf": "2021-10-18T23:59:59Z",
+  "dataCutoff": "2021-10-18T23:59:59Z",
+  "eventWindow": {
+    "boardAnnouncementKnownAt": "2021-01-11T12:33:23Z",
+    "stressWindowStartsAt": "2021-01-22T14:30:00Z",
+    "stressWindowEndsAt": "2021-01-29T21:00:00Z",
+    "retrospectiveEvidenceCutoff": "2021-10-18T23:59:59Z",
+    "simulationClockNote": "The stress-window boundaries are research labels. The simulator starts at the retrospective evidence cutoff and does not replay licensed historical ticks, quotes, or orders.",
+    "simulationClockNoteZh": "压力窗口边界仅为研究标签；仿真从事后证据截止时刻启动，不重放受许可约束的历史逐笔、报价或订单。"
+  },
+  "instrument": {
+    "id": "GME",
+    "displayName": "GameStop Corp. Class A",
+    "displayNameZh": "GameStop Corp. A 类股",
+    "exchange": "New York Stock Exchange",
+    "currency": "USD",
+    "initialPrice": 100.0,
+    "initialPriceMeaning": "A normalized synthetic simulator reference; it is not an observed or split-adjusted GME price.",
+    "initialPriceMeaningZh": "归一化的合成仿真参考值，并非已观测或拆股调整后的 GME 股价。",
+    "marketDataMode": "SYNTHETIC"
+  },
+  "sources": [
+    {
+      "sourceId": "source-sec-gamestop-8k-20210111",
+      "sourceType": "OFFICIAL_REGULATORY_FILING",
+      "tier": "T1",
+      "title": "GameStop Corp. Form 8-K and Board Refreshment Release",
+      "titleZh": "GameStop Corp. 8-K 与董事会调整公告",
+      "publisher": "U.S. Securities and Exchange Commission",
+      "url": "https://www.sec.gov/Archives/edgar/data/1326380/000132638021000006/0001326380-21-000006-index.html",
+      "publishedAt": "2021-01-11T12:33:23Z",
+      "knownAt": "2021-01-11T12:33:23Z",
+      "timePrecision": "SECOND_CONVERTED_FROM_EDGAR_ET",
+      "isOfficial": true,
+      "contentHash": null,
+      "hashStatus": "NOT_CAPTURED_LINK_ONLY",
+      "snapshotPolicy": "METADATA_AND_PARAPHRASE_ONLY",
+      "simulationEligibility": "RETROSPECTIVE_VALIDATION_INPUT"
+    },
+    {
+      "sourceId": "source-sec-gamestop-10k-20210323",
+      "sourceType": "OFFICIAL_REGULATORY_FILING",
+      "tier": "T1",
+      "title": "GameStop Corp. Form 10-K for Fiscal 2020",
+      "titleZh": "GameStop Corp. 2020 财年 10-K",
+      "publisher": "U.S. Securities and Exchange Commission",
+      "url": "https://www.sec.gov/Archives/edgar/data/1326380/000132638021000032/gme-20210130.htm",
+      "publishedAt": "2021-03-23T20:39:12Z",
+      "knownAt": "2021-03-23T20:39:12Z",
+      "timePrecision": "SECOND_CONVERTED_FROM_EDGAR_ET",
+      "isOfficial": true,
+      "contentHash": null,
+      "hashStatus": "NOT_CAPTURED_LINK_ONLY",
+      "snapshotPolicy": "METADATA_AND_PARAPHRASE_ONLY",
+      "simulationEligibility": "RETROSPECTIVE_VALIDATION_INPUT"
+    },
+    {
+      "sourceId": "source-sec-gamestop-report-20211018",
+      "sourceType": "OFFICIAL_REGULATORY_STAFF_REPORT",
+      "tier": "T1",
+      "title": "Staff Report on Equity and Options Market Structure Conditions in Early 2021",
+      "titleZh": "2021 年初股票与期权市场结构状况工作人员报告",
+      "publisher": "U.S. Securities and Exchange Commission",
+      "url": "https://www.sec.gov/files/staff-report-equity-options-market-struction-conditions-early-2021.pdf",
+      "publishedAt": "2021-10-18T23:59:59Z",
+      "knownAt": "2021-10-18T23:59:59Z",
+      "timePrecision": "DATE_NORMALIZED_END_OF_DAY_UTC",
+      "isOfficial": true,
+      "contentHash": null,
+      "hashStatus": "NOT_CAPTURED_LINK_ONLY",
+      "snapshotPolicy": "METADATA_AND_PARAPHRASE_ONLY",
+      "simulationEligibility": "RETROSPECTIVE_VALIDATION_INPUT"
+    },
+    {
+      "sourceId": "source-sec-gamestop-report-release-20211018",
+      "sourceType": "OFFICIAL_REGULATORY_RELEASE",
+      "tier": "T1",
+      "title": "SEC Staff Releases Report on Equity and Options Market Structure Conditions in Early 2021",
+      "titleZh": "SEC 工作人员发布 2021 年初股票与期权市场结构报告",
+      "publisher": "U.S. Securities and Exchange Commission",
+      "url": "https://www.sec.gov/newsroom/press-releases/2021-212",
+      "publishedAt": "2021-10-18T23:59:59Z",
+      "knownAt": "2021-10-18T23:59:59Z",
+      "timePrecision": "DATE_NORMALIZED_END_OF_DAY_UTC",
+      "isOfficial": true,
+      "contentHash": null,
+      "hashStatus": "NOT_CAPTURED_LINK_ONLY",
+      "snapshotPolicy": "METADATA_AND_PARAPHRASE_ONLY",
+      "simulationEligibility": "RETROSPECTIVE_VALIDATION_INPUT"
+    },
+    {
+      "sourceId": "source-gamestop-synthetic-mechanisms",
+      "sourceType": "SYNTHETIC_RESEARCH_FIXTURE",
+      "tier": "MODEL",
+      "title": "EventShock Lab GameStop social-mechanism specification",
+      "titleZh": "EventShock Lab GameStop 合成社交机制说明",
+      "publisher": "EventShock Lab",
+      "url": null,
+      "publishedAt": "2021-10-18T23:59:59Z",
+      "knownAt": "2021-10-18T23:59:59Z",
+      "timePrecision": "SECOND",
+      "isOfficial": false,
+      "contentHash": null,
+      "hashStatus": "LOCAL_MANIFEST_ONLY",
+      "snapshotPolicy": "LOCAL_SYNTHETIC_SPECIFICATION",
+      "simulationEligibility": "SYNTHETIC_RESEARCH_FIXTURE"
+    }
+  ],
+  "defaultExperiment": {
+    "question": "How does stronger synthetic social amplification change the simulated liquidity, drawdown, and cascade distributions around a trading-restriction uncertainty signal?",
+    "questionZh": "围绕交易限制不确定性信号，更强的合成社交放大会如何改变流动性、回撤和级联分布？",
+    "intervention": {
+      "parameter": "socialAmplification",
+      "baselineValue": 1.0,
+      "interventionValue": 1.8
+    },
+    "seedCount": 10,
+    "populationSize": 56,
+    "steps": 120,
+    "seedRoot": 2021012800,
+    "market": {
+      "instrumentId": "GME",
+      "benchmarkId": "RUSSELL2000_SYNTHETIC",
+      "initialPrice": 100.0
+    }
+  },
+  "mechanismRules": {
+    "riskOffClaimId": "claim-risk-off",
+    "clarificationClaimId": "claim-clarification",
+    "amplificationParameter": "socialAmplification",
+    "amplificationInterpretation": "A dimensionless synthetic multiplier on information-network transmission and sentiment response; it is not calibrated from Reddit, account, or message data."
+  },
+  "factualBoundary": {
+    "sourceBacked": [
+      "GameStop's January 11 board announcement",
+      "Issuer-reported January price-range and volatility disclosures",
+      "SEC staff findings about accounts, short interest, broker restrictions, liquidity, and LULD pauses",
+      "SEC staff's qualified distinction between short covering and broader positive sentiment"
+    ],
+    "synthetic": [
+      "Every simulated price, return, spread, depth, order, trade, benchmark, and volume",
+      "Social graph topology, messages, beliefs, action preferences, and propagation timing",
+      "The social-amplification multiplier and trading-restriction uncertainty signal",
+      "Every simulated causal or distributional effect"
+    ]
+  },
+  "validationStatus": {
+    "level": "L5_CASE_AVAILABLE",
+    "empiricalCalibration": "PENDING_HUMAN_STUDY",
+    "claim": "This pack makes a historical validation case runnable; it does not claim that historical response tolerances have passed."
+  },
+  "limitations": [
+    {
+      "code": "RETROSPECTIVE_EVIDENCE",
+      "text": "The October SEC staff report and March issuer filing are hindsight records and were not available during the January stress window.",
+      "textZh": "SEC 10 月工作人员报告与发行人 3 月文件属于事后记录，在 1 月压力窗口期间并不可用。"
+    },
+    {
+      "code": "NO_HISTORICAL_MARKET_OR_SOCIAL_DATA",
+      "text": "The pack redistributes no historical ticks, quotes, order book, messages, user identities, Reddit content, or licensed account-level data.",
+      "textZh": "本事件包不再分发历史逐笔、报价、订单簿、消息、用户身份、Reddit 内容或受许可约束的账户级数据。"
+    },
+    {
+      "code": "SOCIAL_AMPLIFICATION_NOT_CALIBRATED",
+      "text": "The amplification multiplier is a sensitivity parameter, not an estimate derived from social-media posts, account counts, or causal identification.",
+      "textZh": "社交放大倍数是敏感性参数，不是由社交媒体帖子、账户数量或因果识别得到的估计。"
+    },
+    {
+      "code": "DIRECTIONAL_MODEL_LIMIT",
+      "text": "The current bounded sentiment-shock mechanism cannot reconstruct the full mixture of bullish attention, short covering, restrictions, and later selling documented in the event.",
+      "textZh": "当前有界情绪冲击机制无法重建事件中看涨关注、空头回补、交易限制与后续卖出的完整混合过程。"
+    },
+    {
+      "code": "NO_CAUSAL_IDENTIFICATION",
+      "text": "Paired differences are internal model contrasts under synthetic assumptions, not the real-world causal effect of social media or broker restrictions.",
+      "textZh": "配对差异是合成假设下的模型内部对比，并非社交媒体或券商限制的真实世界因果效应。"
+    },
+    {
+      "code": "NOT_INVESTMENT_ADVICE",
+      "text": "This educational validation case is not a forecast, valuation, trading signal, or investment recommendation.",
+      "textZh": "本教学验证案例不构成预测、估值、交易信号或投资建议。"
+    }
+  ],
+  "fileInventory": [
+    "manifest.json",
+    "claims.json"
+  ]
+}

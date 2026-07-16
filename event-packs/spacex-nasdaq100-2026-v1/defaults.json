@@ -1,0 +1,53 @@
+{
+  "schemaVersion": "1.0.0",
+  "eventPackId": "spacex-nasdaq100-2026-v1",
+  "defaultExperiment": {
+    "question": "How does lower market-maker capacity change liquidity and downside risk during the SpaceX Nasdaq-100 inclusion stress scenario?",
+    "questionZh": "在 SpaceX 纳入 Nasdaq-100 的压力场景中，较低的做市容量会如何改变流动性和下行风险？",
+    "intervention": {
+      "parameter": "marketMakerCapacity",
+      "baselineValue": 1.0,
+      "interventionValue": 0.65
+    },
+    "seedCount": 10,
+    "populationSize": 56,
+    "steps": 120,
+    "seedRoot": 2026070700
+  },
+  "singleInterventionPolicy": {
+    "maximumChangedParameters": 1,
+    "recommendedParameter": "marketMakerCapacity",
+    "reason": "The current engine supports a controlled paired comparison and the proposal requires one interpretable intervention."
+  },
+  "claimReview": {
+    "humanReviewRequiredBeforeFreeze": true,
+    "initiallyProposedClaimIds": [
+      "claim-limited-depth",
+      "claim-passive-execution",
+      "claim-risk-off",
+      "claim-clarification"
+    ],
+    "requiredProposedClaimIds": [
+      "claim-limited-depth",
+      "claim-passive-execution",
+      "claim-risk-off"
+    ],
+    "reviewOptions": ["HUMAN_APPROVED", "EDITED", "REJECTED"]
+  },
+  "display": {
+    "defaultLanguage": "en",
+    "supportedLanguages": ["en", "zh-CN"],
+    "alwaysShowSyntheticBadge": true,
+    "alwaysShowSourceTier": true,
+    "alwaysShowKnownAt": true,
+    "alwaysShowLimitations": true
+  },
+  "runtime": {
+    "marketDataMode": "SYNTHETIC",
+    "benchmarkDataMode": "SYNTHETIC",
+    "pairedSeeds": true,
+    "deterministicReplay": true,
+    "realTimeDataAccess": false,
+    "tradingEnabled": false
+  }
+}

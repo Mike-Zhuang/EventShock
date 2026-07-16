@@ -179,3 +179,64 @@ git clone -b develop git@github.com:username/repo-name.git
 4. 出现如下 Pull Request 页面即表示创建成功，等待管理员审核并合并。
 
 ![1764070943617](doc_images/git_use/1764070943617.png)
+
+---
+
+## 5. EventShock 的 GitHub 发布链路
+
+EventShock 正式服务器不从开发机的未提交工作区更新，也不允许先改服务器、再补 Git 提交。当前完整顺序是：
+
+```text
+本地功能分支测试与构建
+  -> commit
+  -> push 到 GitHub
+  -> GitHub CI 全绿
+  -> 宝塔每 10 分钟触发服务器匿名拉取
+  -> 目标 commit 健康检查通过后切换版本
+```
+
+当前服务器固定轮询 `codex/self-hosted-mvp`。在项目根目录执行：
+
+```bash
+git switch codex/self-hosted-mvp
+git fetch origin
+git status --short
+```
+
+提交前必须按仓库说明运行后端与前端检查。前端的 `frontend/dist` 是生产发布工件，必须重新构建并与源码一起提交：
+
+```bash
+cd frontend
+npm ci
+npm run typecheck
+npm test
+npm run build
+cd ..
+
+# 以下示例对应同时修改前端、后端和测试的发布；其他文件仍应按实际范围逐项添加。
+git add frontend/src frontend/dist backend tests
+git diff --cached --check
+git diff --cached --stat
+git commit -m "feat: describe the completed change"
+git push --set-upstream origin codex/self-hosted-mvp
+```
+
+推送后再次 fetch，并确认本地与 GitHub 分支的 SHA 一致：
+
+```bash
+git fetch origin
+git rev-parse HEAD
+git rev-parse origin/codex/self-hosted-mvp
+```
+
+服务器不会仅因分支出现新提交就部署。目标 SHA 的以下三项 GitHub 检查必须全部以 `success` 完成：
+
+- `Backend / Python 3.12.13`
+- `Frontend / Node 22`
+- `Production container`
+
+检查尚未结束时，服务器任务只记录 `WAIT_CI`；检查失败时记录 `CI_BLOCKED`。服务器以匿名 HTTPS 更新裸仓库镜像，拒绝 force-push、rebase 等非快进历史，并用 `git archive` 提取已通过检查的确定 commit。新发布必须通过容器健康检查和带目标 commit SHA 的公网 `/api/health` 检查，否则自动恢复上一版本。
+
+功能稳定后仍需创建 Pull Request，经 Review Approve 后才可合入稳定分支。禁止直接向 `main` 推送。服务器将来切换到稳定分支时，应修改服务器 root 配置并重新验证三项 CI 与快进关系，而不是在本地跳过 PR 流程。
+
+完整的宝塔任务注册、日志位置、回滚和运维命令见[自有服务器部署指南](server-deploy.md)。

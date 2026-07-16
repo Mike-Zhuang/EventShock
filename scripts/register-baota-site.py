@@ -1,0 +1,580 @@
+#!/www/server/panel/pyenv/bin/python3
+"""用宝塔自身站点/反代 API 注册 EventShock，并限制 Nginx 只监听 Docker 网关。"""
+
+import argparse
+import glob
+import ipaddress
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import time
+import urllib.request
+
+PANEL_ROOT = "/www/server/panel"
+SITE_NAME = "eventshock.mikezhuang.cn"
+SITE_PATH = "/www/wwwroot/eventshock.mikezhuang.cn"
+SITE_PORT = 18080
+APP_URL = "http://127.0.0.1:18000"
+NGINX_BINARY = "/www/server/nginx/sbin/nginx"
+VHOST_PATH = f"/www/server/panel/vhost/nginx/{SITE_NAME}.conf"
+DEFAULT_VHOST_PATH = "/www/server/panel/vhost/nginx/0.default.conf"
+DISABLED_DEFAULT_VHOST_PATH = DEFAULT_VHOST_PATH + ".eventshock-disabled"
+EXTENSION_DIR = f"/www/server/panel/vhost/nginx/extension/{SITE_NAME}"
+EXTENSION_PATH = os.path.join(EXTENSION_DIR, "99-eventshock.conf")
+NGINX_INIT_SCRIPT = "/etc/init.d/nginx"
+SITE_TOTAL_SOCKET = "/tmp/site_total.sock"
+SITE_TOTAL_EXTENSION_PATH = os.path.join(EXTENSION_DIR, "site_total.conf")
+SITE_TOTAL_DATA_GLOB = f"/www/server/site_total/data/total/{SITE_NAME}/*.json"
+
+
+def loadPanelModules():
+    os.chdir(PANEL_ROOT)
+    sys.path.insert(0, PANEL_ROOT)
+    sys.path.insert(0, os.path.join(PANEL_ROOT, "class"))
+    import public  # pylint: disable=import-outside-toplevel
+    from firewalls import firewalls  # pylint: disable=import-outside-toplevel
+    from mod.base.free_site_total import (  # pylint: disable=import-outside-toplevel
+        SiteTotalConfig,
+    )
+    from panelSite import panelSite  # pylint: disable=import-outside-toplevel
+
+    return public, panelSite, firewalls, SiteTotalConfig
+
+
+def validateListenAddress(value):
+    address = ipaddress.ip_address(value)
+    if address.version != 4 or not address.is_private or address.is_loopback:
+        raise RuntimeError("Nginx 监听地址必须是私有 IPv4 Docker host-gateway")
+    listenAddress = str(address)
+
+    containerIds = subprocess.check_output(
+        [
+            "docker",
+            "ps",
+            "--filter",
+            "label=com.docker.compose.project=eventshock",
+            "--filter",
+            "label=com.docker.compose.service=caddy",
+            "--format",
+            "{{.ID}}",
+        ],
+        text=True,
+    ).split()
+    if len(containerIds) != 1:
+        raise RuntimeError("无法唯一识别正在运行的 EventShock Caddy 容器")
+    resolvedAddress = subprocess.check_output(
+        ["docker", "exec", containerIds[0], "getent", "hosts", "host.docker.internal"],
+        text=True,
+    ).split()[0]
+    if resolvedAddress != listenAddress:
+        raise RuntimeError(
+            f"监听地址 {listenAddress} 与 Caddy host.docker.internal={resolvedAddress} 不一致"
+        )
+
+    dockerAddresses = re.findall(
+        r"\binet\s+([0-9.]+)/",
+        subprocess.check_output(["ip", "-4", "-o", "address", "show", "docker0"], text=True),
+    )
+    if listenAddress not in dockerAddresses:
+        raise RuntimeError("Caddy host-gateway 并非宿主机 docker0 地址，拒绝继续")
+    return listenAddress, containerIds[0]
+
+
+def caddyNetwork(containerId):
+    container = json.loads(subprocess.check_output(["docker", "inspect", containerId], text=True))[
+        0
+    ]
+    networks = container.get("NetworkSettings", {}).get("Networks", {})
+    if len(networks) != 1:
+        raise RuntimeError("Caddy 必须只连接一个 EventShock Docker 网络")
+    network = next(iter(networks.values()))
+    address = network.get("IPAddress")
+    prefixLength = network.get("IPPrefixLen")
+    if not address or not prefixLength:
+        raise RuntimeError("无法读取 Caddy Docker 网络范围")
+    trustedNetwork = ipaddress.ip_network(f"{address}/{prefixLength}", strict=False)
+    if trustedNetwork.version != 4 or not trustedNetwork.is_private:
+        raise RuntimeError("Caddy Docker 网络不是私有 IPv4 范围")
+    return str(trustedNetwork)
+
+
+def checkApplicationHealth():
+    request = urllib.request.Request(APP_URL + "/api/health", method="GET")
+    with urllib.request.urlopen(request, timeout=5) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if payload.get("status") != "ok":
+        raise RuntimeError("应用回环健康检查失败")
+
+
+def addSite(publicModule, panelSiteClass):
+    parameters = publicModule.to_dict_obj(
+        {
+            "webname": json.dumps({"domain": SITE_NAME, "domainlist": [], "count": 0}),
+            "path": SITE_PATH,
+            "port": str(SITE_PORT),
+            "version": "00",
+            "ps": "EventShock Lab（Caddy TLS → 宝塔 Nginx → FastAPI）",
+            "ftp": "false",
+            "sql": "false",
+            "type_id": 0,
+            "project_type": "PHP",
+        }
+    )
+    # multiple=1 会跳过 AddSite 末尾的 serviceReload；在 listener 收口前绝不能
+    # 让宝塔尝试启动 Nginx。
+    result = panelSiteClass().AddSite(parameters, multiple=1)
+    if isinstance(result, dict) and result.get("status") is False:
+        raise RuntimeError("宝塔 AddSite 失败：{}".format(result.get("msg", result)))
+    return result
+
+
+def removeOwnedFirewallRules(publicModule, firewallsClass):
+    rules = (
+        publicModule.M("firewall").where("port=?", (str(SITE_PORT),)).field("id,port,ps").select()
+    )
+    for rule in rules:
+        if rule.get("ps") != SITE_NAME:
+            raise RuntimeError("18080 已存在非 EventShock 防火墙规则，拒绝自动修改")
+        result = firewallsClass().DelAcceptPort(
+            publicModule.to_dict_obj({"id": int(rule["id"]), "port": str(SITE_PORT)})
+        )
+        if not result.get("status"):
+            raise RuntimeError("宝塔自动放行了 18080，但撤销该规则失败")
+
+
+def assertInternalPortClosed(publicModule):
+    if publicModule.M("firewall").where("port=?", (str(SITE_PORT),)).count():
+        raise RuntimeError("宝塔防火墙数据库仍包含 18080 放行规则")
+    if os.path.isfile("/usr/sbin/ufw"):
+        ufwStatus = subprocess.check_output(["ufw", "status"], text=True)
+        if "Status: active" in ufwStatus and re.search(
+            rf"(?m)^\s*{SITE_PORT}(?:/tcp)?\s+ALLOW", ufwStatus
+        ):
+            raise RuntimeError("UFW 仍对外放行 18080")
+    if os.path.isfile("/usr/bin/firewall-cmd"):
+        activeZones = subprocess.check_output(["firewall-cmd", "--get-active-zones"], text=True)
+        zones = [
+            line.split()[0] for line in activeZones.splitlines() if line and not line[0].isspace()
+        ]
+        defaultZone = subprocess.check_output(
+            ["firewall-cmd", "--get-default-zone"], text=True
+        ).strip()
+        for zone in sorted(set(zones + [defaultZone])):
+            if (
+                zone
+                and subprocess.call(
+                    [
+                        "firewall-cmd",
+                        "--quiet",
+                        "--zone",
+                        zone,
+                        "--query-port",
+                        f"{SITE_PORT}/tcp",
+                    ]
+                )
+                == 0
+            ):
+                raise RuntimeError(f"firewalld zone={zone} 仍对外放行 18080")
+
+
+def ensureProxy(publicModule, panelSiteClass):
+    proxyParameters = publicModule.to_dict_obj(
+        {
+            "proxyname": "EventShock FastAPI",
+            "sitename": SITE_NAME,
+            "proxydir": "/",
+            "proxysite": APP_URL,
+            "todomain": "$host",
+            "type": "1",
+            "cache": "0",
+            "subfilter": "[]",
+            "advanced": "0",
+            "cachetime": "1",
+            "nocheck": "1",
+        }
+    )
+    proxyList = panelSiteClass().GetProxyList(publicModule.to_dict_obj({"sitename": SITE_NAME}))
+    for proxy in proxyList:
+        if proxy.get("proxyname") == "EventShock FastAPI":
+            if (
+                proxy.get("proxysite") != APP_URL
+                or proxy.get("proxydir") != "/"
+                or proxy.get("todomain") != "$host"
+                or int(proxy.get("type", 0)) != 1
+                or int(proxy.get("cache", 1)) != 0
+                or int(proxy.get("advanced", 1)) != 0
+                or bool(proxy.get("subfilter"))
+            ):
+                raise RuntimeError("同名宝塔反向代理配置与预期不一致")
+            if proxyConfigurationPresent():
+                return proxy
+            removeResult = panelSiteClass().RemoveProxy(proxyParameters, multiple=1)
+            if not removeResult or not removeResult.get("status"):
+                raise RuntimeError("宝塔代理记录存在但配置缺失，且自动修复删除失败")
+            break
+    result = panelSiteClass().CreateProxy(proxyParameters)
+    if not result.get("status"):
+        raise RuntimeError("宝塔 CreateProxy 失败：{}".format(result.get("msg", result)))
+    return result
+
+
+def proxyConfigurationPresent():
+    proxyRoot = f"/www/server/panel/vhost/nginx/proxy/{SITE_NAME}"
+    if not os.path.isdir(proxyRoot):
+        return False
+    for fileName in os.listdir(proxyRoot):
+        filePath = os.path.join(proxyRoot, fileName)
+        if not fileName.endswith(".conf") or not os.path.isfile(filePath):
+            continue
+        content = open(filePath).read()
+        if f"proxy_pass {APP_URL}" in content and "proxy_set_header Host $host" in content:
+            return True
+    return False
+
+
+def disableDefaultPublicVhost():
+    if not os.path.isfile(DEFAULT_VHOST_PATH):
+        return
+    content = open(DEFAULT_VHOST_PATH).read()
+    if not re.search(r"(?m)^\s*server_name\s+_;\s*$", content):
+        raise RuntimeError("0.default.conf 似乎不是宝塔默认站点，拒绝自动停用")
+    if not re.search(r"(?m)^\s*listen\s+(?:\[::\]:|(?:0\.0\.0\.0:)?)80\b", content):
+        raise RuntimeError("0.default.conf 不包含预期的默认 80 listener，拒绝自动停用")
+    if os.path.exists(DISABLED_DEFAULT_VHOST_PATH):
+        raise RuntimeError("默认 vhost 的停用备份已存在，拒绝覆盖")
+    os.replace(DEFAULT_VHOST_PATH, DISABLED_DEFAULT_VHOST_PATH)
+
+
+def atomicWrite(path, content, mode=0o644):
+    temporaryPath = path + ".eventshock-next"
+    with open(temporaryPath, "wb") as output:
+        output.write(content if isinstance(content, bytes) else content.encode("utf-8"))
+        output.flush()
+        os.fsync(output.fileno())
+    os.chmod(temporaryPath, mode)
+    os.replace(temporaryPath, path)
+
+
+def snapshotFiles(paths):
+    snapshots = {}
+    for path in paths:
+        if os.path.isfile(path):
+            snapshots[path] = (open(path, "rb").read(), os.stat(path).st_mode & 0o777)
+        else:
+            snapshots[path] = None
+    return snapshots
+
+
+def restoreFiles(snapshots):
+    for path, snapshot in snapshots.items():
+        if snapshot is None:
+            if os.path.exists(path):
+                os.remove(path)
+            continue
+        parent = os.path.dirname(path)
+        if not os.path.isdir(parent):
+            os.makedirs(parent, 0o755)
+        atomicWrite(path, snapshot[0], snapshot[1])
+
+
+def restrictVhostListener(listenAddress, trustedCaddyNetwork):
+    if not os.path.isfile(VHOST_PATH):
+        raise RuntimeError("宝塔没有生成 EventShock Nginx vhost")
+    content = open(VHOST_PATH).read()
+    content = re.sub(
+        r"(?m)^\s*listen\s+(?:[0-9.]+:)?18080;\s*$",
+        f"    listen {listenAddress}:{SITE_PORT};",
+        content,
+    )
+    content = re.sub(r"(?m)^\s*listen\s+\[::\]:18080;\s*$", "", content)
+    expected = f"listen {listenAddress}:{SITE_PORT};"
+    if content.count(expected) != 1:
+        raise RuntimeError("无法把 EventShock vhost 唯一绑定到 Docker host-gateway")
+    atomicWrite(VHOST_PATH, content, os.stat(VHOST_PATH).st_mode & 0o777)
+
+    if not os.path.isdir(EXTENSION_DIR):
+        os.makedirs(EXTENSION_DIR, 0o755)
+    os.chmod(EXTENSION_DIR, 0o755)
+    atomicWrite(
+        EXTENSION_PATH,
+        "client_max_body_size 2m;\n"
+        "proxy_cache off;\n"
+        "proxy_buffering off;\n"
+        "proxy_no_cache 1;\n"
+        "proxy_cache_bypass 1;\n"
+        "proxy_connect_timeout 5s;\n"
+        "proxy_send_timeout 300s;\n"
+        "proxy_read_timeout 300s;\n"
+        f"set_real_ip_from {trustedCaddyNetwork};\n"
+        "real_ip_header X-Forwarded-For;\n"
+        "real_ip_recursive on;\n",
+    )
+
+
+def listenerPort(endpoint):
+    if endpoint.isdigit():
+        return int(endpoint)
+    match = re.search(r":(\d+)$", endpoint)
+    return int(match.group(1)) if match else None
+
+
+def validateEffectiveNginxConfig(listenAddress):
+    subprocess.check_call([NGINX_BINARY, "-t"])
+    effectiveConfig = subprocess.check_output(
+        [NGINX_BINARY, "-T"], stderr=subprocess.STDOUT, text=True
+    )
+    endpoints = [
+        directive.split()[0]
+        for directive in re.findall(r"(?m)^\s*listen\s+([^;]+);", effectiveConfig)
+    ]
+    expectedEndpoint = f"{listenAddress}:{SITE_PORT}"
+    if endpoints != [expectedEndpoint]:
+        raise RuntimeError(
+            "宝塔 Nginx 只允许一个内部 listener；实际为：{}".format(
+                ", ".join(endpoints) or "<none>"
+            )
+        )
+
+
+def nginxIsRunning():
+    return (
+        subprocess.call(
+            [NGINX_INIT_SCRIPT, "status"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        == 0
+    )
+
+
+def validateAndStartNginx(listenAddress):
+    isRunning = nginxIsRunning()
+    action = "reload" if isRunning else "start"
+    subprocess.check_call([NGINX_INIT_SCRIPT, action])
+
+    listeners = subprocess.check_output(["ss", "-H", "-ltnp"], text=True)
+    nginxListeners = []
+    for line in listeners.splitlines():
+        if "nginx" not in line:
+            continue
+        fields = line.split()
+        if len(fields) >= 4:
+            nginxListeners.append(fields[3])
+    expectedListener = f"{listenAddress}:{SITE_PORT}"
+    if sorted(set(nginxListeners)) != [expectedListener]:
+        raise RuntimeError(
+            "Nginx 进程监听不符合唯一内部端口约束：{}".format(", ".join(nginxListeners) or "<none>")
+        )
+
+    request = urllib.request.Request(
+        f"http://{listenAddress}:{SITE_PORT}/api/health",
+        headers={"Host": SITE_NAME},
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if payload.get("status") != "ok":
+        raise RuntimeError("宝塔 Nginx 反向代理健康检查失败")
+
+
+def enableSiteTraffic(siteTotalConfigClass, siteId):
+    result = siteTotalConfigClass().one_site_status(int(siteId), True)
+    if result:
+        raise RuntimeError(f"启用宝塔 free_site_total 失败：{result}")
+
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if (
+            os.path.isfile(SITE_TOTAL_EXTENSION_PATH)
+            and os.path.exists(SITE_TOTAL_SOCKET)
+            and stat.S_ISSOCK(os.stat(SITE_TOTAL_SOCKET).st_mode)
+            and subprocess.call(["systemctl", "is-active", "--quiet", "site_total"]) == 0
+        ):
+            break
+        time.sleep(1)
+    else:
+        raise RuntimeError("宝塔 free_site_total 服务、Unix socket 或站点配置未就绪")
+
+    content = open(SITE_TOTAL_EXTENSION_PATH).read()
+    expectedTag = f"tag={int(siteId)}__access"
+    if SITE_TOTAL_SOCKET not in content or expectedTag not in content:
+        raise RuntimeError("宝塔站点流量统计配置未绑定正确的站点 ID 或 Unix socket")
+
+    config = siteTotalConfigClass().get_status()
+    enabledSiteIds = {
+        int(item["site_id"]) for item in config.get("sites", []) if item.get("is_open")
+    }
+    if not config.get("is_open", False) or int(siteId) not in enabledSiteIds:
+        raise RuntimeError("宝塔 free_site_total 配置未显示 EventShock 已启用")
+
+
+def siteTrafficRequests():
+    requestCount = 0
+    for filePath in glob.glob(SITE_TOTAL_DATA_GLOB):
+        try:
+            payload = json.loads(open(filePath).read())
+            requestCount += int(payload.get("requests", 0))
+        except (OSError, ValueError, TypeError):
+            continue
+    return requestCount
+
+
+def validateSiteTraffic(listenAddress, previousRequests):
+    for sequence in range(3):
+        request = urllib.request.Request(
+            f"http://{listenAddress}:{SITE_PORT}/api/health?baota-stat-check={sequence}",
+            headers={
+                "Host": SITE_NAME,
+                "User-Agent": "EventShock-BaoTa-Validation",
+            },
+            method="GET",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            if response.status != 200:
+                raise RuntimeError("宝塔流量统计验证请求失败")
+
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if siteTrafficRequests() >= previousRequests + 3:
+            return
+        time.sleep(1)
+    raise RuntimeError("真实请求未写入宝塔 free_site_total 统计数据")
+
+
+def currentSite(publicModule):
+    return (
+        publicModule.M("sites")
+        .where("name=?", (SITE_NAME,))
+        .field("id,name,path,status,ps,project_type,addtime")
+        .find()
+    )
+
+
+def validateCurrentSite(publicModule, site):
+    if (
+        not site
+        or site.get("project_type") != "PHP"
+        or site.get("path") != SITE_PATH
+        or str(site.get("status")) != "1"
+    ):
+        raise RuntimeError("宝塔站点状态、路径或项目类型与预期不一致")
+    domain = (
+        publicModule.M("domain")
+        .where("pid=? and name=? and port=?", (int(site["id"]), SITE_NAME, SITE_PORT))
+        .field("id,pid,name,port")
+        .find()
+    )
+    if not domain:
+        raise RuntimeError("宝塔站点缺少 eventshock.mikezhuang.cn:18080 域名记录")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--listen-address", required=True)
+    parser.add_argument("--show", action="store_true")
+    arguments = parser.parse_args()
+
+    if not os.path.isfile(NGINX_BINARY):
+        raise RuntimeError("宝塔 Nginx 尚未安装")
+    listenAddress, caddyContainerId = validateListenAddress(arguments.listen_address)
+    trustedCaddyNetwork = caddyNetwork(caddyContainerId)
+    publicModule, panelSiteClass, firewallsClass, siteTotalConfigClass = loadPanelModules()
+    site = currentSite(publicModule)
+    if arguments.show:
+        trafficConfig = siteTotalConfigClass().get_status()
+        print(
+            json.dumps(
+                {
+                    "status": True,
+                    "site": site or None,
+                    "listen": f"{listenAddress}:{SITE_PORT}",
+                    "trustedCaddyNetwork": trustedCaddyNetwork,
+                    "siteTotal": {
+                        "config": trafficConfig,
+                        "serviceActive": subprocess.call(
+                            ["systemctl", "is-active", "--quiet", "site_total"]
+                        )
+                        == 0,
+                        "socketReady": os.path.exists(SITE_TOTAL_SOCKET)
+                        and stat.S_ISSOCK(os.stat(SITE_TOTAL_SOCKET).st_mode),
+                        "extensionReady": os.path.isfile(SITE_TOTAL_EXTENSION_PATH),
+                        "requests": siteTrafficRequests(),
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+        return
+
+    checkApplicationHealth()
+    wasNginxRunning = nginxIsRunning()
+    if not site:
+        addSite(publicModule, panelSiteClass)
+        site = currentSite(publicModule)
+    # AddSite 可能自动把站点端口写入宝塔防火墙；18080 只允许 Docker
+    # 网关访问。每次运行都做幂等清理，避免上次中途失败留下规则。
+    removeOwnedFirewallRules(publicModule, firewallsClass)
+    validateCurrentSite(publicModule, site)
+    assertInternalPortClosed(publicModule)
+
+    managedPaths = [
+        VHOST_PATH,
+        DEFAULT_VHOST_PATH,
+        DISABLED_DEFAULT_VHOST_PATH,
+        EXTENSION_PATH,
+        SITE_TOTAL_EXTENSION_PATH,
+    ]
+    snapshots = snapshotFiles(managedPaths)
+    try:
+        # CreateProxy 会调用宝塔 serviceReload，故必须先把所有 listener 收口。
+        disableDefaultPublicVhost()
+        restrictVhostListener(listenAddress, trustedCaddyNetwork)
+        validateEffectiveNginxConfig(listenAddress)
+
+        ensureProxy(publicModule, panelSiteClass)
+        # 宝塔生成代理配置时可能重写主 vhost；再次强制并验证内部监听。
+        restrictVhostListener(listenAddress, trustedCaddyNetwork)
+        enableSiteTraffic(siteTotalConfigClass, int(site["id"]))
+        trafficRequestsBefore = siteTrafficRequests()
+        validateEffectiveNginxConfig(listenAddress)
+        validateAndStartNginx(listenAddress)
+        validateSiteTraffic(listenAddress, trafficRequestsBefore)
+    except Exception as originalError:
+        restoreFiles(snapshots)
+        if wasNginxRunning:
+            try:
+                subprocess.check_call([NGINX_BINARY, "-t"])
+                subprocess.check_call([NGINX_INIT_SCRIPT, "reload"])
+            except Exception as recoveryError:
+                raise RuntimeError("宝塔配置失败，且恢复原 Nginx 配置也失败") from recoveryError
+        else:
+            subprocess.call([NGINX_INIT_SCRIPT, "stop"])
+            if nginxIsRunning():
+                raise RuntimeError("宝塔配置失败，且 Nginx 未能保持停止状态") from originalError
+        raise originalError
+
+    print(
+        json.dumps(
+            {
+                "status": True,
+                "message": "宝塔 PHP 项目与真实反向代理已注册",
+                "site": currentSite(publicModule),
+                "listen": f"{listenAddress}:{SITE_PORT}",
+                "upstream": APP_URL,
+                "trustedCaddyNetwork": trustedCaddyNetwork,
+                "siteTotalRequests": siteTrafficRequests(),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as error:
+        print(json.dumps({"status": False, "error": str(error)}, ensure_ascii=False))
+        sys.exit(1)

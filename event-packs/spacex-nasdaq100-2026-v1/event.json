@@ -1,0 +1,63 @@
+{
+  "schemaVersion": "1.0.0",
+  "eventPackId": "spacex-nasdaq100-2026-v1",
+  "eventId": "event-spacex-nasdaq100-fast-entry-2026",
+  "eventType": "INDEX_FAST_ENTRY",
+  "title": "SpaceX joins the Nasdaq-100 before the July 7, 2026 market open",
+  "titleZh": "SpaceX 于 2026 年 7 月 7 日开盘前加入 Nasdaq-100",
+  "issuerEntityId": "entity-spacex",
+  "instrumentEntityId": "entity-spcx-class-a",
+  "indexEntityId": "entity-nasdaq100",
+  "announcement": {
+    "knownAt": "2026-06-27T00:00:00Z",
+    "originalTimestamp": "2026-06-26 20:00 America/New_York",
+    "sourceIds": [
+      "source-nasdaq-inclusion-20260626",
+      "source-globenewswire-inclusion-time-20260626"
+    ],
+    "pointInTimeConstraint": "No announcement-derived claim may be visible before knownAt."
+  },
+  "effectiveSchedule": {
+    "officialWording": "Before market open on July 7, 2026",
+    "effectiveBefore": "2026-07-07T13:30:00Z",
+    "timePrecision": "MARKET_OPEN_BOUNDARY",
+    "sourceIds": ["source-nasdaq-inclusion-20260626"],
+    "note": "The boundary represents the normal 09:30 America/New_York open and is not an exchange-published exact effective second.",
+    "noteZh": "该边界代表美国东部时间正常开盘 09:30，并非交易所发布的精确到秒生效时间。"
+  },
+  "researchQuestion": "How does reducing synthetic market-maker capacity from 1.0 to 0.65 change the simulated liquidity and downside-risk distribution while the factual event record is held fixed?",
+  "researchQuestionZh": "在真实事件记录保持不变时，将合成做市容量从 1.0 降至 0.65 会如何改变仿真的流动性和下行风险分布？",
+  "singleIntervention": {
+    "parameter": "marketMakerCapacity",
+    "baselineValue": 1.0,
+    "interventionValue": 0.65,
+    "classification": "SYNTHETIC_DEPTH_PROXY",
+    "isObserved": false
+  },
+  "factualBoundary": {
+    "sourceBacked": [
+      "IPO filing, pricing, trading start, and closing",
+      "Nasdaq-100 methodology, announcement, and effective schedule",
+      "FTSE Russell fast-entry notices",
+      "Senior-notes financing disclosures",
+      "FCC authorization and NASA OIG program-risk context"
+    ],
+    "synthetic": [
+      "Market and benchmark paths",
+      "Displayed depth and spreads",
+      "Passive-flow execution schedule",
+      "Concurrent risk-off flow",
+      "Clarification timing",
+      "Agent beliefs, preferences, orders, and all simulated outcomes"
+    ],
+    "excludedFromSimulation": [
+      "Reuters/JPMorgan post-cutoff passive-flow estimate",
+      "Any unlicensed SPCX, NDX, QQQ, tick, order-book, or volume series",
+      "Any inferred free-float value"
+    ]
+  },
+  "observationCutoff": "2026-07-07T13:30:00Z",
+  "causalClaimAllowed": false,
+  "forecastAllowed": false,
+  "investmentUseAllowed": false
+}

@@ -1,0 +1,71 @@
+{
+  "schemaVersion": "1.0.0",
+  "eventPackId": "spacex-nasdaq100-2026-v1",
+  "engineVersion": "eventshock-simulation-mvp-0.1.0",
+  "calibrationStatus": "SYNTHETIC_MECHANISM_CALIBRATION",
+  "historicallyEstimated": false,
+  "factualInputs": [
+    {
+      "name": "referencePrice",
+      "value": 135.0,
+      "unit": "USD",
+      "sourceClaimId": "claim-ipo-priced",
+      "use": "Stable simulator price anchor only",
+      "warning": "Not a July 7 observed price"
+    }
+  ],
+  "intervention": {
+    "parameter": "marketMakerCapacity",
+    "parameterClass": "SYNTHETIC_DEPTH_PROXY",
+    "baselineValue": 1.0,
+    "interventionValue": 0.65,
+    "allowedRange": {"minimum": 0.15, "maximum": 3.0},
+    "interpretation": "A dimensionless multiplier controlling synthetic market-maker displayed quantity and quote width.",
+    "interpretationZh": "控制合成做市商可见挂单数量和报价宽度的无量纲乘数。",
+    "observedSpcxStatistic": false
+  },
+  "fixedEngineParameters": {
+    "initialPriceTicks": 13500,
+    "tickCurrencyValue": 0.01,
+    "priceCollarBps": 180.0,
+    "shockStepFraction": 0.22,
+    "riskOffFundamentalJumpTicks": -34.0,
+    "slowRecoveryTicksPerStep": 0.32,
+    "recoveryBeginsStepsAfterShock": 8,
+    "marketMakerBaseQuantityAtCapacityOne": 13,
+    "openingBookLevelsPerSide": 4,
+    "marketMakerLevelsPerSide": 3,
+    "syntheticRiskOffFlowQuantities": [22, 25, 28, 31],
+    "syntheticRiskOffFlowSide": "SELL"
+  },
+  "heldConstantParameters": {
+    "socialAmplification": 1.0,
+    "stopLossSensitivity": 1.0,
+    "clarificationDelay": 1.0,
+    "populationSize": 56,
+    "steps": 120,
+    "seedCount": 10,
+    "seedRoot": 2026070700
+  },
+  "agentPopulation": {
+    "generatedBy": "backend.app.simulation.agents.buildPopulation",
+    "classification": "SYNTHETIC",
+    "realInvestorIdentitiesUsed": false,
+    "realPortfolioDataUsed": false,
+    "llmBeliefsSetPricesDirectly": false
+  },
+  "excludedEstimates": [
+    {
+      "name": "JPMorgan-attributed passive-flow estimate",
+      "value": 4300000000,
+      "currency": "USD",
+      "sourceId": "source-reuters-jpm-estimate-20260707",
+      "reason": "Its conservative known-at time is after the simulation cutoff and its estimation method and uncertainty range are not available in the Event Pack."
+    }
+  ],
+  "recalibrationPolicy": {
+    "licensedDataRequiredForHistoricalCalibration": true,
+    "requiredData": ["Point-in-time SPCX trades or bars", "Point-in-time benchmark series", "Spread or depth observations", "Documented corporate-action timing"],
+    "publicFallback": "Keep synthetic calibration and preserve every synthetic label."
+  }
+}

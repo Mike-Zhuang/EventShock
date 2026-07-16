@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "1.0.0",
+  "eventPackId": "spacex-nasdaq100-2026-v1",
+  "algorithm": "SHA-256",
+  "scope": "UTF-8 bytes of every local JSON file except checksums.json",
+  "generatedAt": "2026-07-16T03:45:40Z",
+  "files": {
+    "benchmark.json": "sha256:cafc8c6bc62920a330320e306566d91547e8ed97e666d460936d827ea3f8828f",
+    "calibration.json": "sha256:70d713d624c8b56cc2ddb890b382f690226d91aa836416e71559255a97df22a2",
+    "claims.json": "sha256:c3a18edb14b1c8f92a970b5e9e6b37b36080b7c0213dcd8eac6f897e4283a57d",
+    "defaults.json": "sha256:71c6a8d87a530093353fe72cc13bca3712796637941797e4848fdd4415cc2977",
+    "entities.json": "sha256:644b3fd5a1314353b753037ae9f8133869fb516ae6dba919df9297e36fc3a95e",
+    "event.json": "sha256:4ff79f2a01b7192fff390d087a7968b5a616a6f947ce4e709dc5fae2091242e7",
+    "instrument.json": "sha256:ddcb9696dac8e9c2b02f27dc07587dd18f0edb069241ceba5f427e00739ca8bb",
+    "limitations.json": "sha256:1372e6fd3b5f0973bf3383d403c72675cd6c05f513e454b46fb6545bfac6adbc",
+    "manifest.json": "sha256:c7b8e02a0a9e8c98b61629ed5eda199a6a9366afeed56086e24e03252250244f",
+    "market.json": "sha256:dc07f62d563c8166c99a360aa82cd62a6029c90fa1c4ec93b7cfcc930ce7fa9e",
+    "sources.json": "sha256:070610f73946a50de9f1ec236afcc01bb05ad272d17bbe2ecf129391df74c5b2",
+    "timeline.json": "sha256:dfe3e2fab53d6b9564d12d92613e773f4f1bb1562a8cb239613fe5e2c0c60836",
+    "validation.json": "sha256:e89b24e2848e9fdf033908170cfdca612eefc0c4017db84794662e98c53f59c6"
+  }
+}

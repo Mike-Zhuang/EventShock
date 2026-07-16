@@ -1,0 +1,211 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "crowdstrike-outage-2024-v1",
+  "caseId": "crowdstrike-channel-file-291-2024",
+  "title": "CrowdStrike Channel File 291: Clarification-Timing Validation Case",
+  "titleZh": "CrowdStrike Channel File 291：澄清时机历史验证案例",
+  "summary": "A retrospective, source-backed validation case for the July 19, 2024 Windows outage. Incident facts come from SEC, CrowdStrike, and Microsoft records; every market path, investor response, transmission mechanism, and counterfactual effect is synthetic.",
+  "summaryZh": "针对 2024 年 7 月 19 日 Windows 故障构建的事后可追溯验证案例。事件事实来自 SEC、CrowdStrike 和 Microsoft 官方记录；所有行情路径、投资者反应、传播机制及反事实效果均为合成数据。",
+  "synthetic": true,
+  "syntheticLabel": "RETROSPECTIVE OFFICIAL FACTS; SYNTHETIC MARKET DATA AND MECHANISMS",
+  "syntheticLabelZh": "事后官方事实；合成行情与市场机制",
+  "asOf": "2024-08-06T23:59:59Z",
+  "dataCutoff": "2024-08-06T23:59:59Z",
+  "eventWindow": {
+    "updateReleasedAt": "2024-07-19T04:09:00Z",
+    "updateRevertedAt": "2024-07-19T05:27:00Z",
+    "retrospectiveEvidenceCutoff": "2024-08-06T23:59:59Z",
+    "simulationClockNote": "The simulator starts at the retrospective evidence cutoff. It is a mechanism-validation replay, not a reconstruction of the historical order book or a point-in-time trading exercise.",
+    "simulationClockNoteZh": "仿真从事后证据截止时刻启动；这是机制验证重放，不是历史订单簿重建，也不是当时点交易实验。"
+  },
+  "instrument": {
+    "id": "CRWD",
+    "displayName": "CrowdStrike Holdings, Inc. Class A",
+    "displayNameZh": "CrowdStrike Holdings, Inc. A 类股",
+    "exchange": "Nasdaq Stock Market",
+    "currency": "USD",
+    "initialPrice": 100.0,
+    "initialPriceMeaning": "A normalized synthetic simulator reference; it is not an observed CRWD price.",
+    "initialPriceMeaningZh": "归一化的合成仿真参考值，并非已观测 CRWD 股价。",
+    "marketDataMode": "SYNTHETIC"
+  },
+  "sources": [
+    {
+      "sourceId": "source-crowdstrike-ceo-20240719",
+      "sourceType": "OFFICIAL_ISSUER_RELEASE",
+      "tier": "T1",
+      "title": "To Our Customers and Partners",
+      "titleZh": "致客户与合作伙伴",
+      "publisher": "CrowdStrike",
+      "url": "https://www.crowdstrike.com/en-us/blog/to-our-customers-and-partners/",
+      "publishedAt": "2024-07-19T23:59:59Z",
+      "knownAt": "2024-07-19T23:59:59Z",
+      "timePrecision": "DATE_NORMALIZED_END_OF_DAY_UTC",
+      "isOfficial": true,
+      "contentHash": null,
+      "hashStatus": "NOT_CAPTURED_LINK_ONLY",
+      "snapshotPolicy": "METADATA_AND_PARAPHRASE_ONLY",
+      "simulationEligibility": "RETROSPECTIVE_VALIDATION_INPUT"
+    },
+    {
+      "sourceId": "source-microsoft-impact-20240720",
+      "sourceType": "OFFICIAL_PLATFORM_RELEASE",
+      "tier": "T1",
+      "title": "Helping our customers through the CrowdStrike outage",
+      "titleZh": "协助客户应对 CrowdStrike 故障",
+      "publisher": "Microsoft",
+      "url": "https://blogs.microsoft.com/blog/2024/07/20/helping-our-customers-through-the-crowdstrike-outage/",
+      "publishedAt": "2024-07-20T23:59:59Z",
+      "knownAt": "2024-07-20T23:59:59Z",
+      "timePrecision": "DATE_NORMALIZED_END_OF_DAY_UTC",
+      "isOfficial": true,
+      "contentHash": null,
+      "hashStatus": "NOT_CAPTURED_LINK_ONLY",
+      "snapshotPolicy": "METADATA_AND_PARAPHRASE_ONLY",
+      "simulationEligibility": "RETROSPECTIVE_VALIDATION_INPUT"
+    },
+    {
+      "sourceId": "source-sec-crowdstrike-8k-20240722",
+      "sourceType": "OFFICIAL_REGULATORY_FILING",
+      "tier": "T1",
+      "title": "CrowdStrike Holdings, Inc. Form 8-K",
+      "titleZh": "CrowdStrike Holdings, Inc. 8-K 表格",
+      "publisher": "U.S. Securities and Exchange Commission",
+      "url": "https://www.sec.gov/Archives/edgar/data/1535527/000110465924081571/tm2419936d1_8k.htm",
+      "publishedAt": "2024-07-22T21:27:44Z",
+      "knownAt": "2024-07-22T21:27:44Z",
+      "timePrecision": "SECOND_CONVERTED_FROM_EDGAR_ET",
+      "isOfficial": true,
+      "contentHash": null,
+      "hashStatus": "NOT_CAPTURED_LINK_ONLY",
+      "snapshotPolicy": "METADATA_AND_PARAPHRASE_ONLY",
+      "simulationEligibility": "RETROSPECTIVE_VALIDATION_INPUT"
+    },
+    {
+      "sourceId": "source-crowdstrike-pir-20240725",
+      "sourceType": "OFFICIAL_ISSUER_POST_INCIDENT_REVIEW",
+      "tier": "T1",
+      "title": "Preliminary Post Incident Review: Content Configuration Update",
+      "titleZh": "内容配置更新初步事后审查",
+      "publisher": "CrowdStrike",
+      "url": "https://www.crowdstrike.com/en-us/blog/falcon-content-update-preliminary-post-incident-report/",
+      "publishedAt": "2024-07-24T23:59:59Z",
+      "knownAt": "2024-07-25T19:00:00Z",
+      "timePrecision": "UPDATE_TIMESTAMP",
+      "isOfficial": true,
+      "contentHash": null,
+      "hashStatus": "NOT_CAPTURED_LINK_ONLY",
+      "snapshotPolicy": "METADATA_AND_PARAPHRASE_ONLY",
+      "simulationEligibility": "RETROSPECTIVE_VALIDATION_INPUT"
+    },
+    {
+      "sourceId": "source-crowdstrike-rca-20240806",
+      "sourceType": "OFFICIAL_ISSUER_ROOT_CAUSE_ANALYSIS",
+      "tier": "T1",
+      "title": "Executive Summary: Root Cause Analysis - Channel File 291",
+      "titleZh": "Channel File 291 事件根因分析执行摘要",
+      "publisher": "CrowdStrike",
+      "url": "https://www.crowdstrike.com/wp-content/uploads/2024/08/Executive-Summary_Root-Cause-Analysis_Channel-File-291.pdf",
+      "publishedAt": "2024-08-06T23:59:59Z",
+      "knownAt": "2024-08-06T23:59:59Z",
+      "timePrecision": "DATE_NORMALIZED_END_OF_DAY_UTC",
+      "isOfficial": true,
+      "contentHash": null,
+      "hashStatus": "NOT_CAPTURED_LINK_ONLY",
+      "snapshotPolicy": "METADATA_AND_PARAPHRASE_ONLY",
+      "simulationEligibility": "RETROSPECTIVE_VALIDATION_INPUT"
+    },
+    {
+      "sourceId": "source-crowdstrike-synthetic-mechanisms",
+      "sourceType": "SYNTHETIC_RESEARCH_FIXTURE",
+      "tier": "MODEL",
+      "title": "EventShock Lab CrowdStrike mechanism specification",
+      "titleZh": "EventShock Lab CrowdStrike 合成机制说明",
+      "publisher": "EventShock Lab",
+      "url": null,
+      "publishedAt": "2024-08-06T23:59:59Z",
+      "knownAt": "2024-08-06T23:59:59Z",
+      "timePrecision": "SECOND",
+      "isOfficial": false,
+      "contentHash": null,
+      "hashStatus": "LOCAL_MANIFEST_ONLY",
+      "snapshotPolicy": "LOCAL_SYNTHETIC_SPECIFICATION",
+      "simulationEligibility": "SYNTHETIC_RESEARCH_FIXTURE"
+    }
+  ],
+  "defaultExperiment": {
+    "question": "How does delaying a verified clarification change the simulated liquidity and downside-risk distribution after an operational outage signal?",
+    "questionZh": "在运营故障信号出现后，延迟发布经核验的澄清会如何改变合成流动性与下行风险分布？",
+    "intervention": {
+      "parameter": "clarificationDelay",
+      "baselineValue": 1.0,
+      "interventionValue": 2.5
+    },
+    "seedCount": 10,
+    "populationSize": 56,
+    "steps": 120,
+    "seedRoot": 2024071904,
+    "market": {
+      "instrumentId": "CRWD",
+      "benchmarkId": "NASDAQ100_SYNTHETIC",
+      "initialPrice": 100.0
+    }
+  },
+  "mechanismRules": {
+    "riskOffClaimId": "claim-risk-off",
+    "clarificationClaimId": "claim-clarification",
+    "clarificationParameter": "clarificationDelay",
+    "clarificationInterpretation": "A dimensionless synthetic delay multiplier applied to the simulator's verified-information arrival; it is not an estimate of historical disclosure latency."
+  },
+  "factualBoundary": {
+    "sourceBacked": [
+      "The update and reversion times disclosed by CrowdStrike",
+      "Affected operating-system and sensor scope",
+      "Issuer statement that the event was not a cyberattack",
+      "Microsoft's 8.5 million-device estimate",
+      "CrowdStrike's later root-cause and restoration statements"
+    ],
+    "synthetic": [
+      "Every price, return, spread, depth, order, trade, benchmark, and volume",
+      "Investor beliefs, network propagation, clarification response, and action preferences",
+      "The baseline and counterfactual clarification-delay mapping",
+      "Every simulated causal or distributional effect"
+    ]
+  },
+  "validationStatus": {
+    "level": "L5_CASE_AVAILABLE",
+    "empiricalCalibration": "PENDING_HUMAN_STUDY",
+    "claim": "This pack makes a historical validation case runnable; it does not claim that historical response tolerances have passed."
+  },
+  "limitations": [
+    {
+      "code": "RETROSPECTIVE_EVIDENCE",
+      "text": "The pack uses later SEC and root-cause records. It must not be described as information available to market participants at 04:09 UTC on July 19.",
+      "textZh": "本事件包使用了事后 SEC 与根因分析记录，不得表述为市场参与者在 7 月 19 日 04:09 UTC 已知的信息。"
+    },
+    {
+      "code": "NO_HISTORICAL_MARKET_DATA",
+      "text": "No historical CRWD tick, quote, order-book, volume, benchmark, or return series is included; all market outputs are synthetic.",
+      "textZh": "未包含 CRWD 历史逐笔、报价、订单簿、成交量、基准或收益序列；全部市场输出均为合成数据。"
+    },
+    {
+      "code": "IMPACT_ESTIMATE_NOT_MARKET_MAPPING",
+      "text": "Microsoft's device estimate is retained as context and is not converted into revenue loss, valuation, order flow, or price impact.",
+      "textZh": "Microsoft 的设备影响估计仅作背景信息，不会换算为收入损失、估值、订单流或价格冲击。"
+    },
+    {
+      "code": "NO_CAUSAL_IDENTIFICATION",
+      "text": "Paired differences are internal model contrasts under synthetic assumptions, not an estimate of the real-world causal effect of disclosure timing.",
+      "textZh": "配对差异是合成假设下的模型内部对比，并非真实世界澄清时机因果效应的估计。"
+    },
+    {
+      "code": "NOT_INVESTMENT_ADVICE",
+      "text": "This educational validation case is not a forecast, valuation, trading signal, or investment recommendation.",
+      "textZh": "本教学验证案例不构成预测、估值、交易信号或投资建议。"
+    }
+  ],
+  "fileInventory": [
+    "manifest.json",
+    "claims.json"
+  ]
+}

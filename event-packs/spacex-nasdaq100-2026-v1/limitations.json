@@ -1,0 +1,90 @@
+{
+  "schemaVersion": "1.0.0",
+  "eventPackId": "spacex-nasdaq100-2026-v1",
+  "items": [
+    {
+      "code": "SYNTHETIC_MARKET_AND_BENCHMARK",
+      "severity": "CRITICAL_DISCLOSURE",
+      "text": "No historical SPCX, Nasdaq-100, QQQ, tick, order-book, spread, depth, or volume series is bundled. All displayed market and benchmark paths are synthetic.",
+      "textZh": "事件包不包含历史 SPCX、Nasdaq-100、QQQ、逐笔、订单簿、价差、深度或成交量数据；所有展示的行情与基准路径均为合成数据。"
+    },
+    {
+      "code": "REFERENCE_PRICE_NOT_EVENT_DATE_PRICE",
+      "severity": "CRITICAL_DISCLOSURE",
+      "text": "The simulator's $135 initial price is the official IPO offer price reused as a stable synthetic reference, not an observed July 7 price.",
+      "textZh": "仿真的 135 美元初始价格是复用的官方 IPO 发行价，只是稳定的合成参考，并非 7 月 7 日真实价格。"
+    },
+    {
+      "code": "MARKET_MAKER_CAPACITY_IS_PROXY",
+      "severity": "CRITICAL_DISCLOSURE",
+      "text": "marketMakerCapacity is a dimensionless synthetic depth and quoting-capacity proxy and has not been estimated from the SPCX order book.",
+      "textZh": "marketMakerCapacity 是无量纲的合成深度与报价容量代理，未根据 SPCX 订单簿估计。"
+    },
+    {
+      "code": "NO_CAUSAL_IDENTIFICATION",
+      "severity": "CRITICAL_DISCLOSURE",
+      "text": "A paired simulator contrast isolates a model parameter internally; it does not identify the real-world causal effect of index inclusion.",
+      "textZh": "配对仿真只能在模型内部隔离参数，不能识别指数纳入在现实世界中的因果效应。"
+    },
+    {
+      "code": "CONFOUNDING_EVENTS",
+      "severity": "HIGH",
+      "text": "FTSE global fast entry, Russell U.S. fast entry, and a $25 billion senior-notes offering overlap the broader event window.",
+      "textZh": "FTSE 全球快速纳入、Russell 美国指数快速纳入以及 250 亿美元高级票据发行与更广泛的事件窗口重叠。"
+    },
+    {
+      "code": "OFFERED_SHARES_NOT_FREE_FLOAT",
+      "severity": "HIGH",
+      "text": "The offering share count is not free float, tradable supply, or an index weighting share count. No such conversion is performed.",
+      "textZh": "发行股数并不等于自由流通股、可交易供给或指数权重股数，本事件包不进行此类换算。"
+    },
+    {
+      "code": "TRACKING_AUM_NOT_FLOW",
+      "severity": "HIGH",
+      "text": "More than $800 billion in tracking-product assets does not mean that amount would trade SpaceX, and it is not mapped into simulator demand.",
+      "textZh": "超过 8000 亿美元的跟踪产品资产不意味着同等金额会交易 SpaceX，也不会被映射为仿真需求。"
+    },
+    {
+      "code": "POST_EVENT_ESTIMATE_EXCLUDED",
+      "severity": "HIGH",
+      "text": "The Reuters-reported JPMorgan passive-flow estimate is post-cutoff, lacks a documented method and range in this pack, and is excluded from agents and calibration.",
+      "textZh": "Reuters 报道的 JPMorgan 被动资金流估计晚于截止时间，且事件包没有其方法和区间，因此不提供给 Agent，也不用于校准。"
+    },
+    {
+      "code": "DATE_ONLY_SOURCE_NORMALIZATION",
+      "severity": "MEDIUM",
+      "text": "Where a source exposes only a publication date, the pack uses a clearly labeled end-of-day UTC normalization instead of claiming second-level precision.",
+      "textZh": "当来源只提供发布日期时，事件包采用明确标注的 UTC 日末归一化时间，不声称具有秒级精度。"
+    },
+    {
+      "code": "SCHEDULED_INFORMATION_MUST_BE_GATED",
+      "severity": "HIGH",
+      "text": "The synthetic clarification is scheduled after the simulation start and must not be exposed to an LLM agent before its simulation-clock arrival.",
+      "textZh": "合成澄清安排在仿真开始后，LLM Agent 在仿真时钟到达前不得看到该信息。"
+    },
+    {
+      "code": "GENERIC_AGENT_POPULATION",
+      "severity": "MEDIUM",
+      "text": "Agents are synthetic archetypes, not identified investors, institutions, portfolios, or actual holders of SPCX or index products.",
+      "textZh": "Agent 是合成原型，并非已识别的投资者、机构、投资组合或 SPCX 与指数产品的真实持有人。"
+    },
+    {
+      "code": "FINITE_SEED_UNCERTAINTY",
+      "severity": "MEDIUM",
+      "text": "The ten-seed default is suitable for a quick demo but yields wide empirical intervals; reported distributions must retain sample size and interval information.",
+      "textZh": "默认 10 个种子适合快速演示，但经验区间较宽；结果必须保留样本量与区间信息。"
+    },
+    {
+      "code": "LINK_ONLY_EXTERNAL_SOURCES",
+      "severity": "MEDIUM",
+      "text": "External content is represented by metadata, links, and short paraphrases. Link availability and external-page changes are outside the repository's control.",
+      "textZh": "外部内容仅以元数据、链接和简短释义表示；链接可用性及外部页面变化不受仓库控制。"
+    },
+    {
+      "code": "NO_INVESTMENT_USE",
+      "severity": "CRITICAL_DISCLOSURE",
+      "text": "This pack is for educational mechanism testing and is not a price forecast, valuation, trading signal, risk limit, or investment recommendation.",
+      "textZh": "本事件包仅用于教学机制测试，不构成价格预测、估值、交易信号、风险限额或投资建议。"
+    }
+  ]
+}

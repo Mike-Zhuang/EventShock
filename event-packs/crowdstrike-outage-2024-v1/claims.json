@@ -1,0 +1,173 @@
+[
+  {
+    "claimId": "claim-update-window",
+    "text": "CrowdStrike disclosed that a Falcon sensor configuration update released at 04:09 UTC on July 19, 2024 affected certain Windows systems and was reverted at 05:27 UTC.",
+    "textZh": "CrowdStrike 披露，2024 年 7 月 19 日 04:09 UTC 发布的 Falcon 传感器配置更新影响了部分 Windows 系统，并于 05:27 UTC 回滚。",
+    "sourceIds": [
+      "source-sec-crowdstrike-8k-20240722",
+      "source-crowdstrike-pir-20240725"
+    ],
+    "knownAt": "2024-07-25T19:00:00Z",
+    "claimType": "OFFICIAL_EVENT_FACT",
+    "sourceTier": "T1",
+    "confidence": 1.0,
+    "isRequired": true,
+    "reviewStatus": "AI_PROPOSED",
+    "reviewedBy": null,
+    "synthetic": false,
+    "impactChannels": [
+      "operational-outage",
+      "information-arrival"
+    ]
+  },
+  {
+    "claimId": "claim-not-cyberattack",
+    "text": "CrowdStrike stated that the event was caused by a defect in a Windows-host content update and was not a cyberattack; Mac and Linux hosts were not impacted.",
+    "textZh": "CrowdStrike 表示，该事件由 Windows 主机内容更新缺陷引起，并非网络攻击；Mac 与 Linux 主机未受影响。",
+    "sourceIds": [
+      "source-crowdstrike-ceo-20240719",
+      "source-sec-crowdstrike-8k-20240722"
+    ],
+    "knownAt": "2024-07-22T21:27:44Z",
+    "claimType": "OFFICIAL_CLARIFICATION_FACT",
+    "sourceTier": "T1",
+    "confidence": 1.0,
+    "isRequired": true,
+    "reviewStatus": "AI_PROPOSED",
+    "reviewedBy": null,
+    "synthetic": false,
+    "impactChannels": [
+      "cause-clarification",
+      "scope-clarification"
+    ]
+  },
+  {
+    "claimId": "claim-affected-scope",
+    "text": "CrowdStrike's preliminary review scoped the affected population to Windows hosts running sensor version 7.11 or later that were online during the 04:09-05:27 UTC update window and received the update.",
+    "textZh": "CrowdStrike 初步审查将受影响范围限定为：运行 7.11 或更高版本传感器、在 04:09 至 05:27 UTC 期间在线并接收该更新的 Windows 主机。",
+    "sourceIds": [
+      "source-crowdstrike-pir-20240725"
+    ],
+    "knownAt": "2024-07-25T19:00:00Z",
+    "claimType": "OFFICIAL_SCOPE_FACT",
+    "sourceTier": "T1",
+    "confidence": 1.0,
+    "isRequired": false,
+    "reviewStatus": "AI_PROPOSED",
+    "reviewedBy": null,
+    "synthetic": false,
+    "impactChannels": [
+      "technical-scope"
+    ]
+  },
+  {
+    "claimId": "claim-microsoft-device-estimate",
+    "text": "Microsoft estimated that the update affected 8.5 million Windows devices, less than one percent of all Windows machines.",
+    "textZh": "Microsoft 估计该更新影响了 850 万台 Windows 设备，不到全部 Windows 设备的 1%。",
+    "sourceIds": [
+      "source-microsoft-impact-20240720"
+    ],
+    "knownAt": "2024-07-20T23:59:59Z",
+    "claimType": "OFFICIAL_ATTRIBUTED_ESTIMATE",
+    "sourceTier": "T1",
+    "confidence": 1.0,
+    "isRequired": false,
+    "reviewStatus": "AI_PROPOSED",
+    "reviewedBy": null,
+    "synthetic": false,
+    "impactChannels": [
+      "operational-scale"
+    ],
+    "limitations": [
+      "The estimate is not mapped to financial loss, order flow, or price impact."
+    ]
+  },
+  {
+    "claimId": "claim-root-cause",
+    "text": "CrowdStrike's root-cause summary said the sensor expected 20 input fields while the update supplied 21, producing an out-of-bounds memory read and a system crash.",
+    "textZh": "CrowdStrike 根因摘要称，传感器预期 20 个输入字段，而更新提供了 21 个，进而触发越界内存读取并造成系统崩溃。",
+    "sourceIds": [
+      "source-crowdstrike-rca-20240806"
+    ],
+    "knownAt": "2024-08-06T23:59:59Z",
+    "claimType": "OFFICIAL_ROOT_CAUSE_FACT",
+    "sourceTier": "T1",
+    "confidence": 1.0,
+    "isRequired": false,
+    "reviewStatus": "AI_PROPOSED",
+    "reviewedBy": null,
+    "synthetic": false,
+    "impactChannels": [
+      "technical-cause",
+      "operational-risk"
+    ]
+  },
+  {
+    "claimId": "claim-restoration-progress",
+    "text": "CrowdStrike reported on August 6 that approximately 99% of Windows sensors were online as of 8:00 p.m. EDT on July 29, compared with the level before the update.",
+    "textZh": "CrowdStrike 于 8 月 6 日报告称，截至 7 月 29 日美国东部时间 20:00，与更新前相比约 99% 的 Windows 传感器已经在线。",
+    "sourceIds": [
+      "source-crowdstrike-rca-20240806"
+    ],
+    "knownAt": "2024-08-06T23:59:59Z",
+    "claimType": "OFFICIAL_RECOVERY_STATEMENT",
+    "sourceTier": "T1",
+    "confidence": 1.0,
+    "isRequired": false,
+    "reviewStatus": "AI_PROPOSED",
+    "reviewedBy": null,
+    "synthetic": false,
+    "impactChannels": [
+      "recovery-context"
+    ],
+    "limitations": [
+      "The issuer noted that normal sensor-connection variance is approximately one percent week over week."
+    ]
+  },
+  {
+    "claimId": "claim-risk-off",
+    "text": "For this simulation only, a bounded operational-outage signal increases uncertainty and risk-off action preferences without directly setting prices or orders.",
+    "textZh": "仅在本次仿真中，一条有界的运营故障信号提高不确定性与风险规避行动偏好，但不会直接设定价格或订单。",
+    "sourceIds": [
+      "source-crowdstrike-synthetic-mechanisms"
+    ],
+    "knownAt": "2024-08-06T23:59:59Z",
+    "claimType": "SCENARIO_ASSUMPTION",
+    "sourceTier": "MODEL",
+    "confidence": null,
+    "isRequired": true,
+    "reviewStatus": "AI_PROPOSED",
+    "reviewedBy": null,
+    "synthetic": true,
+    "impactChannels": [
+      "synthetic-uncertainty",
+      "synthetic-risk-off-preference"
+    ]
+  },
+  {
+    "claimId": "claim-clarification",
+    "text": "For this simulation only, a verified clarification signal narrows uncertainty after a configurable synthetic delay; it never sets a price, valuation, or trading decision.",
+    "textZh": "仅在本次仿真中，经核验的澄清信号会在可配置的合成延迟后降低不确定性；它不会设定价格、估值或交易决策。",
+    "sourceIds": [
+      "source-crowdstrike-synthetic-mechanisms"
+    ],
+    "knownAt": "2024-08-06T23:59:59Z",
+    "claimType": "SCENARIO_ASSUMPTION",
+    "sourceTier": "MODEL",
+    "confidence": null,
+    "isRequired": true,
+    "reviewStatus": "AI_PROPOSED",
+    "reviewedBy": null,
+    "synthetic": true,
+    "impactChannels": [
+      "synthetic-clarification",
+      "synthetic-belief-update"
+    ],
+    "parameterMapping": {
+      "target": "clarificationDelay",
+      "baselineValue": 1.0,
+      "interventionValue": 2.5,
+      "mappingLimit": "Dimensionless simulator delay multiplier; not calibrated to historical CrowdStrike disclosure timing."
+    }
+  }
+]
