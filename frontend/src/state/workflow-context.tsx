@@ -1,0 +1,581 @@
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
+import { api } from '../api/client';
+import type {
+  CaseSummary,
+  ClaimReviewInput,
+  EventPack,
+  EventPackCreateInput,
+  EventSourceUpload,
+  Experiment,
+  ExperimentResults,
+  HealthStatus,
+  InvalidationReasonCode,
+  ScenarioDraft,
+  ScenarioValidation,
+} from '../api/types';
+
+export type RequestState = 'idle' | 'loading' | 'success' | 'error';
+export type ApiConnectionState = 'checking' | 'online' | 'offline';
+
+const DEFAULT_SCENARIO: ScenarioDraft = {
+  eventPackId: '',
+  intervention: {
+    parameter: 'marketMakerCapacity',
+    baselineValue: 1,
+    interventionValue: 0.45,
+  },
+  seedCount: 10,
+  seedRoot: 2_026_070_700,
+  populationSize: 56,
+  steps: 120,
+  market: {
+    instrumentId: 'SPCX',
+    benchmarkId: 'NDX_SYNTHETIC',
+    tickSize: 0.01,
+    initialPrice: 135,
+    feeBps: 0.3,
+    latencyMs: 25,
+    openingAuction: true,
+    volatilityHalt: true,
+    priceCollarBps: 180,
+  },
+  population: {
+    profileId: 'mixed-event-risk-v1',
+    representativeLlmAgents: 8,
+    institutionalShare: 0.2,
+    leverageEnabled: true,
+    shortSellingEnabled: true,
+  },
+  network: {
+    topology: 'WATTS_STROGATZ',
+    averageDegree: 6,
+    rewiringProbability: 0.12,
+    echoChamberStrength: 0.35,
+    correctionReach: 0.7,
+  },
+  llmPolicy: {
+    mode: 'RULE_ONLY',
+    provider: 'zhipu',
+    modelId: 'glm-5.2',
+    representativeAgentCount: 8,
+    decisionIntervalSteps: 12,
+    callBudget: 24,
+    maxCostUsd: 10,
+    fallbackToRules: true,
+  },
+  primaryOutcome: 'maxSpreadBps',
+  secondaryOutcomes: ['maxDrawdownPct', 'recoverySteps', 'cascadeScore'],
+  stoppingRule: {
+    minimumPairs: 10,
+    maximumPairs: 10,
+  },
+  acknowledgedScenarioNotForecast: false,
+  acknowledgedSyntheticAssumptions: false,
+};
+
+function withScenarioDefaults(input: ScenarioDraft): ScenarioDraft {
+  return {
+    ...DEFAULT_SCENARIO,
+    ...input,
+    intervention: { ...DEFAULT_SCENARIO.intervention, ...input.intervention },
+    market: { ...DEFAULT_SCENARIO.market!, ...input.market },
+    population: { ...DEFAULT_SCENARIO.population!, ...input.population },
+    network: { ...DEFAULT_SCENARIO.network!, ...input.network },
+    llmPolicy: { ...DEFAULT_SCENARIO.llmPolicy!, ...input.llmPolicy },
+    stoppingRule: { ...DEFAULT_SCENARIO.stoppingRule!, ...input.stoppingRule },
+  };
+}
+
+interface WorkflowContextValue {
+  apiConnection: ApiConnectionState;
+  health?: HealthStatus;
+  cases: CaseSummary[];
+  casesState: RequestState;
+  casesError?: string;
+  selectedCase?: CaseSummary;
+  eventPack?: EventPack;
+  eventPackState: RequestState;
+  eventPackError?: string;
+  claimBusyId?: string;
+  scenario: ScenarioDraft;
+  validation?: ScenarioValidation;
+  validationState: RequestState;
+  validationError?: string;
+  experiments: Experiment[];
+  experimentsState: RequestState;
+  experimentsError?: string;
+  activeExperiment?: Experiment;
+  results?: ExperimentResults;
+  resultsState: RequestState;
+  resultsError?: string;
+  refreshAll: () => Promise<void>;
+  refreshCases: () => Promise<void>;
+  selectCase: (caseItem: CaseSummary) => Promise<void>;
+  createEventPack: (input: EventPackCreateInput) => Promise<EventPack>;
+  reextractEventPack: (
+    sources: EventSourceUpload[],
+    useLlm?: boolean,
+    maximumClaims?: number,
+    acknowledgedContentReview?: boolean,
+  ) => Promise<EventPack>;
+  reviewClaim: (claimId: string, input: ClaimReviewInput) => Promise<void>;
+  freezeEventPack: () => Promise<void>;
+  setScenario: (scenario: ScenarioDraft) => void;
+  validateScenario: () => Promise<ScenarioValidation>;
+  refreshExperiments: () => Promise<void>;
+  selectExperiment: (experimentId: string) => Promise<void>;
+  createAndStartExperiment: () => Promise<Experiment>;
+  cancelActiveExperiment: () => Promise<void>;
+  invalidateActiveExperiment: (reasonCode: InvalidationReasonCode, reason: string) => Promise<void>;
+  loadResults: (experimentId?: string) => Promise<ExperimentResults>;
+  exportExperiment: (experimentId: string) => Promise<void>;
+}
+
+const WorkflowContext = createContext<WorkflowContextValue | null>(null);
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function upsertExperiment(experiments: Experiment[], updated: Experiment): Experiment[] {
+  const existingIndex = experiments.findIndex((item) => item.id === updated.id);
+  if (existingIndex < 0) return [updated, ...experiments];
+  return experiments.map((item) => item.id === updated.id ? updated : item);
+}
+
+export function WorkflowProvider({ children }: { children: ReactNode }) {
+  const [apiConnection, setApiConnection] = useState<ApiConnectionState>('checking');
+  const [health, setHealth] = useState<HealthStatus>();
+  const [cases, setCases] = useState<CaseSummary[]>([]);
+  const [casesState, setCasesState] = useState<RequestState>('idle');
+  const [casesError, setCasesError] = useState<string>();
+  const [selectedCase, setSelectedCase] = useState<CaseSummary>();
+  const [eventPack, setEventPack] = useState<EventPack>();
+  const [eventPackState, setEventPackState] = useState<RequestState>('idle');
+  const [eventPackError, setEventPackError] = useState<string>();
+  const [claimBusyId, setClaimBusyId] = useState<string>();
+  const [scenario, setScenarioState] = useState<ScenarioDraft>(DEFAULT_SCENARIO);
+  const [validation, setValidation] = useState<ScenarioValidation>();
+  const [validationState, setValidationState] = useState<RequestState>('idle');
+  const [validationError, setValidationError] = useState<string>();
+  const [experiments, setExperiments] = useState<Experiment[]>([]);
+  const [experimentsState, setExperimentsState] = useState<RequestState>('idle');
+  const [experimentsError, setExperimentsError] = useState<string>();
+  const [activeExperiment, setActiveExperiment] = useState<Experiment>();
+  const [results, setResults] = useState<ExperimentResults>();
+  const [resultsState, setResultsState] = useState<RequestState>('idle');
+  const [resultsError, setResultsError] = useState<string>();
+  const pollTimer = useRef<number | undefined>(undefined);
+  const streamAbortController = useRef<AbortController | null>(null);
+
+  const checkHealth = useCallback(async () => {
+    setApiConnection('checking');
+    try {
+      const nextHealth = await api.getHealth();
+      setHealth(nextHealth);
+      setApiConnection('online');
+    } catch {
+      setHealth(undefined);
+      setApiConnection('offline');
+    }
+  }, []);
+
+  const refreshCases = useCallback(async () => {
+    setCasesState('loading');
+    setCasesError(undefined);
+    try {
+      const nextCases = await api.getCases();
+      setCases(nextCases);
+      setCasesState('success');
+    } catch (error) {
+      setCases([]);
+      setCasesState('error');
+      setCasesError(errorMessage(error));
+    }
+  }, []);
+
+  const refreshExperiments = useCallback(async () => {
+    setExperimentsState('loading');
+    setExperimentsError(undefined);
+    try {
+      const nextExperiments = await api.getExperiments();
+      setExperiments(nextExperiments);
+      setExperimentsState('success');
+      setActiveExperiment((current) => {
+        if (!current) return undefined;
+        return nextExperiments.find((item) => item.id === current.id) ?? current;
+      });
+    } catch (error) {
+      setExperimentsState('error');
+      setExperimentsError(errorMessage(error));
+    }
+  }, []);
+
+  const refreshAll = useCallback(async () => {
+    await checkHealth();
+    await Promise.all([refreshCases(), refreshExperiments()]);
+  }, [checkHealth, refreshCases, refreshExperiments]);
+
+  useEffect(() => {
+    void refreshAll();
+  }, [refreshAll]);
+
+  useEffect(() => {
+    if (pollTimer.current) window.clearInterval(pollTimer.current);
+    streamAbortController.current?.abort();
+    if (!activeExperiment || !['QUEUED', 'RUNNING', 'AGGREGATING', 'CANCEL_REQUESTED'].includes(activeExperiment.status)) return;
+    const experimentId = activeExperiment.id;
+    const controller = new AbortController();
+    streamAbortController.current = controller;
+    const applyUpdate = (updated: Experiment) => {
+      setActiveExperiment((current) => current?.id === updated.id ? updated : current);
+      setExperiments((current) => upsertExperiment(current, updated));
+    };
+    const followStream = async () => {
+      while (!controller.signal.aborted) {
+        try {
+          await api.streamExperiment(experimentId, applyUpdate, controller.signal);
+        } catch {
+          if (controller.signal.aborted) return;
+          // SSE 失败时保留轮询兜底；短暂退避后重连，避免代理重启造成进度中断。
+        }
+        if (controller.signal.aborted) return;
+        await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+      }
+    };
+    void followStream();
+    pollTimer.current = window.setInterval(() => {
+      void api.getExperiment(experimentId).then((updated) => {
+        applyUpdate(updated);
+      }).catch((error: unknown) => {
+        setExperimentsError(errorMessage(error));
+      });
+    }, 10_000);
+    return () => {
+      controller.abort();
+      if (pollTimer.current) window.clearInterval(pollTimer.current);
+    };
+  }, [activeExperiment?.id, activeExperiment?.status]);
+
+  useEffect(() => {
+    if (activeExperiment?.status !== 'INVALIDATED') return;
+    // 无论作废来自当前标签页还是刷新对账，都不能继续展示内存中的旧结果。
+    setResults(undefined);
+    setResultsState('idle');
+    setResultsError(undefined);
+  }, [activeExperiment?.id, activeExperiment?.status]);
+
+  const selectCase = useCallback(async (caseItem: CaseSummary) => {
+    setSelectedCase(caseItem);
+    setEventPack(undefined);
+    setValidation(undefined);
+    setResults(undefined);
+    if (!caseItem.eventPackId) {
+      setEventPackState('error');
+      setEventPackError('The selected case does not include an Event Pack identifier.');
+      return;
+    }
+    setEventPackState('loading');
+    setEventPackError(undefined);
+    try {
+      const nextPack = await api.getEventPack(caseItem.eventPackId);
+      setEventPack(nextPack);
+      setScenarioState((current) => nextPack.defaultExperiment
+        ? withScenarioDefaults(nextPack.defaultExperiment)
+        : { ...current, eventPackId: nextPack.id });
+      setEventPackState('success');
+    } catch (error) {
+      setEventPackState('error');
+      setEventPackError(errorMessage(error));
+    }
+  }, []);
+
+  const reviewClaim = useCallback(async (claimId: string, input: ClaimReviewInput) => {
+    if (!eventPack) return;
+    setClaimBusyId(claimId);
+    setEventPackError(undefined);
+    try {
+      const nextPack = await api.reviewClaim(eventPack.id, claimId, input);
+      setEventPack(nextPack);
+    } catch (error) {
+      setEventPackError(errorMessage(error));
+      throw error;
+    } finally {
+      setClaimBusyId(undefined);
+    }
+  }, [eventPack]);
+
+  const createEventPack = useCallback(async (input: EventPackCreateInput) => {
+    setEventPackState('loading');
+    setEventPackError(undefined);
+    try {
+      const nextPack = await api.createEventPack(input);
+      setEventPack(nextPack);
+      setSelectedCase({
+        id: nextPack.caseId ?? `case-${nextPack.id}`,
+        eventPackId: nextPack.id,
+        name: nextPack.name,
+        nameZh: nextPack.nameZh,
+        description: nextPack.description,
+        descriptionZh: nextPack.descriptionZh,
+        isSynthetic: false,
+      });
+      setScenarioState(withScenarioDefaults({
+        ...(nextPack.defaultExperiment ?? DEFAULT_SCENARIO),
+        eventPackId: nextPack.id,
+      }));
+      setEventPackState('success');
+      await refreshCases();
+      return nextPack;
+    } catch (createError) {
+      setEventPackState('error');
+      setEventPackError(errorMessage(createError));
+      throw createError;
+    }
+  }, [refreshCases]);
+
+  const reextractEventPack = useCallback(async (
+    sources: EventSourceUpload[],
+    useLlm = true,
+    maximumClaims = 16,
+    acknowledgedContentReview = false,
+  ) => {
+    if (!eventPack) throw new Error('Select an Event Pack before extracting claims.');
+    setEventPackState('loading');
+    setEventPackError(undefined);
+    try {
+      const nextPack = await api.reextractEventPack(
+        eventPack.id,
+        sources,
+        useLlm,
+        maximumClaims,
+        acknowledgedContentReview,
+      );
+      setEventPack(nextPack);
+      setEventPackState('success');
+      return nextPack;
+    } catch (extractError) {
+      setEventPackState('error');
+      setEventPackError(errorMessage(extractError));
+      throw extractError;
+    }
+  }, [eventPack]);
+
+  const freezeEventPack = useCallback(async () => {
+    if (!eventPack) return;
+    setEventPackState('loading');
+    setEventPackError(undefined);
+    try {
+      const nextPack = await api.freezeEventPack(eventPack.id);
+      setEventPack(nextPack);
+      setEventPackState('success');
+    } catch (error) {
+      setEventPackState('error');
+      setEventPackError(errorMessage(error));
+      throw error;
+    }
+  }, [eventPack]);
+
+  const setScenario = useCallback((nextScenario: ScenarioDraft) => {
+    setScenarioState(nextScenario);
+    setValidation(undefined);
+    setValidationError(undefined);
+    setValidationState('idle');
+  }, []);
+
+  const validateScenario = useCallback(async () => {
+    setValidationState('loading');
+    setValidationError(undefined);
+    try {
+      const nextValidation = await api.validateScenario(scenario);
+      setValidation(nextValidation);
+      setValidationState('success');
+      return nextValidation;
+    } catch (error) {
+      setValidationState('error');
+      setValidationError(errorMessage(error));
+      throw error;
+    }
+  }, [scenario]);
+
+  const selectExperiment = useCallback(async (experimentId: string) => {
+    setExperimentsError(undefined);
+    try {
+      const nextExperiment = await api.getExperiment(experimentId);
+      setActiveExperiment(nextExperiment);
+      setExperiments((current) => upsertExperiment(current, nextExperiment));
+      setResults(undefined);
+      setResultsError(undefined);
+    } catch (error) {
+      setExperimentsError(errorMessage(error));
+      throw error;
+    }
+  }, []);
+
+  const createAndStartExperiment = useCallback(async () => {
+    setExperimentsState('loading');
+    setExperimentsError(undefined);
+    try {
+      const created = await api.createExperiment(scenario);
+      const started = await api.startExperiment(created.id);
+      setActiveExperiment(started);
+      setExperiments((current) => upsertExperiment(current, started));
+      setExperimentsState('success');
+      return started;
+    } catch (error) {
+      setExperimentsState('error');
+      setExperimentsError(errorMessage(error));
+      throw error;
+    }
+  }, [scenario]);
+
+  const cancelActiveExperiment = useCallback(async () => {
+    if (!activeExperiment) return;
+    try {
+      const cancelled = await api.cancelExperiment(activeExperiment.id);
+      setActiveExperiment(cancelled);
+      setExperiments((current) => upsertExperiment(current, cancelled));
+    } catch (error) {
+      setExperimentsError(errorMessage(error));
+      throw error;
+    }
+  }, [activeExperiment]);
+
+  const invalidateActiveExperiment = useCallback(async (reasonCode: InvalidationReasonCode, reason: string) => {
+    if (!activeExperiment) throw new Error('Select a completed experiment before invalidation.');
+    try {
+      const invalidated = await api.invalidateExperiment(activeExperiment.id, { reasonCode, reason });
+      setActiveExperiment(invalidated);
+      setExperiments((current) => upsertExperiment(current, invalidated));
+      setResults(undefined);
+      setResultsState('idle');
+      setResultsError(undefined);
+    } catch (error) {
+      setExperimentsError(errorMessage(error));
+      throw error;
+    }
+  }, [activeExperiment]);
+
+  const loadResults = useCallback(async (experimentId?: string) => {
+    const targetId = experimentId ?? activeExperiment?.id;
+    if (!targetId) throw new Error('Select an experiment before loading results.');
+    setResultsState('loading');
+    setResultsError(undefined);
+    try {
+      const nextResults = await api.getResults(targetId);
+      setResults(nextResults);
+      setResultsState('success');
+      return nextResults;
+    } catch (error) {
+      setResultsState('error');
+      setResultsError(errorMessage(error));
+      throw error;
+    }
+  }, [activeExperiment?.id]);
+
+  const exportExperiment = useCallback(async (experimentId: string) => {
+    const blob = await api.exportExperiment(experimentId);
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.download = `eventshock-${experimentId}.zip`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(objectUrl);
+  }, []);
+
+  const contextValue = useMemo<WorkflowContextValue>(() => ({
+    apiConnection,
+    health,
+    cases,
+    casesState,
+    casesError,
+    selectedCase,
+    eventPack,
+    eventPackState,
+    eventPackError,
+    claimBusyId,
+    scenario,
+    validation,
+    validationState,
+    validationError,
+    experiments,
+    experimentsState,
+    experimentsError,
+    activeExperiment,
+    results,
+    resultsState,
+    resultsError,
+    refreshAll,
+    refreshCases,
+    selectCase,
+    createEventPack,
+    reextractEventPack,
+    reviewClaim,
+    freezeEventPack,
+    setScenario,
+    validateScenario,
+    refreshExperiments,
+    selectExperiment,
+    createAndStartExperiment,
+    cancelActiveExperiment,
+    invalidateActiveExperiment,
+    loadResults,
+    exportExperiment,
+  }), [
+    activeExperiment,
+    apiConnection,
+    cases,
+    casesError,
+    casesState,
+    claimBusyId,
+    createAndStartExperiment,
+    createEventPack,
+    reextractEventPack,
+    eventPack,
+    eventPackError,
+    eventPackState,
+    exportExperiment,
+    freezeEventPack,
+    health,
+    loadResults,
+    refreshAll,
+    refreshCases,
+    refreshExperiments,
+    results,
+    resultsError,
+    resultsState,
+    reviewClaim,
+    scenario,
+    selectCase,
+    selectExperiment,
+    setScenario,
+    validation,
+    validationError,
+    validationState,
+    validateScenario,
+    experiments,
+    experimentsError,
+    experimentsState,
+    cancelActiveExperiment,
+    invalidateActiveExperiment,
+  ]);
+
+  return <WorkflowContext.Provider value={contextValue}>{children}</WorkflowContext.Provider>;
+}
+
+export function useWorkflow(): WorkflowContextValue {
+  const context = useContext(WorkflowContext);
+  if (!context) throw new Error('useWorkflow must be used inside WorkflowProvider.');
+  return context;
+}

@@ -1,0 +1,130 @@
+{
+  "schemaVersion": "1.0.0",
+  "eventPackId": "spacex-nasdaq100-2026-v1",
+  "seriesId": "spcx-synthetic-stress-reference-v1",
+  "instrumentId": "SPCX",
+  "dataMode": "SYNTHETIC",
+  "isHistoricalMarketData": false,
+  "isObserved": false,
+  "isLicensedMarketData": false,
+  "redistributionStatus": "PROJECT_AUTHORED_SYNTHETIC_DATA",
+  "purpose": "Illustrative stress-profile metadata and visual fallback; the deterministic simulation engine generates runtime paths independently.",
+  "purposeZh": "用于展示的压力路径元数据和可视化回退；运行时路径由确定性仿真引擎独立生成。",
+  "referencePrice": {
+    "value": 135.0,
+    "currency": "USD",
+    "classification": "OFFICIAL_IPO_OFFER_PRICE_REUSED_AS_SYNTHETIC_REFERENCE",
+    "sourceIds": ["source-sec-fwp-pricing-20260611"],
+    "warning": "This is not a July 7 observed price."
+  },
+  "fieldDefinitions": {
+    "syntheticPrice": "Synthetic USD price anchored to the official IPO offer-price reference.",
+    "syntheticSpreadBps": "Synthetic displayed bid-ask spread in basis points.",
+    "syntheticDisplayedDepthUnits": "Synthetic aggregate displayed depth in abstract simulator units.",
+    "syntheticIntervalVolumeUnits": "Synthetic interval volume in abstract simulator units."
+  },
+  "observations": [
+    {
+      "timestamp": "2026-07-07T13:15:00Z",
+      "syntheticPrice": 135.0,
+      "syntheticSpreadBps": 8.0,
+      "syntheticDisplayedDepthUnits": 92,
+      "syntheticIntervalVolumeUnits": 0,
+      "synthetic": true
+    },
+    {
+      "timestamp": "2026-07-07T13:30:00Z",
+      "syntheticPrice": 134.9,
+      "syntheticSpreadBps": 10.5,
+      "syntheticDisplayedDepthUnits": 86,
+      "syntheticIntervalVolumeUnits": 18,
+      "synthetic": true
+    },
+    {
+      "timestamp": "2026-07-07T13:35:00Z",
+      "syntheticPrice": 134.45,
+      "syntheticSpreadBps": 18.0,
+      "syntheticDisplayedDepthUnits": 62,
+      "syntheticIntervalVolumeUnits": 33,
+      "synthetic": true
+    },
+    {
+      "timestamp": "2026-07-07T13:40:00Z",
+      "syntheticPrice": 134.1,
+      "syntheticSpreadBps": 25.0,
+      "syntheticDisplayedDepthUnits": 44,
+      "syntheticIntervalVolumeUnits": 51,
+      "synthetic": true
+    },
+    {
+      "timestamp": "2026-07-07T13:45:00Z",
+      "syntheticPrice": 134.26,
+      "syntheticSpreadBps": 22.0,
+      "syntheticDisplayedDepthUnits": 48,
+      "syntheticIntervalVolumeUnits": 42,
+      "synthetic": true
+    },
+    {
+      "timestamp": "2026-07-07T13:50:00Z",
+      "syntheticPrice": 134.55,
+      "syntheticSpreadBps": 19.0,
+      "syntheticDisplayedDepthUnits": 53,
+      "syntheticIntervalVolumeUnits": 37,
+      "synthetic": true
+    },
+    {
+      "timestamp": "2026-07-07T14:00:00Z",
+      "syntheticPrice": 134.7,
+      "syntheticSpreadBps": 16.0,
+      "syntheticDisplayedDepthUnits": 60,
+      "syntheticIntervalVolumeUnits": 31,
+      "synthetic": true
+    },
+    {
+      "timestamp": "2026-07-07T14:10:00Z",
+      "syntheticPrice": 134.95,
+      "syntheticSpreadBps": 14.0,
+      "syntheticDisplayedDepthUnits": 65,
+      "syntheticIntervalVolumeUnits": 27,
+      "synthetic": true
+    },
+    {
+      "timestamp": "2026-07-07T14:20:00Z",
+      "syntheticPrice": 135.1,
+      "syntheticSpreadBps": 13.0,
+      "syntheticDisplayedDepthUnits": 69,
+      "syntheticIntervalVolumeUnits": 24,
+      "synthetic": true
+    },
+    {
+      "timestamp": "2026-07-07T14:30:00Z",
+      "syntheticPrice": 135.25,
+      "syntheticSpreadBps": 12.0,
+      "syntheticDisplayedDepthUnits": 73,
+      "syntheticIntervalVolumeUnits": 22,
+      "synthetic": true
+    },
+    {
+      "timestamp": "2026-07-07T14:45:00Z",
+      "syntheticPrice": 135.18,
+      "syntheticSpreadBps": 12.5,
+      "syntheticDisplayedDepthUnits": 71,
+      "syntheticIntervalVolumeUnits": 20,
+      "synthetic": true
+    },
+    {
+      "timestamp": "2026-07-07T15:00:00Z",
+      "syntheticPrice": 135.3,
+      "syntheticSpreadBps": 11.8,
+      "syntheticDisplayedDepthUnits": 76,
+      "syntheticIntervalVolumeUnits": 18,
+      "synthetic": true
+    }
+  ],
+  "runtimeBinding": {
+    "consumedDirectlyByEngine": false,
+    "engineModule": "backend.app.simulation.engine",
+    "engineVersion": "eventshock-simulation-mvp-0.1.0",
+    "runtimePathsMustRetainSyntheticLabel": true
+  }
+}

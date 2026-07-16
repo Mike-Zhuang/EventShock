@@ -1,0 +1,77 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "spacex-synthetic-v1",
+  "caseId": "spacex-index-inclusion-synthetic",
+  "title": "SpaceX Index-Inclusion Liquidity Shock (Synthetic)",
+  "titleZh": "SpaceX 指数纳入流动性冲击（合成案例）",
+  "summary": "A fictionalized research fixture for testing how passive demand, risk-off selling, and market-maker capacity interact in a thin order book.",
+  "summaryZh": "用于研究被动需求、风险规避卖压与做市容量如何在薄订单簿中相互作用的虚构化测试事件包。",
+  "synthetic": true,
+  "syntheticLabel": "SYNTHETIC RESEARCH FIXTURE: NOT HISTORICAL MARKET DATA",
+  "syntheticLabelZh": "合成研究测试数据：并非历史市场数据",
+  "asOf": "2026-07-07T13:30:00Z",
+  "instrument": {
+    "id": "SPCX",
+    "displayName": "SpaceX Class A (Synthetic Research Instrument)",
+    "displayNameZh": "SpaceX A 类股（合成研究标的）",
+    "initialPrice": 135.0,
+    "currency": "USD"
+  },
+  "sources": [
+    {
+      "sourceId": "source-synthetic-scenario-note",
+      "sourceType": "SYNTHETIC_RESEARCH_FIXTURE",
+      "title": "Synthetic scenario assumptions",
+      "titleZh": "合成场景假设",
+      "publisher": "EventShock Lab",
+      "publishedAt": "2026-07-07T13:00:00Z",
+      "knownAt": "2026-07-07T13:00:00Z",
+      "isOfficial": false,
+      "contentHash": "sha256:74debb417a848d0da04d7cc46664705c6ed47a6a7dd9e12d055c98641ee17540"
+    },
+    {
+      "sourceId": "source-synthetic-market-path",
+      "sourceType": "SYNTHETIC_RESEARCH_FIXTURE",
+      "title": "Synthetic market background path",
+      "titleZh": "合成市场背景路径",
+      "publisher": "EventShock Lab",
+      "publishedAt": "2026-07-07T13:00:00Z",
+      "knownAt": "2026-07-07T13:00:00Z",
+      "isOfficial": false,
+      "contentHash": "sha256:54df459f285deccd1edcc2636c9c5a94c9776bec63de5ea5c6b9e572eb29d0eb"
+    }
+  ],
+  "defaultExperiment": {
+    "question": "How does lower market-maker capacity change liquidity and downside risk during concentrated passive demand?",
+    "questionZh": "在集中被动需求期间，较低做市容量会如何改变流动性与下行风险？",
+    "intervention": {
+      "parameter": "marketMakerCapacity",
+      "baselineValue": 1.0,
+      "interventionValue": 0.45
+    },
+    "seedCount": 10,
+    "populationSize": 56,
+    "steps": 120
+  },
+  "mechanismRules": {
+    "riskOffClaimId": "claim-risk-off",
+    "clarificationClaimId": "claim-clarification"
+  },
+  "limitations": [
+    {
+      "code": "SYNTHETIC_DATA_ONLY",
+      "text": "All prices, claims, order flow, and market depth in this Event Pack are synthetic.",
+      "textZh": "本事件包中的价格、声明、订单流和市场深度均为合成数据。"
+    },
+    {
+      "code": "NO_REAL_WORLD_CAUSAL_CLAIM",
+      "text": "Paired differences describe the internal model under selected assumptions, not a real-world causal effect.",
+      "textZh": "配对差异只描述所选假设下的模型内部结果，并不构成现实世界因果效应。"
+    },
+    {
+      "code": "NOT_PRICE_FORECAST",
+      "text": "The simulation is a stress-testing mechanism demo, not a price forecast or investment recommendation.",
+      "textZh": "该仿真是压力测试机制演示，不是价格预测或投资建议。"
+    }
+  ]
+}

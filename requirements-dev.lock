@@ -1,0 +1,14 @@
+-r requirements.lock
+
+# 测试、覆盖率与静态检查依赖锁定。
+certifi==2026.6.17
+coverage==7.15.2
+httpcore==1.0.9
+httpx==0.28.1
+iniconfig==2.3.0
+packaging==26.0
+pluggy==1.6.0
+Pygments==2.20.0
+pytest==8.4.2
+pytest-cov==6.3.0
+ruff==0.15.21

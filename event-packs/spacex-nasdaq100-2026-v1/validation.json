@@ -1,0 +1,79 @@
+{
+  "schemaVersion": "1.0.0",
+  "eventPackId": "spacex-nasdaq100-2026-v1",
+  "validatedAt": "2026-07-16T03:45:40Z",
+  "status": "PASS_WITH_DECLARED_LIMITATIONS",
+  "checks": [
+    {
+      "checkId": "required-files-present",
+      "status": "PASS",
+      "detail": "All fourteen JSON files required by the source-backed pack contract are listed in manifest.fileInventory."
+    },
+    {
+      "checkId": "json-syntax",
+      "status": "PASS",
+      "detail": "Every pack file is required to parse as strict JSON in the automated test."
+    },
+    {
+      "checkId": "claim-source-referential-integrity",
+      "status": "PASS",
+      "detail": "Every claim sourceId resolves to sources.json and every manifest source resolves to the same canonical source registry."
+    },
+    {
+      "checkId": "nasdaq-announcement-known-at",
+      "status": "PASS",
+      "detail": "The official announcement knownAt is 2026-06-27T00:00:00Z, derived from 20:00 America/New_York on June 26."
+    },
+    {
+      "checkId": "official-fact-cutoff",
+      "status": "PASS",
+      "detail": "Every official claim exposed to the simulation has knownAt less than or equal to 2026-07-07T13:30:00Z."
+    },
+    {
+      "checkId": "post-event-estimate-excluded",
+      "status": "PASS",
+      "detail": "The Reuters/JPMorgan estimate remains source metadata for post-event validation only and is not a simulation claim or calibration input."
+    },
+    {
+      "checkId": "official-and-synthetic-separation",
+      "status": "PASS",
+      "detail": "Every model assumption and market condition is marked synthetic; official facts are marked non-synthetic and cite T1 sources."
+    },
+    {
+      "checkId": "market-data-labeling",
+      "status": "PASS",
+      "detail": "market.json and benchmark.json both declare SYNTHETIC mode, false historical status, and false observed status."
+    },
+    {
+      "checkId": "single-intervention",
+      "status": "PASS",
+      "detail": "The default paired experiment changes only marketMakerCapacity from 1.0 to 0.65."
+    },
+    {
+      "checkId": "free-float-not-inferred",
+      "status": "PASS",
+      "detail": "IPO shares sold are retained as an offering fact and are not converted into free float or tradable supply."
+    },
+    {
+      "checkId": "confounders-recorded",
+      "status": "PASS",
+      "detail": "FTSE global entry, Russell U.S. entry, and the $25 billion notes offering are explicitly represented as confounding events."
+    },
+    {
+      "checkId": "license-boundary",
+      "status": "PASS",
+      "detail": "External sources use link-only metadata and short paraphrases; no copyrighted article, index series, or licensed market-data snapshot is bundled."
+    },
+    {
+      "checkId": "causal-claim-boundary",
+      "status": "PASS",
+      "detail": "The pack disallows historical causal attribution, price forecasting, and investment use."
+    }
+  ],
+  "manualReviewRequired": [
+    "A user must approve, edit, or reject every AI_PROPOSED synthetic assumption before freezing the pack.",
+    "Any future replacement of synthetic paths with observed data requires license review and point-in-time timestamp validation.",
+    "Any LLM cognition implementation must filter claims by knownAt on every simulation step."
+  ],
+  "automatedTest": "tests/backend/test_spacex_event_pack.py"
+}

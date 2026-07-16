@@ -1,0 +1,50 @@
+[
+  {
+    "claimId": "claim-index-flow",
+    "text": "The synthetic scenario schedules concentrated passive index demand after the initial risk-off shock.",
+    "textZh": "合成场景在初始风险规避冲击后安排了集中的指数被动需求。",
+    "sourceIds": ["source-synthetic-scenario-note"],
+    "knownAt": "2026-07-07T13:00:00Z",
+    "claimType": "SCENARIO_ASSUMPTION",
+    "isRequired": true,
+    "reviewStatus": "HUMAN_APPROVED",
+    "reviewedBy": "synthetic-demo-fixture",
+    "synthetic": true
+  },
+  {
+    "claimId": "claim-limited-depth",
+    "text": "Displayed liquidity is assumed to be limited relative to the scheduled passive demand.",
+    "textZh": "场景假设可见流动性相对于计划中的被动需求较为有限。",
+    "sourceIds": ["source-synthetic-scenario-note"],
+    "knownAt": "2026-07-07T13:00:00Z",
+    "claimType": "MODEL_ASSUMPTION",
+    "isRequired": true,
+    "reviewStatus": "AI_PROPOSED",
+    "reviewedBy": null,
+    "synthetic": true
+  },
+  {
+    "claimId": "claim-risk-off",
+    "text": "A synthetic broad-market risk-off flow arrives before the passive inclusion flow.",
+    "textZh": "一股合成的广泛市场风险规避资金流在被动纳入资金流之前到达。",
+    "sourceIds": ["source-synthetic-market-path"],
+    "knownAt": "2026-07-07T13:30:00Z",
+    "claimType": "SYNTHETIC_MARKET_CONDITION",
+    "isRequired": true,
+    "reviewStatus": "HUMAN_APPROVED",
+    "reviewedBy": "synthetic-demo-fixture",
+    "synthetic": true
+  },
+  {
+    "claimId": "claim-clarification",
+    "text": "A synthetic clarification later reduces narrative uncertainty without directly setting a price.",
+    "textZh": "随后出现的合成澄清会降低叙事不确定性，但不会直接设定价格。",
+    "sourceIds": ["source-synthetic-scenario-note"],
+    "knownAt": "2026-07-07T14:00:00Z",
+    "claimType": "SCENARIO_ASSUMPTION",
+    "isRequired": false,
+    "reviewStatus": "HUMAN_APPROVED",
+    "reviewedBy": "synthetic-demo-fixture",
+    "synthetic": true
+  }
+]

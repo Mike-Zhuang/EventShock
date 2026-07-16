@@ -1,0 +1,90 @@
+{
+  "schemaVersion": "1.0.0",
+  "eventPackId": "spacex-nasdaq100-2026-v1",
+  "items": [
+    {
+      "entityId": "entity-spacex",
+      "entityType": "ISSUER",
+      "legalName": "Space Exploration Technologies Corp.",
+      "displayName": "SpaceX",
+      "displayNameZh": "SpaceX",
+      "identifiers": {
+        "secCik": "1181412"
+      },
+      "sourceIds": ["source-sec-s1-20260520", "source-sec-424b4-20260612"]
+    },
+    {
+      "entityId": "entity-spcx-class-a",
+      "entityType": "LISTED_SECURITY",
+      "legalName": "Space Exploration Technologies Corp. Class A Common Stock",
+      "displayName": "SPCX Class A",
+      "displayNameZh": "SPCX A 类股",
+      "identifiers": {
+        "ticker": "SPCX",
+        "exchange": "Nasdaq Global Select Market",
+        "currency": "USD"
+      },
+      "sourceIds": ["source-sec-fwp-pricing-20260611", "source-nasdaq-ipo-20260612"]
+    },
+    {
+      "entityId": "entity-nasdaq100",
+      "entityType": "INDEX",
+      "legalName": "Nasdaq-100 Index",
+      "displayName": "Nasdaq-100",
+      "displayNameZh": "Nasdaq-100 指数",
+      "identifiers": {
+        "indexCode": "NDX"
+      },
+      "sourceIds": ["source-nasdaq-methodology-20260501", "source-nasdaq-inclusion-20260626"]
+    },
+    {
+      "entityId": "entity-nasdaq",
+      "entityType": "EXCHANGE_AND_INDEX_PROVIDER",
+      "legalName": "Nasdaq, Inc.",
+      "displayName": "Nasdaq",
+      "displayNameZh": "Nasdaq",
+      "sourceIds": ["source-nasdaq-methodology-20260501", "source-nasdaq-inclusion-20260626"]
+    },
+    {
+      "entityId": "entity-sec",
+      "entityType": "REGULATOR",
+      "legalName": "U.S. Securities and Exchange Commission",
+      "displayName": "SEC",
+      "displayNameZh": "美国证券交易委员会",
+      "sourceIds": ["source-sec-s1-20260520"]
+    },
+    {
+      "entityId": "entity-ftse-russell",
+      "entityType": "INDEX_PROVIDER",
+      "legalName": "FTSE Russell",
+      "displayName": "FTSE Russell",
+      "displayNameZh": "FTSE Russell",
+      "sourceIds": ["source-ftse-global-fast-entry-20260612", "source-ftse-us-fast-entry-20260612"]
+    },
+    {
+      "entityId": "entity-fcc",
+      "entityType": "REGULATOR",
+      "legalName": "Federal Communications Commission",
+      "displayName": "FCC",
+      "displayNameZh": "美国联邦通信委员会",
+      "sourceIds": ["source-fcc-da-26-36"]
+    },
+    {
+      "entityId": "entity-nasa-oig",
+      "entityType": "GOVERNMENT_AUDITOR",
+      "legalName": "National Aeronautics and Space Administration Office of Inspector General",
+      "displayName": "NASA OIG",
+      "displayNameZh": "NASA 监察长办公室",
+      "sourceIds": ["source-nasa-oig-ig-26-004"]
+    },
+    {
+      "entityId": "entity-jpmorgan-estimate-author",
+      "entityType": "ATTRIBUTED_ESTIMATE_AUTHOR",
+      "legalName": "JPMorgan Chase & Co.",
+      "displayName": "JPMorgan",
+      "displayNameZh": "摩根大通",
+      "sourceIds": ["source-reuters-jpm-estimate-20260707"],
+      "simulationEligibility": "POST_EVENT_VALIDATION_ONLY"
+    }
+  ]
+}

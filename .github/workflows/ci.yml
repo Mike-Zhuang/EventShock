@@ -1,0 +1,147 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12.13"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install project
+        run: |
+          python -m pip install --requirement requirements-dev.lock
+          python -m pip install --no-deps -e .
+
+      - name: Lint
+        run: |
+          python -m ruff check backend tests scripts/register-baota-site.py scripts/register-baota-task.py
+          python -m ruff format --check backend tests scripts/register-baota-site.py scripts/register-baota-task.py
+
+      - name: Deployment script syntax
+        run: |
+          bash -n scripts/*.sh
+          python -m py_compile scripts/register-baota-site.py scripts/register-baota-task.py
+
+      - name: Test
+        run: python -m pytest
+
+  frontend:
+    name: Frontend / Node 22
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.17.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: |
+          npm run build
+          git diff --exit-code -- dist
+          test -z "$(git status --porcelain -- dist)"
+
+  container:
+    name: Production container
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs:
+      - backend
+      - frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.17.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend artifact
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build image
+        run: |
+          docker compose --env-file .env.example config --quiet
+          docker run --rm \
+            --volume "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648 \
+            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          docker build --tag eventshock-ci:${{ github.sha }} .
+
+      - name: Smoke test production image
+        run: |
+          set -Eeuo pipefail
+          container_id="$(docker run --detach \
+            --read-only \
+            --tmpfs /tmp:size=64m,mode=1777 \
+            --tmpfs /data:rw,noexec,nosuid,nodev,size=128m,uid=10001,gid=10001,mode=0700 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --pids-limit 256 \
+            --publish 127.0.0.1:18000:8000 \
+            --env EVENTSHOCK_RELEASE_COMMIT=${{ github.sha }} \
+            eventshock-ci:${{ github.sha }})"
+          cleanup() {
+            docker rm --force "${container_id}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          for _attempt in $(seq 1 40); do
+            if [[ "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "${container_id}")" == "healthy" ]]; then
+              break
+            fi
+            if [[ "$(docker inspect --format '{{.State.Status}}' "${container_id}")" == "exited" ]]; then
+              docker logs "${container_id}"
+              exit 1
+            fi
+            sleep 1
+          done
+          test "$(docker inspect --format '{{.State.Health.Status}}' "${container_id}")" = "healthy"
+          curl --fail --silent --show-error http://127.0.0.1:18000/ | grep --fixed-strings '<title>EventShock Lab</title>'
+          docker exec "${container_id}" python -c \
+            "import json, urllib.request; value=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/health')); assert value['status']=='ok'; assert value['releaseCommit']=='${{ github.sha }}'"

@@ -1,0 +1,44 @@
+{$APP_DOMAIN:eventshock.mikezhuang.cn} {
+	encode zstd gzip
+
+	# API 最多接收 8 份、每份 50,000 字符；2 MiB 同时覆盖多字节中文与 JSON 开销。
+	request_body {
+		max_size 2MB
+	}
+
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		Content-Security-Policy "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; img-src 'self' data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'"
+	}
+
+	# 默认直连应用；启用宝塔真实流量统计后改为 host.docker.internal:18080。
+	reverse_proxy {$CADDY_UPSTREAM:app:8000} {
+		health_uri /api/health
+		health_interval 30s
+		health_timeout 5s
+		# 宝塔 Nginx 的内部 vhost 仍按正式域名匹配；主动探活也必须携带该 Host。
+		health_headers {
+			Host eventshock.mikezhuang.cn
+		}
+
+		transport http {
+			dial_timeout 5s
+			# 一次严格 JSON repair 可能经历有界重试；该上限与模型网关总时间相容。
+			response_header_timeout 300s
+		}
+	}
+
+	log {
+		output stdout
+		# X-Session-ID 用于匿名会话隔离，不应进入访问日志。
+		format filter {
+			request>headers>X-Session-Id delete
+			wrap json
+		}
+	}
+}

@@ -1,0 +1,284 @@
+"""认知层的严格、版本化数据契约。"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from enum import StrEnum
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+IDENTIFIER_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$"
+
+
+class StrictFrozenModel(BaseModel):
+    """拒绝未知字段，并阻止通过模型实例原地篡改已验证的决策。"""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+
+class Direction(StrEnum):
+    POSITIVE = "POSITIVE"
+    NEGATIVE = "NEGATIVE"
+    NEUTRAL = "NEUTRAL"
+    MIXED = "MIXED"
+
+
+class ActionPreference(StrEnum):
+    INCREASE = "INCREASE"
+    REDUCE = "REDUCE"
+    HOLD = "HOLD"
+    EXIT = "EXIT"
+    ABSTAIN = "ABSTAIN"
+    POST_ONLY = "POST_ONLY"
+
+
+class EvidenceStance(StrEnum):
+    SUPPORTS_UPSIDE = "SUPPORTS_UPSIDE"
+    SUPPORTS_DOWNSIDE = "SUPPORTS_DOWNSIDE"
+    CONTRADICTS = "CONTRADICTS"
+    NEUTRAL = "NEUTRAL"
+    UNCERTAIN = "UNCERTAIN"
+
+
+class EvidenceSourceType(StrEnum):
+    OFFICIAL_COMPANY = "official_company"
+    OFFICIAL_EXCHANGE = "official_exchange"
+    OFFICIAL_REGULATOR = "official_regulator"
+    FILING = "filing"
+    REPUTABLE_NEWS = "reputable_news"
+    SOCIAL = "social"
+    SYNTHETIC = "synthetic"
+    OTHER = "other"
+
+
+class VolatilityRegime(StrEnum):
+    LOW = "low"
+    NORMAL = "normal"
+    HIGH = "high"
+    STRESSED = "stressed"
+
+
+class TrustProfile(StrictFrozenModel):
+    official: float = Field(ge=0.0, le=1.0)
+    news: float = Field(ge=0.0, le=1.0)
+    social: float = Field(ge=0.0, le=1.0)
+
+
+class AgentProfile(StrictFrozenModel):
+    id: str = Field(min_length=3, max_length=128, pattern=IDENTIFIER_PATTERN)
+    role: str = Field(min_length=2, max_length=80, pattern=r"^[a-z][a-z0-9_]{1,79}$")
+    risk_tolerance: float = Field(ge=0.0, le=1.0)
+    loss_aversion: float = Field(ge=0.1, le=10.0)
+    horizon_minutes: int = Field(ge=1, le=10_080)
+    confirmation_bias: float = Field(ge=0.0, le=1.0)
+    trust_profile: TrustProfile
+
+
+class PortfolioObservation(StrictFrozenModel):
+    cash_cents: int = Field(ge=0, le=10**15)
+    position: int = Field(ge=-1_000_000, le=1_000_000)
+    unrealized_pnl_pct: float = Field(ge=-10.0, le=10.0)
+    max_position: int = Field(ge=1, le=1_000_000)
+
+    @model_validator(mode="after")
+    def validatePositionLimit(self) -> PortfolioObservation:
+        if abs(self.position) > self.max_position:
+            raise ValueError("position must be within max_position")
+        return self
+
+
+class MarketObservation(StrictFrozenModel):
+    instrument_id: str = Field(min_length=1, max_length=32, pattern=r"^[A-Z0-9._-]+$")
+    mid_price_ticks: int = Field(ge=1, le=10**12)
+    best_bid_ticks: int | None = Field(default=None, ge=1, le=10**12)
+    best_ask_ticks: int | None = Field(default=None, ge=1, le=10**12)
+    return_1m: float = Field(ge=-1.0, le=1.0)
+    return_15m: float = Field(ge=-1.0, le=1.0)
+    spread_bps: float = Field(ge=0.0, le=10_000.0)
+    depth_10bps: int = Field(ge=0, le=10**12)
+    order_imbalance: float = Field(ge=-1.0, le=1.0)
+    volatility_regime: VolatilityRegime
+
+    @model_validator(mode="after")
+    def validateTopOfBook(self) -> MarketObservation:
+        if (
+            self.best_bid_ticks is not None
+            and self.best_ask_ticks is not None
+            and self.best_bid_ticks >= self.best_ask_ticks
+        ):
+            raise ValueError("best_bid_ticks must be below best_ask_ticks")
+        return self
+
+
+class EvidenceItem(StrictFrozenModel):
+    evidence_id: str = Field(min_length=3, max_length=128, pattern=IDENTIFIER_PATTERN)
+    claim: str = Field(min_length=1, max_length=4_000)
+    source_type: EvidenceSourceType
+    known_at: datetime
+    credibility: float = Field(ge=0.0, le=1.0)
+    human_approved: bool
+
+    @model_validator(mode="after")
+    def validateTimezone(self) -> EvidenceItem:
+        if self.known_at.tzinfo is None or self.known_at.utcoffset() is None:
+            raise ValueError("known_at must include a timezone")
+        return self
+
+
+class SocialPost(StrictFrozenModel):
+    post_id: str = Field(min_length=3, max_length=128, pattern=IDENTIFIER_PATTERN)
+    text: str = Field(min_length=1, max_length=1_000)
+    author_trust: float = Field(ge=0.0, le=1.0)
+    seen_at: datetime
+
+    @model_validator(mode="after")
+    def validateTimezone(self) -> SocialPost:
+        if self.seen_at.tzinfo is None or self.seen_at.utcoffset() is None:
+            raise ValueError("seen_at must include a timezone")
+        return self
+
+
+class MemorySummary(StrictFrozenModel):
+    memory_id: str = Field(min_length=3, max_length=128, pattern=IDENTIFIER_PATTERN)
+    summary: str = Field(min_length=1, max_length=500)
+    salience: float = Field(ge=0.0, le=1.0)
+
+
+class Observation(StrictFrozenModel):
+    """LLM 能看到的完整且有限的观察；不接受订单簿原始明细。"""
+
+    schema_version: Literal["observation_v1.0.0"] = "observation_v1.0.0"
+    observation_id: str = Field(min_length=3, max_length=128, pattern=IDENTIFIER_PATTERN)
+    now: datetime
+    agent: AgentProfile
+    portfolio: PortfolioObservation
+    market: MarketObservation
+    new_evidence: tuple[EvidenceItem, ...] = Field(default=(), max_length=64)
+    social_feed: tuple[SocialPost, ...] = Field(default=(), max_length=50)
+    memory_summary: tuple[MemorySummary, ...] = Field(default=(), max_length=50)
+    allowed_actions: tuple[ActionPreference, ...] = Field(min_length=1, max_length=6)
+
+    @model_validator(mode="after")
+    def validateObservationBoundary(self) -> Observation:
+        if self.now.tzinfo is None or self.now.utcoffset() is None:
+            raise ValueError("now must include a timezone")
+        evidenceIds = [item.evidence_id for item in self.new_evidence]
+        if len(evidenceIds) != len(set(evidenceIds)):
+            raise ValueError("new_evidence contains duplicate evidence_id values")
+        if any(item.known_at > self.now for item in self.new_evidence):
+            raise ValueError("observation cannot contain future evidence")
+        if any(not item.human_approved for item in self.new_evidence):
+            raise ValueError("cognitive agents may only observe human-approved evidence")
+        if len(self.allowed_actions) != len(set(self.allowed_actions)):
+            raise ValueError("allowed_actions contains duplicates")
+        if ActionPreference.ABSTAIN not in self.allowed_actions:
+            raise ValueError("allowed_actions must always include ABSTAIN")
+        return self
+
+    def evidenceIds(self) -> frozenset[str]:
+        return frozenset(item.evidence_id for item in self.new_evidence)
+
+
+class EvidenceAssessment(StrictFrozenModel):
+    evidence_id: str = Field(min_length=3, max_length=128, pattern=IDENTIFIER_PATTERN)
+    stance: EvidenceStance
+    weight: float = Field(ge=0.0, le=1.0)
+
+
+class BeliefDecision(StrictFrozenModel):
+    """LLM 的唯一可执行输出；它表达信念，不是订单。"""
+
+    schema_version: Literal["belief_decision_v1.0.0"] = "belief_decision_v1.0.0"
+    direction: Direction
+    expected_value_change_pct: float = Field(ge=-1.0, le=1.0)
+    uncertainty: float = Field(ge=0.0, le=1.0)
+    perceived_tail_risk: float = Field(ge=0.0, le=1.0)
+    horizon_minutes: int = Field(ge=1, le=10_080)
+    evidence: tuple[EvidenceAssessment, ...] = Field(default=(), max_length=64)
+    action_preference: ActionPreference
+    target_position_fraction: float = Field(ge=-1.0, le=1.0)
+    urgency: float = Field(ge=0.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0)
+    decision_summary: str = Field(min_length=1, max_length=500)
+    public_message: str | None = Field(default=None, max_length=500)
+    abstain_reason: str | None = Field(default=None, min_length=1, max_length=300)
+
+    @model_validator(mode="after")
+    def validateDecision(self) -> BeliefDecision:
+        evidenceIds = [item.evidence_id for item in self.evidence]
+        if len(evidenceIds) != len(set(evidenceIds)):
+            raise ValueError("evidence contains duplicate evidence_id values")
+        if self.action_preference == ActionPreference.ABSTAIN:
+            if not self.abstain_reason:
+                raise ValueError("ABSTAIN requires abstain_reason")
+            if self.target_position_fraction != 0.0 or self.urgency != 0.0:
+                raise ValueError("ABSTAIN requires zero target_position_fraction and urgency")
+        elif self.abstain_reason is not None:
+            raise ValueError("abstain_reason is only valid for ABSTAIN")
+        if self.action_preference == ActionPreference.POST_ONLY and not self.public_message:
+            raise ValueError("POST_ONLY requires public_message")
+        if (
+            self.action_preference
+            in {
+                ActionPreference.INCREASE,
+                ActionPreference.REDUCE,
+                ActionPreference.EXIT,
+                ActionPreference.POST_ONLY,
+            }
+            and not self.evidence
+        ):
+            raise ValueError("an active decision must cite at least one evidence item")
+        return self
+
+    def evidenceIds(self) -> frozenset[str]:
+        return frozenset(item.evidence_id for item in self.evidence)
+
+
+class ClaimType(StrEnum):
+    FACT = "FACT"
+    ESTIMATE = "ESTIMATE"
+    OPINION = "OPINION"
+    RUMOR = "RUMOR"
+
+
+class ExtractedClaim(StrictFrozenModel):
+    candidate_claim_id: str = Field(min_length=3, max_length=128, pattern=IDENTIFIER_PATTERN)
+    source_evidence_ids: tuple[str, ...] = Field(min_length=1, max_length=16)
+    claim: str = Field(min_length=1, max_length=1_000)
+    claim_type: ClaimType
+    known_at: datetime
+    confidence: float = Field(ge=0.0, le=1.0)
+    instruction_like_text_detected: bool
+    requires_human_review: Literal[True] = True
+
+    @model_validator(mode="after")
+    def validateClaim(self) -> ExtractedClaim:
+        if len(self.source_evidence_ids) != len(set(self.source_evidence_ids)):
+            raise ValueError("source_evidence_ids contains duplicates")
+        if self.known_at.tzinfo is None or self.known_at.utcoffset() is None:
+            raise ValueError("known_at must include a timezone")
+        return self
+
+
+class EventExtractionResult(StrictFrozenModel):
+    schema_version: Literal["event_extraction_v1.0.0"] = "event_extraction_v1.0.0"
+    claims: tuple[ExtractedClaim, ...] = Field(default=(), max_length=100)
+    source_summary: str = Field(min_length=1, max_length=500)
+    abstain_reason: str | None = Field(default=None, min_length=1, max_length=300)
+
+    @model_validator(mode="after")
+    def validateExtraction(self) -> EventExtractionResult:
+        claimIds = [item.candidate_claim_id for item in self.claims]
+        if len(claimIds) != len(set(claimIds)):
+            raise ValueError("claims contains duplicate candidate_claim_id values")
+        if not self.claims and not self.abstain_reason:
+            raise ValueError("an empty extraction requires abstain_reason")
+        if self.claims and self.abstain_reason is not None:
+            raise ValueError("abstain_reason must be null when claims are present")
+        return self
+
+    def evidenceIds(self) -> frozenset[str]:
+        return frozenset(
+            evidenceId for claim in self.claims for evidenceId in claim.source_evidence_ids
+        )

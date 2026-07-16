@@ -1,0 +1,57 @@
+{
+  "schemaVersion": "1.0.0",
+  "eventPackId": "spacex-nasdaq100-2026-v1",
+  "instrumentId": "SPCX",
+  "entityId": "entity-spcx-class-a",
+  "issuerEntityId": "entity-spacex",
+  "securityType": "CLASS_A_COMMON_STOCK",
+  "exchange": "Nasdaq Global Select Market",
+  "currency": "USD",
+  "officialFacts": {
+    "offerPrice": {
+      "value": 135.0,
+      "currency": "USD",
+      "knownAt": "2026-06-11T19:03:06Z",
+      "sourceIds": ["source-sec-fwp-pricing-20260611", "source-sec-424b4-20260612"]
+    },
+    "baseOfferingShares": {
+      "value": 555555555,
+      "knownAt": "2026-06-11T19:03:06Z",
+      "sourceIds": ["source-sec-fwp-pricing-20260611"]
+    },
+    "underwriterOptionShares": {
+      "value": 83333333,
+      "knownAt": "2026-06-11T19:03:06Z",
+      "sourceIds": ["source-sec-fwp-pricing-20260611"]
+    },
+    "totalSharesSoldAtClosing": {
+      "value": 638888888,
+      "knownAt": "2026-06-15T21:01:04Z",
+      "sourceIds": ["source-sec-8k-close-20260615", "source-spacex-ir-close-20260615"],
+      "warning": "This value is not free float and is not assumed to be immediately tradable supply."
+    },
+    "reportedOpeningCrossPrice": {
+      "value": 150.0,
+      "currency": "USD",
+      "knownAt": "2026-06-12T14:15:00Z",
+      "sourceIds": ["source-nasdaq-ipo-20260612"],
+      "usedBySimulator": false,
+      "warning": "The exact opening-cross timestamp is not represented without licensed market data."
+    }
+  },
+  "unknownOrUnlicensed": {
+    "freeFloatShares": null,
+    "tradableSupplyShares": null,
+    "july7ObservedPrice": null,
+    "july7ObservedVolume": null,
+    "july7OrderBookDepth": null,
+    "july7BidAskSpread": null
+  },
+  "simulationReference": {
+    "initialPrice": 135.0,
+    "classification": "OFFICIAL_OFFER_PRICE_REUSED_AS_SYNTHETIC_REFERENCE",
+    "isJuly7Observation": false,
+    "marketDataMode": "SYNTHETIC",
+    "reason": "The deterministic engine uses a stable reference without redistributing or fabricating historical July 7 market data."
+  }
+}

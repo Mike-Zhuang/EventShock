@@ -1,0 +1,225 @@
+[
+  {
+    "claimId": "claim-board-refreshment",
+    "text": "GameStop's January 11, 2021 filing announced an agreement with RC Ventures and the immediate appointment of Alan Attal, Ryan Cohen, and Jim Grube to the board.",
+    "textZh": "GameStop 于 2021 年 1 月 11 日提交的文件宣布与 RC Ventures 达成协议，并立即任命 Alan Attal、Ryan Cohen 和 Jim Grube 加入董事会。",
+    "sourceIds": [
+      "source-sec-gamestop-8k-20210111"
+    ],
+    "knownAt": "2021-01-11T12:33:23Z",
+    "claimType": "OFFICIAL_ISSUER_EVENT",
+    "sourceTier": "T1",
+    "confidence": 1.0,
+    "isRequired": false,
+    "reviewStatus": "AI_PROPOSED",
+    "reviewedBy": null,
+    "synthetic": false,
+    "impactChannels": [
+      "issuer-attention",
+      "transformation-narrative"
+    ]
+  },
+  {
+    "claimId": "claim-extreme-range",
+    "text": "GameStop's Form 10-K reported an intraday high of $483.00 and low of $112.25 on January 28, 2021 and said recent price and volume fluctuations were often unrelated or disproportionate to operating performance.",
+    "textZh": "GameStop 的 10-K 报告称，2021 年 1 月 28 日盘中最高价为 483.00 美元、最低价为 112.25 美元，并表示近期价格与成交量波动往往与经营表现无关或不成比例。",
+    "sourceIds": [
+      "source-sec-gamestop-10k-20210323"
+    ],
+    "knownAt": "2021-03-23T20:39:12Z",
+    "claimType": "OFFICIAL_ISSUER_MARKET_DISCLOSURE",
+    "sourceTier": "T1",
+    "confidence": 1.0,
+    "isRequired": true,
+    "reviewStatus": "AI_PROPOSED",
+    "reviewedBy": null,
+    "synthetic": false,
+    "impactChannels": [
+      "historical-volatility-validation"
+    ],
+    "limitations": [
+      "The two reported values are validation facts and are not used as a reconstructed price path or simulator initial price."
+    ]
+  },
+  {
+    "claimId": "claim-five-factor-confluence",
+    "text": "The SEC staff report described GME as combining large price moves, large volume changes, large short interest, frequent Reddit mentions, and significant mainstream-media coverage.",
+    "textZh": "SEC 工作人员报告将 GME 描述为同时具备大幅价格变动、大幅成交量变化、高空头仓位、频繁 Reddit 提及和大量主流媒体报道。",
+    "sourceIds": [
+      "source-sec-gamestop-report-20211018",
+      "source-sec-gamestop-report-release-20211018"
+    ],
+    "knownAt": "2021-10-18T23:59:59Z",
+    "claimType": "OFFICIAL_REGULATORY_FINDING",
+    "sourceTier": "T1",
+    "confidence": 1.0,
+    "isRequired": true,
+    "reviewStatus": "AI_PROPOSED",
+    "reviewedBy": null,
+    "synthetic": false,
+    "impactChannels": [
+      "attention",
+      "volume",
+      "short-interest",
+      "social-context"
+    ]
+  },
+  {
+    "claimId": "claim-account-participation",
+    "text": "SEC staff reported that the number of unique accounts trading GME on a given day rose from fewer than 10,000 at the beginning of January to nearly 900,000 by January 27.",
+    "textZh": "SEC 工作人员报告称，单日交易 GME 的唯一账户数从 1 月初不足 10,000 个上升至 1 月 27 日接近 900,000 个。",
+    "sourceIds": [
+      "source-sec-gamestop-report-20211018"
+    ],
+    "knownAt": "2021-10-18T23:59:59Z",
+    "claimType": "OFFICIAL_REGULATORY_FINDING",
+    "sourceTier": "T1",
+    "confidence": 1.0,
+    "isRequired": false,
+    "reviewStatus": "AI_PROPOSED",
+    "reviewedBy": null,
+    "synthetic": false,
+    "impactChannels": [
+      "participation-scale"
+    ],
+    "limitations": [
+      "The account count is not converted into the simulator population size, network size, or order count."
+    ]
+  },
+  {
+    "claimId": "claim-short-interest",
+    "text": "SEC staff reported that GME short interest reached 109.26% of shares outstanding on December 31, 2020 and explained that repeated lending of the same shares can produce a ratio above 100%.",
+    "textZh": "SEC 工作人员报告称，GME 空头仓位在 2020 年 12 月 31 日达到流通股的 109.26%，并解释了同一股份被重复出借可使该比例超过 100%。",
+    "sourceIds": [
+      "source-sec-gamestop-report-20211018"
+    ],
+    "knownAt": "2021-10-18T23:59:59Z",
+    "claimType": "OFFICIAL_REGULATORY_FINDING",
+    "sourceTier": "T1",
+    "confidence": 1.0,
+    "isRequired": false,
+    "reviewStatus": "AI_PROPOSED",
+    "reviewedBy": null,
+    "synthetic": false,
+    "impactChannels": [
+      "short-interest-context",
+      "borrow-risk-context"
+    ],
+    "limitations": [
+      "The reported historical ratio does not initialize or calibrate the simulator borrow pool."
+    ]
+  },
+  {
+    "claimId": "claim-short-covering-qualified",
+    "text": "SEC staff found that short covering likely contributed during some sharp increases, but was a small fraction of overall buy volume; the report attributed the sustained weeks-long appreciation to positive sentiment rather than buying-to-cover alone.",
+    "textZh": "SEC 工作人员认为，空头回补可能对部分急升时段有所贡献，但只占整体买入量的一小部分；报告将持续数周的上涨归因于积极情绪，而非仅由回补买盘维持。",
+    "sourceIds": [
+      "source-sec-gamestop-report-20211018"
+    ],
+    "knownAt": "2021-10-18T23:59:59Z",
+    "claimType": "OFFICIAL_REGULATORY_QUALIFIED_FINDING",
+    "sourceTier": "T1",
+    "confidence": 1.0,
+    "isRequired": true,
+    "reviewStatus": "AI_PROPOSED",
+    "reviewedBy": null,
+    "synthetic": false,
+    "impactChannels": [
+      "short-covering",
+      "positive-sentiment"
+    ],
+    "limitations": [
+      "This finding does not identify a simple single cause or provide a calibrated social-transmission coefficient."
+    ]
+  },
+  {
+    "claimId": "claim-broker-restrictions",
+    "text": "The SEC staff report documented that some broker-dealers temporarily restricted new purchases or opening positions in GME and other securities on January 28, with differing stated operational, margin, or capacity reasons.",
+    "textZh": "SEC 工作人员报告记录了部分券商在 1 月 28 日临时限制 GME 等证券的新买入或新开仓，所述原因涉及运营、保证金或系统容量且各不相同。",
+    "sourceIds": [
+      "source-sec-gamestop-report-20211018"
+    ],
+    "knownAt": "2021-10-18T23:59:59Z",
+    "claimType": "OFFICIAL_REGULATORY_FINDING",
+    "sourceTier": "T1",
+    "confidence": 1.0,
+    "isRequired": true,
+    "reviewStatus": "AI_PROPOSED",
+    "reviewedBy": null,
+    "synthetic": false,
+    "impactChannels": [
+      "market-access",
+      "operational-capacity",
+      "clearing-margin-context"
+    ]
+  },
+  {
+    "claimId": "claim-liquidity-and-halts",
+    "text": "SEC staff reported that GME liquidity measures deteriorated substantially during January 2021 and that January 28 alone triggered 19 limit-up/limit-down pauses.",
+    "textZh": "SEC 工作人员报告称，GME 的多项流动性指标在 2021 年 1 月显著恶化，仅 1 月 28 日就触发了 19 次涨跌幅限制暂停。",
+    "sourceIds": [
+      "source-sec-gamestop-report-20211018"
+    ],
+    "knownAt": "2021-10-18T23:59:59Z",
+    "claimType": "OFFICIAL_REGULATORY_FINDING",
+    "sourceTier": "T1",
+    "confidence": 1.0,
+    "isRequired": false,
+    "reviewStatus": "AI_PROPOSED",
+    "reviewedBy": null,
+    "synthetic": false,
+    "impactChannels": [
+      "historical-liquidity-validation",
+      "historical-halt-validation"
+    ],
+    "limitations": [
+      "No SEC or NYSE underlying market-data series is redistributed by this pack."
+    ]
+  },
+  {
+    "claimId": "claim-risk-off",
+    "text": "For this simulation only, a bounded trading-restriction uncertainty signal propagates through a synthetic social graph and changes action preferences without directly setting prices or orders.",
+    "textZh": "仅在本次仿真中，一条有界的交易限制不确定性信号通过合成社交网络传播并改变行动偏好，但不会直接设定价格或订单。",
+    "sourceIds": [
+      "source-gamestop-synthetic-mechanisms"
+    ],
+    "knownAt": "2021-10-18T23:59:59Z",
+    "claimType": "SCENARIO_ASSUMPTION",
+    "sourceTier": "MODEL",
+    "confidence": null,
+    "isRequired": true,
+    "reviewStatus": "AI_PROPOSED",
+    "reviewedBy": null,
+    "synthetic": true,
+    "impactChannels": [
+      "synthetic-uncertainty",
+      "synthetic-social-propagation"
+    ],
+    "parameterMapping": {
+      "target": "socialAmplification",
+      "baselineValue": 1.0,
+      "interventionValue": 1.8,
+      "mappingLimit": "Dimensionless sensitivity multiplier; not estimated from historical Reddit or account-level data."
+    }
+  },
+  {
+    "claimId": "claim-clarification",
+    "text": "For this simulation only, a later verified-information signal reduces uncertainty without asserting one historical cause, setting a price, or making a trading decision.",
+    "textZh": "仅在本次仿真中，后续经核验的信息信号会降低不确定性，但不会断言单一历史成因、设定价格或作出交易决策。",
+    "sourceIds": [
+      "source-gamestop-synthetic-mechanisms"
+    ],
+    "knownAt": "2021-10-18T23:59:59Z",
+    "claimType": "SCENARIO_ASSUMPTION",
+    "sourceTier": "MODEL",
+    "confidence": null,
+    "isRequired": true,
+    "reviewStatus": "AI_PROPOSED",
+    "reviewedBy": null,
+    "synthetic": true,
+    "impactChannels": [
+      "synthetic-clarification",
+      "synthetic-belief-update"
+    ]
+  }
+]
