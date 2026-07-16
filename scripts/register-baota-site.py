@@ -44,6 +44,15 @@ def loadPanelModules():
     return public, panelSite, firewalls, SiteTotalConfig
 
 
+def panelRequestContext():
+    # 宝塔 10.0.2 的 DelAcceptPort 会读取 Flask request 来保护面板端口。
+    # CLI 注册器没有天然请求上下文，因此仅为调用官方防火墙 API 创建本地上下文。
+    from flask import Flask  # pylint: disable=import-outside-toplevel
+
+    contextApp = Flask("eventshock-baota-cli")
+    return contextApp.test_request_context("/", headers={"Host": "127.0.0.1:65535"})
+
+
 def validateListenAddress(value):
     address = ipaddress.ip_address(value)
     if address.version != 4 or not address.is_private or address.is_loopback:
@@ -138,9 +147,12 @@ def removeOwnedFirewallRules(publicModule, firewallsClass):
     for rule in rules:
         if rule.get("ps") != SITE_NAME:
             raise RuntimeError("18080 已存在非 EventShock 防火墙规则，拒绝自动修改")
-        result = firewallsClass().DelAcceptPort(
-            publicModule.to_dict_obj({"id": int(rule["id"]), "port": str(SITE_PORT)})
-        )
+        # 继续使用宝塔自身 DelAcceptPort，让 UFW/firewalld 与面板记录同步删除；
+        # 请求上下文只用于满足该 API 对 public.GetHost(True) 的依赖。
+        with panelRequestContext():
+            result = firewallsClass().DelAcceptPort(
+                publicModule.to_dict_obj({"id": int(rule["id"]), "port": str(SITE_PORT)})
+            )
         if not result.get("status"):
             raise RuntimeError("宝塔自动放行了 18080，但撤销该规则失败")
 

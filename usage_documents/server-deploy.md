@@ -340,8 +340,13 @@ sudo /opt/eventshock/current/scripts/compose-current.sh exec caddy \
 
 目标服务器尚未安装宝塔 Nginx 时，先通过宝塔官方软件入口安装；当前宝塔 10.x 的 CLI 极速安装命令为：
 
+优先在宝塔“软件商店”中安装 Nginx 1.30。宝塔 10.0.2 的命令行
+`bt install/1/nginx/1.30` 存在参数解析缺陷；需要通过 SSH 自动化同一官方安装器时，
+使用该版本面板实际调用的底层入口：
+
 ```bash
-sudo bt install/1/nginx/1.30
+sudo bash -lc \
+  'cd /www/server/panel/install && bash ./install_soft.sh 1 install nginx 1.30'
 ```
 
 安装器会尝试创建公网 `listen 80` 并启动 Nginx，而 Caddy 已占用该端口，因此安装期间首次启动可能失败。不要停止或改写 Caddy；安装完成后立即使用仓库提供的注册工具创建端口 `18080`、PHP 版本 `00` 的真实宝塔站点和反向代理，并把 Nginx listener 限制到上一步查询出的私有 host-gateway：

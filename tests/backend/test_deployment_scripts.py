@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import stat
+from contextlib import AbstractContextManager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -125,6 +126,51 @@ def testValidateCurrentSiteRequiresExpectedDomain() -> None:
 
     with pytest.raises(RuntimeError, match="域名记录"):
         module.validateCurrentSite(publicModule, site)
+
+
+def testRemoveFirewallRuleUsesRequestContextForBaotaApi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = loadBaotaSiteModule()
+    contextState = {"active": False, "entered": 0}
+
+    class FakeContext(AbstractContextManager):
+        def __enter__(self):
+            contextState["active"] = True
+            contextState["entered"] += 1
+            return self
+
+        def __exit__(self, *_args):
+            contextState["active"] = False
+            return False
+
+    class FakeQuery:
+        def where(self, *_args):
+            return self
+
+        def field(self, *_args):
+            return self
+
+        @staticmethod
+        def select():
+            return [{"id": 7, "port": "18080", "ps": module.SITE_NAME}]
+
+    class FakeFirewall:
+        @staticmethod
+        def DelAcceptPort(parameters):
+            assert contextState["active"] is True
+            assert parameters == {"id": 7, "port": "18080"}
+            return {"status": True}
+
+    publicModule = SimpleNamespace(
+        M=lambda _table: FakeQuery(),
+        to_dict_obj=lambda value: value,
+    )
+    monkeypatch.setattr(module, "panelRequestContext", FakeContext)
+
+    module.removeOwnedFirewallRules(publicModule, FakeFirewall)
+
+    assert contextState == {"active": False, "entered": 1}
 
 
 def validBaotaTask(module):
