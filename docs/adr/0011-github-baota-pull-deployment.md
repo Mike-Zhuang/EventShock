@@ -18,7 +18,7 @@ EventShock 部署在一台资源有限的自有服务器上，并要求更新任
 
 部署完成前必须同时满足应用容器健康和公网 `/api/health` 返回目标 40 位 commit SHA。任一步骤失败时，不写入目标同步状态，并由部署退出陷阱恢复上一发布目录及其唯一镜像。SQLite 和 Caddy 证书使用独立持久卷，不随代码回滚删除。
 
-Caddy 继续独占公网 80/443 并终止 TLS；首次引导可直接代理 Docker 内部的 `app:8000`，最终生产请求必须经过 `Caddy -> Nginx:18080 -> app:18000`，使宝塔获得真实站点流量统计。Nginx 只能在 Docker 私网地址监听。不得直接修改宝塔站点数据库来伪造监控记录；必须通过宝塔自身站点 API 创建 `version=00` 的 PHP 列表项、反向代理和 `free_site_total` 配置，并用真实请求计数验证。
+Caddy 继续独占公网 80/443 并终止 TLS；首次引导可直接代理 Docker 内部的 `app:8000`，最终生产请求必须经过 `Caddy -> Nginx:18080 -> app:18000`，使宝塔获得真实站点流量统计。Nginx 只能在 Docker host-gateway 私网地址监听。UFW active 时，站点注册器动态识别 Caddy 所属 Docker network 的 subnet 与 Linux bridge，只允许该 bridge/subnet 到 host-gateway `18080/tcp`，并禁止 broad/public 18080 规则。注册器必须从 Caddy 容器内验证 `host.docker.internal:18080/api/health`；失败时恢复 Nginx 配置，并只撤销本次新建的精确 UFW 规则。不得直接修改宝塔站点数据库来伪造监控记录；必须通过宝塔自身站点 API 创建 `version=00` 的 PHP 列表项、反向代理和 `free_site_total` 配置，并用真实请求计数验证。
 
 ## 被否决的方案
 
@@ -28,6 +28,7 @@ Caddy 继续独占公网 80/443 并终止 TLS；首次引导可直接代理 Dock
 - **仅写系统 crontab**：任务不会作为宝塔原生对象出现在前端，用户也无法通过宝塔查看其原生日志。
 - **保存 GitHub Token 或部署密钥**：目标仓库公有，匿名只读 fetch 和公共 Check Runs API 已足够，额外凭据只会扩大泄漏面。
 - **使用 webhook 直接触发生产部署**：当前单机 MVP 不需要额外公开接收端、签名密钥和防重放面；10 分钟轮询更简单且延迟可接受。
+- **通过 `ufw allow 18080` 或云安全组解决容器到宿主机连通性**：这会把仅供 Caddy 使用的内部代理端口扩大到 `Anywhere` 或公网来源；必须使用动态 bridge、source subnet、host-gateway 与目标端口四项都受限的精确规则。
 - **只向宝塔数据库插入伪造 PHP 站点**：面板列表记录不等于真实请求路径和 access log。允许通过宝塔自身 API 把项目注册为 `version=00` 的 PHP 列表反向代理站点，但请求必须真实经过其 Nginx，且不能生成与 Caddy 冲突的 80/443 listener。
 
 ## 后果
@@ -44,6 +45,6 @@ Caddy 继续独占公网 80/443 并终止 TLS；首次引导可直接代理 Dock
 - 宝塔原生日志与稳定审计日志都能看到一次实际执行结果；
 - 成功发布后本地、GitHub、同步状态与 `/api/health` 的 SHA 一致；
 - 人为制造的失败发布不会改变可用版本，上一版本仍能响应健康检查；
-- 若启用 Nginx 统计，真实请求确实写入对应 access log，且 18080 未暴露公网。
+- 若启用 Nginx 统计，Caddy 容器能经 `host.docker.internal:18080` 通过健康检查，真实公网请求确实写入对应 access log 与 `site_total`；UFW 只有匹配当前 Caddy bridge/subnet 的精确规则，没有 `Anywhere` 或其他 broad/public 18080 放行。
 
 这些服务器端检查必须以实际命令输出、宝塔页面和日志为证据；脚本或本文档存在本身不代表注册、执行、回滚与流量统计已经验证完成。

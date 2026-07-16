@@ -59,7 +59,7 @@ Browser
        -> deterministic event queue, information network, ledger and order-book core
 ```
 
-生产环境由两个轻量容器和宿主机宝塔 Nginx 组成：Caddy 独占公网 80/443 并处理 TLS，宝塔 Nginx 只在 Docker 私网地址的 18080 端口做真实反向代理与流量记账，单体应用只映射到宿主机回环地址 `127.0.0.1:18000`。首次引导或故障诊断可以让 Caddy 暂时直连容器内应用；这不会产生宝塔站点流量数据。SQLite、证书和配置保存在独立持久卷中。
+生产环境由两个轻量容器和宿主机宝塔 Nginx 组成：Caddy 独占公网 80/443 并处理 TLS，宝塔 Nginx 只在 Docker 私网地址的 18080 端口做真实反向代理与流量记账，单体应用只映射到宿主机回环地址 `127.0.0.1:18000`。启用 UFW 时，只允许动态识别出的 Caddy Docker bridge 与其 subnet 访问 host-gateway 的 18080，禁止对 `Anywhere`、`0.0.0.0/0` 或其他公网来源放行该端口。首次引导或故障诊断可以让 Caddy 暂时直连容器内应用；这不会产生宝塔站点流量数据。SQLite、证书和配置保存在独立持久卷中。
 
 ## 开发环境
 
@@ -150,7 +150,7 @@ docker compose up --detach --build
 
 正式更新采用 GitHub 拉取式链路。开发者在 `codex/self-hosted-mvp` 功能分支完成测试、commit 和 push；服务器只有在 `Backend / Python 3.12.13`、`Frontend / Node 22` 与 `Production container` 三项 GitHub CI 全绿后才接受该 SHA。宝塔原生计划任务每 10 分钟调用 `/opt/eventshock/bin/baota-eventshock-task.sh`，服务器匿名 fetch 公有仓库、拒绝非快进更新，并从目标 commit 的 `git archive` 构建带唯一镜像标签的发布版本。容器与公网健康检查必须返回目标 commit SHA，失败时自动恢复上一发布版本。
 
-默认公网链路由 Caddy 独占 80/443 并处理 TLS，应用只额外映射到 `127.0.0.1:18000`。宝塔任务的原生输出可在面板“计划任务”的日志中查看，稳定审计日志写入 `/opt/eventshock/shared/logs/github-sync.log`。如果需要宝塔 Nginx 的真实站点流量统计，必须显式采用 `Caddy -> Nginx:18080 -> app:18000` 的真实转发链路；不能通过伪造宝塔“PHP 项目”数据库记录制造监控数据。
+默认公网链路由 Caddy 独占 80/443 并处理 TLS，应用只额外映射到 `127.0.0.1:18000`。宝塔任务的原生输出可在面板“计划任务”的日志中查看，稳定审计日志写入 `/opt/eventshock/shared/logs/github-sync.log`。正式监测链路必须采用 `Caddy -> Nginx:18080 -> app:18000` 的真实转发路径，并用仅覆盖 Caddy bridge/subnet 的精确 UFW 规则连接容器与宿主机；Caddy 直连应用只用于引导或故障诊断。不能通过公网放行 18080 或伪造宝塔“PHP 项目”数据库记录来制造监控数据。
 
 正式服务器的 DNS、首次安装、宝塔任务注册、Caddy、HTTPS、发布门禁、日志和排障步骤见[自有服务器部署指南](usage_documents/server-deploy.md)。正式域名使用以下解析：
 

@@ -61,7 +61,7 @@ LLM 不拥有订单簿、账本、数据库、真实交易工具、发布工具�
 - FastAPI 提供 API 和静态前端。
 - SQLite 保存匿名会话的 Event Pack 草稿、场景、审计事件、Experiment 状态/完整配对 checkpoint、不可变 Study 记录和单实验 invalidation 元数据。
 - BYOK 凭据仅保存在进程内存，具有过期时间；SQLite 和导出不保存完整密钥。
-- Caddy 终止 HTTPS、设置安全响应头、限制请求体并移除 Session Header 日志字段；正式监测拓扑中的宝塔 Nginx 只在 Docker 私网反向代理到回环应用，记录真实站点流量并关闭 SSE 缓冲。
+- Caddy 终止 HTTPS、设置安全响应头、限制请求体并移除 Session Header 日志字段；正式监测拓扑中的宝塔 Nginx 只在 Docker host-gateway 私网反向代理到回环应用，记录真实站点流量并关闭 SSE 缓冲。UFW active 时，仅允许动态识别的 Caddy Docker bridge/subnet 访问 host-gateway 的 `18080/tcp`，禁止 broad/public 放行；注册过程还必须从 Caddy 容器内完成健康验证，并在失败时撤销本次新建的精确规则。
 
 匿名 Session ID 是隔离键，不是用户身份认证。系统当前不适合保存敏感、多租户或受监管数据。
 

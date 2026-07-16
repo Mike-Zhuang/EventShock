@@ -226,6 +226,258 @@ def testRemoveFirewallRuleUsesRequestContextForBaotaApi(
     assert contextState == {"active": False, "entered": 1}
 
 
+def testCaddyNetworkDetailsDerivesVerifiedBridgeAndSubnet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = loadBaotaSiteModule()
+    networkId = "607487476fbf" + ("0" * 52)
+    containerPayload = [
+        {
+            "NetworkSettings": {
+                "Networks": {
+                    "eventshock_default": {
+                        "NetworkID": networkId,
+                        "IPAddress": "172.19.0.2",
+                        "IPPrefixLen": 16,
+                    }
+                }
+            }
+        }
+    ]
+    networkPayload = [
+        {
+            "Id": networkId,
+            "Driver": "bridge",
+            "Scope": "local",
+            "IPAM": {"Config": [{"Subnet": "172.19.0.0/16"}]},
+            "Options": {},
+            "Labels": {"com.docker.compose.project": "eventshock"},
+        }
+    ]
+
+    def fakeCheckOutput(command, **_kwargs):
+        if command == ["docker", "inspect", "caddy-id"]:
+            return json.dumps(containerPayload)
+        assert command == ["docker", "network", "inspect", networkId]
+        return json.dumps(networkPayload)
+
+    monkeypatch.setattr(module.subprocess, "check_output", fakeCheckOutput)
+    monkeypatch.setattr(
+        module.os.path,
+        "isdir",
+        lambda path: path == "/sys/class/net/br-607487476fbf",
+    )
+
+    assert module.caddyNetworkDetails("caddy-id") == (
+        "172.19.0.0/16",
+        "br-607487476fbf",
+    )
+
+
+def fakeFirewallPublicModule():
+    class FakeQuery:
+        def where(self, *_args):
+            return self
+
+        @staticmethod
+        def count():
+            return 0
+
+    return SimpleNamespace(M=lambda _table: FakeQuery())
+
+
+def testAssertInternalPortClosedRejectsDestinationSpecificPublicUfwRule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = loadBaotaSiteModule()
+    monkeypatch.setattr(
+        module.os.path,
+        "isfile",
+        lambda path: path == module.UFW_BINARY_PATH,
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "check_output",
+        lambda command, **_kwargs: (
+            ("Added user rules:\nufw allow from any to 172.17.0.1 port 18080 proto tcp\n")
+            if command == ["ufw", "show", "added"]
+            else ""
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="非预期或重复"):
+        module.assertInternalPortClosed(
+            fakeFirewallPublicModule(),
+            "br-607487476fbf",
+            "172.19.0.0/16",
+            "172.17.0.1",
+        )
+
+
+def testAssertInternalPortClosedAllowsSingleExactScopedUfwRule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = loadBaotaSiteModule()
+    exactRule = (
+        "ufw allow in on br-607487476fbf from 172.19.0.0/16 "
+        "to 172.17.0.1 port 18080 proto tcp comment 'EventShock-Caddy-Nginx'\n"
+    )
+    monkeypatch.setattr(
+        module.os.path,
+        "isfile",
+        lambda path: path == module.UFW_BINARY_PATH,
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "check_output",
+        lambda command, **_kwargs: exactRule if command == ["ufw", "show", "added"] else "",
+    )
+
+    module.assertInternalPortClosed(
+        fakeFirewallPublicModule(),
+        "br-607487476fbf",
+        "172.19.0.0/16",
+        "172.17.0.1",
+    )
+
+
+def testEnsureScopedUfwRuleAddsOnlyExactCaddyBridgeRule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = loadBaotaSiteModule()
+    state = {"created": False}
+    calls: list[list[str]] = []
+    expectedRule = module.scopedUfwRule(
+        "br-607487476fbf",
+        "172.19.0.0/16",
+        "172.17.0.1",
+    )
+
+    def fakeCheckOutput(command, **_kwargs):
+        if command == ["ufw", "show", "added"]:
+            if not state["created"]:
+                return "Added user rules:\n"
+            return " ".join(expectedRule[:-1]) + f" '{expectedRule[-1]}'\n"
+        if command == ["ufw", "status"]:
+            if not state["created"]:
+                return "Status: active\n"
+            return (
+                "Status: active\n"
+                "172.17.0.1 18080/tcp on br-607487476fbf ALLOW IN "
+                "172.19.0.0/16 # EventShock-Caddy-Nginx\n"
+            )
+        raise AssertionError(command)
+
+    def fakeCheckCall(command, **_kwargs):
+        calls.append(command)
+        assert command == expectedRule
+        state["created"] = True
+        return 0
+
+    monkeypatch.setattr(module.os.path, "isfile", lambda path: path == module.UFW_BINARY_PATH)
+    monkeypatch.setattr(module.subprocess, "check_output", fakeCheckOutput)
+    monkeypatch.setattr(module.subprocess, "check_call", fakeCheckCall)
+
+    assert (
+        module.ensureScopedUfwRule(
+            "br-607487476fbf",
+            "172.19.0.0/16",
+            "172.17.0.1",
+        )
+        is True
+    )
+    assert calls == [expectedRule]
+
+
+def testEnsureScopedUfwRuleRollsBackFailedPostAddVerification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = loadBaotaSiteModule()
+    calls: list[list[str]] = []
+    expectedRule = module.scopedUfwRule(
+        "br-607487476fbf",
+        "172.19.0.0/16",
+        "172.17.0.1",
+    )
+    expectedDelete = [
+        "ufw",
+        "--force",
+        "delete",
+        *module.scopedUfwRuleSpec(
+            "br-607487476fbf",
+            "172.19.0.0/16",
+            "172.17.0.1",
+        ),
+    ]
+
+    monkeypatch.setattr(module.os.path, "isfile", lambda path: path == module.UFW_BINARY_PATH)
+    monkeypatch.setattr(
+        module.subprocess,
+        "check_output",
+        lambda command, **_kwargs: (
+            "Status: active\n" if command == ["ufw", "status"] else "Added user rules:\n"
+        ),
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "check_call",
+        lambda command, **_kwargs: calls.append(command) or 0,
+    )
+
+    with pytest.raises(RuntimeError, match="未保存精确"):
+        module.ensureScopedUfwRule(
+            "br-607487476fbf",
+            "172.19.0.0/16",
+            "172.17.0.1",
+        )
+
+    assert calls == [expectedRule, expectedDelete]
+
+
+@pytest.mark.parametrize(
+    ("releaseCommit", "shouldPass"),
+    (("abc123", True), ("wrong-sha", False)),
+)
+def testValidateCaddyToNginxRequiresExpectedReleaseCommit(
+    monkeypatch: pytest.MonkeyPatch,
+    releaseCommit: str,
+    shouldPass: bool,
+) -> None:
+    module = loadBaotaSiteModule()
+    expectedCommand = [
+        "docker",
+        "exec",
+        "caddy-id",
+        "wget",
+        "-q",
+        "-O-",
+        "-T",
+        "8",
+        f"--header=Host:{module.SITE_NAME}",
+        f"http://host.docker.internal:{module.SITE_PORT}/api/health",
+    ]
+
+    def fakeCheckOutput(command, **kwargs):
+        assert command == expectedCommand
+        assert kwargs["timeout"] == 12
+        return json.dumps(
+            {
+                "status": "ok",
+                "service": "eventshock-api",
+                "releaseCommit": releaseCommit,
+            }
+        )
+
+    monkeypatch.setattr(module.subprocess, "check_output", fakeCheckOutput)
+
+    if shouldPass:
+        payload = module.validateCaddyToNginx("caddy-id", "abc123")
+        assert payload["releaseCommit"] == "abc123"
+    else:
+        with pytest.raises(RuntimeError, match="发布版本不一致"):
+            module.validateCaddyToNginx("caddy-id", "abc123")
+
+
 def validBaotaTask(module):
     return {
         "id": 17,

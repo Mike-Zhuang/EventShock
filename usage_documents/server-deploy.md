@@ -32,6 +32,7 @@ Internet :80/:443
 - `caddy` 是默认且唯一的公网入口，负责证书申请与续期。
 - `app` 同时提供 FastAPI 与已构建的 React 单页应用。它只映射到宿主机回环地址 `127.0.0.1:18000`，不能从公网直接访问。
 - 宝塔 Nginx 是真实的中间反向代理而不是面板占位记录；生产请求确实经过其 access log，供宝塔站点流量统计使用。
+- UFW 启用时，注册工具只允许动态识别出的 Caddy Docker bridge 及其 subnet 访问 host-gateway 的 `18080`；该规则是容器到宿主机的内部通道，不是公网端口放行。
 - 实验状态接口使用 SSE；宝塔 Nginx 的 EventShock 代理配置必须关闭响应缓冲，保留长连接相关请求头，并且不能缓存 `/api/v1/experiments/*/events`。
 - SQLite 保存在 Docker 命名卷 `eventshock-data`；重新构建应用镜像不会删除该卷。
 - 每个发布目录都生成独立的 `.release.env`，应用镜像标签形如 `eventshock-app:<release-id>`。上一版本不会因下一次构建而被同名镜像覆盖。
@@ -70,7 +71,7 @@ dig +short eventshock.mikezhuang.cn A @8.8.8.8
 | TCP | `80` | `0.0.0.0/0` |
 | TCP | `443` | `0.0.0.0/0` |
 
-UDP `443` 只用于可选 HTTP/3；不开放不会影响 TCP HTTPS。不要把应用端口 `18000` 或可选 Nginx 内部端口 `18080` 开放到公网。SSH 与宝塔面板端口继续遵循服务器现有访问限制。
+UDP `443` 只用于可选 HTTP/3；不开放不会影响 TCP HTTPS。不要在云安全组中放行应用端口 `18000` 或 Nginx 内部端口 `18080`。UFW 可以存在一条由注册工具管理的精确规则：来源必须是动态识别的 Caddy Docker subnet，入接口必须是对应 Linux bridge，目标必须是 host-gateway 且端口只能是 `18080/tcp`；不得存在面向 `Anywhere`、`0.0.0.0/0` 或其他公网来源的 18080 规则。SSH 与宝塔面板端口继续遵循服务器现有访问限制。
 
 ## 3. 本地发布前准备
 
@@ -311,7 +312,8 @@ Internet :80/:443
 安全约束：
 
 - Caddy 继续独占公网 TCP 80/443 并负责 TLS，不能让宝塔 Nginx 再监听这两个端口。
-- Nginx 的 `18080` 只绑定 Docker host-gateway 可达的宿主机内部地址，并且不得在云安全组或 UFW 对公网开放。
+- Nginx 的 `18080` 只绑定 Docker host-gateway 可达的宿主机内部地址，云安全组不得开放该端口。
+- UFW 启用时，只允许 Caddy 当前所属 Docker bridge 的 subnet 经该 bridge 到 host-gateway 的 `18080/tcp`；禁止 `ufw allow 18080`、`Anywhere`、`0.0.0.0/0` 或其他 broad/public 规则。
 - Nginx 上游只能使用 `http://127.0.0.1:18000`；应用端口仍保持回环绑定。
 - 宝塔站点 access log 必须确实接收到 Caddy 转发的请求，面板流量数据才有意义。
 
@@ -360,20 +362,25 @@ sudo /opt/eventshock/bin/register-baota-site.py \
   --listen-address "${gatewayAddress}"
 ```
 
-注册工具调用宝塔自己的 `panelSite.AddSite` 与 `CreateProxy`，不会直接插入 `sites` 数据库；它还会停用宝塔默认公网 vhost 与 `phpfpm_status` vhost，把安装器内置的 phpMyAdmin `888` listener 收口到 `127.0.0.1:888`，并要求唯一非回环业务 listener 是私网 `18080`。随后工具运行 `nginx -t`，并通过内部地址检查 `/api/health`。生成的站点扩展配置包含 `proxy_buffering off`，使实验 SSE 状态流不会被 Nginx 聚合后才一次性返回。站点会以 `project_type=PHP`、`version=00` 出现在宝塔 PHP 项目列表，但实际业务是指向 FastAPI 的反向代理，不会安装或执行 PHP。工具还会通过 `SiteTotalConfig.one_site_status` 启用该站点的 `free_site_total`，并要求服务、Unix socket、站点扩展配置和三次真实请求计数全部通过后才报告成功。
+注册工具调用宝塔自己的 `panelSite.AddSite` 与 `CreateProxy`，不会直接插入 `sites` 数据库；它还会停用宝塔默认公网 vhost 与 `phpfpm_status` vhost，把安装器内置的 phpMyAdmin `888` listener 收口到 `127.0.0.1:888`，并要求唯一非回环业务 listener 是私网 `18080`。工具从正在运行的 Caddy 容器动态读取 Docker network ID、subnet 与对应 Linux bridge；UFW 处于 active 状态时，幂等创建带 `EventShock-Caddy-Nginx` 注释的精确规则，只允许该 bridge/subnet 访问 host-gateway 的 `18080/tcp`，同时拒绝任何 broad/public 18080 放行。随后工具运行 `nginx -t`，先检查宿主机内部 `/api/health`，再从 Caddy 容器内请求 `http://host.docker.internal:18080/api/health`，确保真正的容器到 Nginx 链路可达。若注册过程失败，工具恢复 Nginx 配置快照，并且只删除本次新建的精确 UFW 规则，不会删除原先已存在且已验证的规则。生成的站点扩展配置包含 `proxy_buffering off`，使实验 SSE 状态流不会被 Nginx 聚合后才一次性返回。站点会以 `project_type=PHP`、`version=00` 出现在宝塔 PHP 项目列表，但实际业务是指向 FastAPI 的反向代理，不会安装或执行 PHP。工具还会通过 `SiteTotalConfig.one_site_status` 启用该站点的 `free_site_total`，并要求服务、Unix socket、站点扩展配置和三次真实请求计数全部通过后才报告成功。
 
 只有上述内部健康检查通过后，才把共享配置的 `CADDY_UPSTREAM` 改为 `host.docker.internal:18080` 并重新应用 Compose。最后确认：
 
 ```bash
 sudo ss -ltnp | grep -E ':(80|443|18000|18080)\b'
 sudo /www/server/nginx/sbin/nginx -t
+sudo ufw status numbered
+sudo /opt/eventshock/current/scripts/compose-current.sh exec -T caddy \
+  wget -q -O- -T 8 --header='Host: eventshock.mikezhuang.cn' \
+  http://host.docker.internal:18080/api/health
 curl --fail --show-error https://eventshock.mikezhuang.cn/api/health
+sudo tail -n 20 /www/wwwlogs/eventshock.mikezhuang.cn.log
 sudo find /www/server/site_total/data/total -type f -mmin -10 -print
 sudo /opt/eventshock/bin/register-baota-site.py \
   --listen-address "${gatewayAddress}" --show
 ```
 
-验收时必须看到 Caddy 独占公网 80/443、应用只监听 `127.0.0.1:18000`、宝塔 Nginx 的业务入口只监听私有 host-gateway 的 18080；若保留安装器内置 phpMyAdmin listener，它必须只绑定 `127.0.0.1:888`。一次公网请求后，宝塔 access log / `site_total` 文件还必须实际增长。
+验收时必须看到 Caddy 独占公网 80/443、应用只监听 `127.0.0.1:18000`、宝塔 Nginx 的业务入口只监听私有 host-gateway 的 18080；若保留安装器内置 phpMyAdmin listener，它必须只绑定 `127.0.0.1:888`。若 UFW active，状态中必须存在来源为 Caddy subnet、入接口为对应 Docker bridge、目标为 host-gateway `18080/tcp` 且注释为 `EventShock-Caddy-Nginx` 的精确规则，同时不得存在任何 `Anywhere` 或其他 broad/public 18080 规则。Caddy 容器内健康请求与公网健康请求都必须成功；一次公网请求后，宝塔 access log / `site_total` 文件还必须实际增长。仅凭 `ss` 显示私网监听，不能单独证明端口没有被防火墙对公网放行。
 
 不要在未确认内部监听、端口冲突和完整请求路径前启用该模式。是否已经产生真实统计，应同时核对 Nginx access log 与宝塔网页，不能只看站点列表中是否出现名称。
 
@@ -449,6 +456,12 @@ dig +short eventshock.mikezhuang.cn A @1.1.1.1
 sudo ss -ltnp '( sport = :80 or sport = :443 )'
 sudo /opt/eventshock/current/scripts/compose-current.sh logs --tail=100 caddy
 ```
+
+### Caddy 切换到 `host.docker.internal:18080` 后返回 503 或超时
+
+先保持或恢复 `CADDY_UPSTREAM=app:8000`，保证公网服务可用；然后重新运行 `register-baota-site.py --listen-address "${gatewayAddress}"`。注册器会重新识别当前 Caddy Docker bridge/subnet、检查精确 UFW 规则，并从 Caddy 容器内验证 Nginx 健康接口。Docker network 被重建后，bridge 名称或 subnet 可能改变，此时必须重跑注册器，不能沿用旧网络规则。
+
+使用 `sudo ufw status numbered` 核对是否只有带 `EventShock-Caddy-Nginx` 注释的精确 18080 规则。不要用 `sudo ufw allow 18080`、面板“全部来源”放行或云安全组规则来临时解决超时；这些做法会把内部代理端口暴露到公网。只有注册器与容器内健康检查通过后，才能再次把 `CADDY_UPSTREAM` 切到 `host.docker.internal:18080`。
 
 ### Docker 构建被系统终止
 

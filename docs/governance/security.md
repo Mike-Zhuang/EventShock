@@ -137,7 +137,8 @@
 - 同步使用裸镜像、固定 refspec、快进关系检查和 `git archive`，不在运行目录执行 merge。
 - 每个发布使用唯一镜像标签与独立 `.release.env`；Compose 调用会清除宿主进程的同名插值变量，避免新 SHA 污染旧版本回滚。
 - 宝塔任务必须通过其 `AddCrontab` 注册。任务正文和日志不能包含 Key、Token、环境文件内容或带凭据的 Git URL。
-- 宝塔 Nginx 只允许监听 Docker 内部 host-gateway 的 18080，上游应用只绑定 `127.0.0.1:18000`；Caddy 继续独占公网 80/443。
+- 宝塔 Nginx 只允许监听 Docker 内部 host-gateway 的 18080，上游应用只绑定 `127.0.0.1:18000`；Caddy 继续独占公网 80/443。UFW active 时，注册器动态识别 Caddy 的 Docker bridge/subnet，仅允许该来源到 host-gateway 的 `18080/tcp`，并拒绝 `Anywhere`、`0.0.0.0/0` 或其他 broad/public 放行。
+- 注册器必须从 Caddy 容器内验证 `host.docker.internal:18080/api/health`；注册失败时恢复 Nginx 配置，并只撤销本次新建的精确 UFW 规则，不删除已存在且已验证的规则。
 - 宝塔反向代理明确关闭 `proxy_cache`、`proxy_no_cache` 与 `proxy_cache_bypass`，避免匿名 `X-Session-ID` 绑定的 API 响应被跨会话缓存。
 
 这些控制的代码存在不等于部署已被独立审查；分支保护、宿主权限、真实回滚、重启顺序和宝塔流量统计仍需实际证据。

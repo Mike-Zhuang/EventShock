@@ -33,7 +33,7 @@
 | 前端与 Human-in-the-loop | `已实现` | 主流程与 Study Workbench 可操作；Experiment 状态通过 SSE 推送变更并保留周期性 HTTP 对账，不提供高频逐订单 WebSocket。 |
 | 数据与可复现 | `已实现` | ZIP/CSV/JSON/六张固定 Schema Parquet 完成；没有对象存储和长期 artifact registry。 |
 | 安全与治理 | `部分实现` | 抽取前确定性内容扫描、风险分级、确认后脱敏与安全摘要已接线；认证/RBAC、完整附件解析、反病毒沙箱、全面 PII/数据主体工作流与人工安全证据未完成。 |
-| 自有服务器部署 | `已实现，待外部证据` | GitHub CI 门禁、快进拉取、不可变发布/回滚、宝塔原生 10 分钟任务与 Caddy→宝塔 Nginx→app 拓扑均有实现；目标 SHA 的公网、任务日志、流量统计和恢复演练仍必须由服务器观测证明。 |
+| 自有服务器部署 | `已实现，待外部证据` | GitHub CI 门禁、快进拉取、不可变发布/回滚、宝塔原生 10 分钟任务与 Caddy→宝塔 Nginx→app 拓扑均有实现；内部 `18080` 还受动态 Caddy bridge/subnet 精确 UFW 规则约束，并从 Caddy 容器内核对目标 SHA。目标 SHA 的公网、任务日志、流量统计和恢复演练仍必须由服务器观测证明。 |
 
 ## 3. 核心产品、案例与总体架构映射（蓝图第 1–7 章）
 
@@ -199,7 +199,7 @@
 | 单实验 artifact invalidation | `已实现` | `POST /api/v1/experiments/{id}/invalidate`、SQLite invalidation 字段、Results 页面操作与结果读取/导出 gate、审计事件 | `test_api.py`、`test_database.py`、`frontend/src/api/normalize.test.ts` | 只允许当前 Session 对单个已完成实验操作；保留底层 result 供取证但不再返回为有效结果。Results 弹窗尚无独立按钮级前端交互测试；按模型/数据/版本批量查找和失效仍是控制缺口。 |
 | ADR | `已实现` | `docs/adr/0001-0011` | 治理测试检查部分引用 | 重大未来变更仍应新增 ADR。 |
 | Docker 非 root、只读 FS、资源限制、健康检查 | `已实现` | `Dockerfile`、`compose.yml` | CI container build gate | 运行安全性需在生产主机实测。 |
-| GitHub→宝塔→自有服务器拉取式部署 | `已实现，待外部证据` | `sync-from-github.sh`、`deploy-server.sh`、宝塔任务/站点注册器、Caddy/Compose 与部署指南 | `test_deployment_scripts.py`、`test_deployment_shell_scripts.py` | 代码要求三项 CI、快进关系、commit archive、目标 SHA 健康检查与失败回滚；仓库无法单独证明目标主机任务、TLS、日志、site_total 与公网 SHA 已完成验收。 |
+| GitHub→宝塔→自有服务器拉取式部署 | `已实现，待外部证据` | `sync-from-github.sh`、`deploy-server.sh`、宝塔任务/站点注册器、Caddy/Compose 与部署指南 | `test_deployment_scripts.py`、`test_deployment_shell_scripts.py` | 代码要求三项 CI、快进关系、commit archive、目标 SHA 健康检查与失败回滚；注册器拒绝公开 `18080`，只允许动态识别的 Caddy bridge/subnet，并实测容器→Nginx→应用链路。仓库无法单独证明目标主机任务、TLS、日志、site_total 与公网 SHA 已完成验收。 |
 | 请求限制、安全响应头、rate limit、稳定错误码 | `已实现` | Caddyfile、FastAPI middleware、`rate_limit.py` | `test_rate_limit.py`、`test_api.py` | rate limit 是单进程内存状态；多副本需要共享限流器。 |
 | OpenTelemetry traces/metrics/structured logging | `部分实现` | `backend/app/observability.py`、`GET /api/v1/system/metrics`、HTTP trace ID、LLM telemetry、Docker JSON log | `test_api.py`、cognition tests | 有不携带 URL/正文/session/credential 标签的有界聚合指标，但无 OTEL collector、Prometheus、集中式 dashboard、告警或端到端 spans。 |
 | SLO 与真实性能/成本基准 | `部分实现` | `/api/v1/system/metrics` 返回 API 延迟/错误、队列、存储、认知汇总和显式标记的 SLO targets | `test_api.py` 检查 `TARGETS_NOT_PRODUCTION_EVIDENCE` | 目标值与当前进程快照不是生产可用性、容量或真实 LLM 成本证据；仍需在标明硬件/配置的环境做持续测量。 |
@@ -235,7 +235,7 @@
 | Gate 9：实验编排与统计 | `部分实现` | 单实验配对编排与有界 Study coordinator；全因子/LHS、8 类控制、10 类消融、sign test、Holm 和探索性敏感性均有 artifact | simulation/API/statistics/Study tests | Study 中认知与若干 subsystem removal 是显式代理；Sobol/Morris/Bayesian design、真实历史输入与独立验证仍缺失。 |
 | Gate 10：前端与 HAI | `已实现，待外部证据` | 十一个可操作页面、SSE Run Center、Study Workbench 与双语 UI | 前端测试 | 仍需目标用户任务测试。 |
 | Gate 11：安全与责任 AI | `部分实现` | 控制、文档、inventory、red-team definitions、release gate | governance tests | 人工红队、安全/许可审查仍 pending。 |
-| Gate 12：生产部署与可观测 | `部分实现` | GitHub 拉取式发布、宝塔原生任务/日志、Caddy→Nginx→app 站点统计、部署前 SQLite backup 与 `/api/v1/system/metrics` | deployment/API tests + 需公网与服务器运行证据 | 无集中式 OTEL/告警；宝塔 UI、真实流量、目标 SHA、备份恢复仍需现场验收和演练。 |
+| Gate 12：生产部署与可观测 | `部分实现` | GitHub 拉取式发布、宝塔原生任务/日志、scoped UFW、Caddy→Nginx→app 站点统计、部署前 SQLite backup 与 `/api/v1/system/metrics` | deployment/API tests + 需公网与服务器运行证据 | 无集中式 OTEL/告警；宝塔 UI、真实流量、目标 SHA、备份恢复仍需现场验收和演练。 |
 | Gate 13：真实用户验证 | `未实现` | 无访谈/可用性/信任测试结果 | 无 | 不得声称“陌生用户无需指导即可完成”已经验证。 |
 | Gate 14：旗舰研究与 Demo Day | `部分实现` | SpaceX case、live experiment、results/trace/export | 可执行系统 + 待生成 Demo artifact | 预计算 ensemble、五分钟彩排、视频后备和人工审核结果未存档。 |
 | Gate 15：课程后生产化 | `明确不做 / 后续` | 没有多租户 SaaS 基础设施 | 无 | 需要认证、Postgres/对象存储、worker pool、OTEL、合规和运维团队。 |

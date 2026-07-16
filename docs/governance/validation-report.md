@@ -13,7 +13,7 @@
 | Python 解释器 | `python -c "import sys; ..."` | CPython 3.12.13，解释器位于项目 `eventshock` Conda 环境 | 只证明本次本地命令使用了规定解释器 |
 | 完整后端静态检查 | `python -m ruff check backend tests` | passed | 证明当前 Python 文件满足已配置的 Ruff 规则 |
 | 完整后端格式检查 | `python -m ruff format --check backend tests scripts` | 80 files already formatted | 只证明格式一致 |
-| 完整后端回归 | `python -m pytest` | 207 passed, 1 upstream deprecation warning | 覆盖当前自动化契约；不等于外部科学有效性 |
+| 完整后端回归 | `python -m pytest` | 214 passed, 1 upstream deprecation warning | 覆盖当前自动化契约；不等于外部科学有效性 |
 | 前端类型检查 | `npm run typecheck` | passed | 证明 TypeScript 当前可编译 |
 | 前端组件/API 测试 | `npm test` | 5 files、17 tests passed | 覆盖归一化、SSE 分帧、双语资源、Study 页面与应用壳，不是目标用户研究 |
 | 前端生产构建 | `npm run build` | passed，5,986 modules transformed | 证明 Vite 发布工件可生成 |
@@ -29,7 +29,7 @@
 
 ## 已关闭的历史回归问题
 
-此前发现的 `runScenario(cognitiveSignals=...)` 签名不一致和上传原文通过候选 claim 回显的问题已经修复，并进入当前完整回归。最新的 207 项后端测试全部通过；本报告不再把这两项列为开放失败。
+此前发现的 `runScenario(cognitiveSignals=...)` 签名不一致和上传原文通过候选 claim 回显的问题已经修复，并进入当前完整回归。最新的 214 项后端测试全部通过；本报告不再把这两项列为开放失败。新增的部署测试还覆盖 Caddy Docker bridge/subnet 识别、禁止公开 `18080`、精确 UFW 规则、添加后失败回滚和容器内版本一致性健康检查。
 
 唯一警告来自 Starlette `TestClient` 对当前 `httpx` 适配层的上游弃用提示，不是测试失败；后续依赖升级仍需单独评估。自动化通过只能支持“已编码契约在当前环境中通过”，不能解释为产品、科学、模型或生产发布已经获批。
 

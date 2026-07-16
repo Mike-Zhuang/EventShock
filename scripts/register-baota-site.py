@@ -7,6 +7,7 @@ import ipaddress
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -32,6 +33,8 @@ SITE_TOTAL_SOCKET = "/tmp/site_total.sock"
 SITE_TOTAL_EXTENSION_PATH = os.path.join(EXTENSION_DIR, "site_total.conf")
 SITE_TOTAL_DATA_GLOB = f"/www/server/site_total/data/total/{SITE_NAME}/*.json"
 PANEL_LOOPBACK_LISTENER = "127.0.0.1:888"
+UFW_BINARY_PATH = "/usr/sbin/ufw"
+UFW_RULE_COMMENT = "EventShock-Caddy-Nginx"
 
 
 def loadPanelModules():
@@ -96,22 +99,68 @@ def validateListenAddress(value):
     return listenAddress, containerIds[0]
 
 
-def caddyNetwork(containerId):
+def caddyNetworkDetails(containerId):
     container = json.loads(subprocess.check_output(["docker", "inspect", containerId], text=True))[
         0
     ]
     networks = container.get("NetworkSettings", {}).get("Networks", {})
     if len(networks) != 1:
         raise RuntimeError("Caddy 必须只连接一个 EventShock Docker 网络")
-    network = next(iter(networks.values()))
-    address = network.get("IPAddress")
-    prefixLength = network.get("IPPrefixLen")
-    if not address or not prefixLength:
-        raise RuntimeError("无法读取 Caddy Docker 网络范围")
-    trustedNetwork = ipaddress.ip_network(f"{address}/{prefixLength}", strict=False)
-    if trustedNetwork.version != 4 or not trustedNetwork.is_private:
+    attachment = next(iter(networks.values()))
+    networkId = attachment.get("NetworkID")
+    address = attachment.get("IPAddress")
+    prefixLength = attachment.get("IPPrefixLen")
+    if (
+        not isinstance(networkId, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", networkId)
+        or not address
+        or not prefixLength
+    ):
+        raise RuntimeError("无法读取 Caddy Docker 网络标识或 IPv4 范围")
+
+    network = json.loads(
+        subprocess.check_output(["docker", "network", "inspect", networkId], text=True)
+    )[0]
+    networkLabels = network.get("Labels") or {}
+    if (
+        network.get("Id") != networkId
+        or network.get("Driver") != "bridge"
+        or network.get("Scope") != "local"
+        or networkLabels.get("com.docker.compose.project") != "eventshock"
+    ):
+        raise RuntimeError("Caddy 必须连接本机 bridge 类型的 Docker 网络")
+
+    caddyAddress = ipaddress.ip_address(address)
+    configuredNetworks = []
+    for item in network.get("IPAM", {}).get("Config", []):
+        subnet = item.get("Subnet")
+        if not subnet:
+            continue
+        candidate = ipaddress.ip_network(subnet, strict=True)
+        if candidate.version == 4 and caddyAddress in candidate:
+            configuredNetworks.append(candidate)
+    if len(configuredNetworks) != 1:
+        raise RuntimeError("无法唯一识别包含 Caddy 地址的 Docker IPv4 子网")
+
+    trustedNetwork = configuredNetworks[0]
+    attachedNetwork = ipaddress.ip_network(f"{address}/{prefixLength}", strict=False)
+    if (
+        trustedNetwork != attachedNetwork
+        or trustedNetwork.version != 4
+        or not trustedNetwork.is_private
+    ):
         raise RuntimeError("Caddy Docker 网络不是私有 IPv4 范围")
-    return str(trustedNetwork)
+
+    options = network.get("Options") or {}
+    bridgeInterface = options.get("com.docker.network.bridge.name") or f"br-{networkId[:12]}"
+    if (
+        not isinstance(bridgeInterface, str)
+        or len(bridgeInterface) > 15
+        or not re.fullmatch(r"[A-Za-z0-9_.:-]+", bridgeInterface)
+        or not os.path.isdir(f"/sys/class/net/{bridgeInterface}")
+    ):
+        raise RuntimeError("无法验证 Caddy Docker bridge 接口")
+    return str(trustedNetwork), bridgeInterface
 
 
 def checkApplicationHealth():
@@ -120,6 +169,9 @@ def checkApplicationHealth():
         payload = json.loads(response.read().decode("utf-8"))
     if payload.get("status") != "ok":
         raise RuntimeError("应用回环健康检查失败")
+    if payload.get("service") != "eventshock-api" or not payload.get("releaseCommit"):
+        raise RuntimeError("应用健康响应缺少服务标识或发布 SHA")
+    return payload
 
 
 def addSite(publicModule, panelSiteClass):
@@ -161,15 +213,88 @@ def removeOwnedFirewallRules(publicModule, firewallsClass):
             raise RuntimeError("宝塔自动放行了 18080，但撤销该规则失败")
 
 
-def assertInternalPortClosed(publicModule):
+def ufwEnvironment():
+    return {**os.environ, "LC_ALL": "C"}
+
+
+def scopedUfwRuleSpec(bridgeInterface, trustedCaddyNetwork, listenAddress):
+    return [
+        "allow",
+        "in",
+        "on",
+        bridgeInterface,
+        "from",
+        trustedCaddyNetwork,
+        "to",
+        listenAddress,
+        "port",
+        str(SITE_PORT),
+        "proto",
+        "tcp",
+    ]
+
+
+def scopedUfwRule(bridgeInterface, trustedCaddyNetwork, listenAddress):
+    return [
+        "ufw",
+        *scopedUfwRuleSpec(bridgeInterface, trustedCaddyNetwork, listenAddress),
+        "comment",
+        UFW_RULE_COMMENT,
+    ]
+
+
+def configuredUfwRules():
+    if not os.path.isfile(UFW_BINARY_PATH):
+        return []
+    output = subprocess.check_output(
+        ["ufw", "show", "added"],
+        text=True,
+        env=ufwEnvironment(),
+    )
+    rules = []
+    for line in output.splitlines():
+        if not line.startswith("ufw "):
+            continue
+        tokens = shlex.split(line)
+        if tokens and tokens[0] == "ufw":
+            rules.append(tokens)
+    return rules
+
+
+def ufwRuleTargetsInternalPort(rule):
+    portPattern = re.compile(rf"(?:^|[,:]){SITE_PORT}(?:$|[/:,])")
+    return any(portPattern.search(token) for token in rule[1:])
+
+
+def ufwIsActive():
+    if not os.path.isfile(UFW_BINARY_PATH):
+        return False
+    status = subprocess.check_output(
+        ["ufw", "status"],
+        text=True,
+        env=ufwEnvironment(),
+    )
+    return "Status: active" in status
+
+
+def scopedUfwRulePresent(bridgeInterface, trustedCaddyNetwork, listenAddress):
+    expectedRule = scopedUfwRule(bridgeInterface, trustedCaddyNetwork, listenAddress)
+    internalPortRules = [rule for rule in configuredUfwRules() if ufwRuleTargetsInternalPort(rule)]
+    return internalPortRules == [expectedRule]
+
+
+def assertInternalPortClosed(
+    publicModule,
+    bridgeInterface,
+    trustedCaddyNetwork,
+    listenAddress,
+):
     if publicModule.M("firewall").where("port=?", (str(SITE_PORT),)).count():
         raise RuntimeError("宝塔防火墙数据库仍包含 18080 放行规则")
-    if os.path.isfile("/usr/sbin/ufw"):
-        ufwStatus = subprocess.check_output(["ufw", "status"], text=True)
-        if "Status: active" in ufwStatus and re.search(
-            rf"(?m)^\s*{SITE_PORT}(?:/tcp)?\s+ALLOW", ufwStatus
-        ):
-            raise RuntimeError("UFW 仍对外放行 18080")
+    expectedRule = scopedUfwRule(bridgeInterface, trustedCaddyNetwork, listenAddress)
+    internalPortRules = [rule for rule in configuredUfwRules() if ufwRuleTargetsInternalPort(rule)]
+    if internalPortRules not in ([], [expectedRule]):
+        raise RuntimeError("UFW 存在非预期或重复的 18080 放行规则")
     if os.path.isfile("/usr/bin/firewall-cmd"):
         activeZones = subprocess.check_output(["firewall-cmd", "--get-active-zones"], text=True)
         zones = [
@@ -194,6 +319,62 @@ def assertInternalPortClosed(publicModule):
                 == 0
             ):
                 raise RuntimeError(f"firewalld zone={zone} 仍对外放行 18080")
+
+
+def removeScopedUfwRule(bridgeInterface, trustedCaddyNetwork, listenAddress):
+    subprocess.check_call(
+        [
+            "ufw",
+            "--force",
+            "delete",
+            *scopedUfwRuleSpec(bridgeInterface, trustedCaddyNetwork, listenAddress),
+        ],
+        env=ufwEnvironment(),
+    )
+    if scopedUfwRulePresent(bridgeInterface, trustedCaddyNetwork, listenAddress):
+        raise RuntimeError("本次新增的 Caddy→Nginx UFW 规则删除后仍然存在")
+
+
+def ensureScopedUfwRule(bridgeInterface, trustedCaddyNetwork, listenAddress):
+    if not ufwIsActive():
+        return False
+
+    expectedRule = scopedUfwRule(bridgeInterface, trustedCaddyNetwork, listenAddress)
+    rules = configuredUfwRules()
+    internalPortRules = [rule for rule in rules if ufwRuleTargetsInternalPort(rule)]
+    if internalPortRules == [expectedRule]:
+        return False
+    if internalPortRules:
+        raise RuntimeError("UFW 存在非预期或重复的 18080 放行规则")
+
+    created = False
+    try:
+        subprocess.check_call(expectedRule, env=ufwEnvironment())
+        created = True
+        if not scopedUfwRulePresent(bridgeInterface, trustedCaddyNetwork, listenAddress):
+            raise RuntimeError("UFW 未保存精确的 Caddy→Nginx 内部放行规则")
+        status = subprocess.check_output(
+            ["ufw", "status"],
+            text=True,
+            env=ufwEnvironment(),
+        )
+        requiredValues = (
+            bridgeInterface,
+            trustedCaddyNetwork,
+            listenAddress,
+            str(SITE_PORT),
+            UFW_RULE_COMMENT,
+        )
+        if not all(value in status for value in requiredValues):
+            raise RuntimeError("UFW 运行状态未显示完整的 Caddy→Nginx 内部放行边界")
+    except Exception:
+        if created:
+            try:
+                removeScopedUfwRule(bridgeInterface, trustedCaddyNetwork, listenAddress)
+            except Exception as rollbackError:
+                raise RuntimeError("UFW 规则添加失败，且本次新增规则无法回滚") from rollbackError
+        raise
+    return True
 
 
 def ensureProxy(publicModule, panelSiteClass):
@@ -450,6 +631,38 @@ def validateAndStartNginx(listenAddress):
         raise RuntimeError("宝塔 Nginx 反向代理健康检查失败")
 
 
+def validateCaddyToNginx(caddyContainerId, expectedReleaseCommit):
+    command = [
+        "docker",
+        "exec",
+        caddyContainerId,
+        "wget",
+        "-q",
+        "-O-",
+        "-T",
+        "8",
+        f"--header=Host:{SITE_NAME}",
+        f"http://host.docker.internal:{SITE_PORT}/api/health",
+    ]
+    try:
+        output = subprocess.check_output(command, text=True, timeout=12)
+        payload = json.loads(output)
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        json.JSONDecodeError,
+    ) as error:
+        raise RuntimeError("Caddy 容器无法通过宝塔 Nginx 完成健康检查") from error
+
+    if (
+        payload.get("status") != "ok"
+        or payload.get("service") != "eventshock-api"
+        or payload.get("releaseCommit") != expectedReleaseCommit
+    ):
+        raise RuntimeError("Caddy→宝塔 Nginx 健康响应与当前应用发布版本不一致")
+    return payload
+
+
 def enableSiteTraffic(siteTotalConfigClass, siteId):
     result = siteTotalConfigClass().one_site_status(int(siteId), True)
     if result:
@@ -550,7 +763,7 @@ def main():
     if not os.path.isfile(NGINX_BINARY):
         raise RuntimeError("宝塔 Nginx 尚未安装")
     listenAddress, caddyContainerId = validateListenAddress(arguments.listen_address)
-    trustedCaddyNetwork = caddyNetwork(caddyContainerId)
+    trustedCaddyNetwork, trustedCaddyInterface = caddyNetworkDetails(caddyContainerId)
     publicModule, panelSiteClass, firewallsClass, siteTotalConfigClass = loadPanelModules()
     site = currentSite(publicModule)
     if arguments.show:
@@ -562,6 +775,12 @@ def main():
                     "site": site or None,
                     "listen": f"{listenAddress}:{SITE_PORT}",
                     "trustedCaddyNetwork": trustedCaddyNetwork,
+                    "trustedCaddyInterface": trustedCaddyInterface,
+                    "scopedUfwRulePresent": scopedUfwRulePresent(
+                        trustedCaddyInterface,
+                        trustedCaddyNetwork,
+                        listenAddress,
+                    ),
                     "siteTotal": {
                         "config": trafficConfig,
                         "serviceActive": subprocess.call(
@@ -579,7 +798,7 @@ def main():
         )
         return
 
-    checkApplicationHealth()
+    applicationHealth = checkApplicationHealth()
     wasNginxRunning = nginxIsRunning()
     if not site:
         addSite(publicModule, panelSiteClass)
@@ -588,7 +807,12 @@ def main():
     # 网关访问。每次运行都做幂等清理，避免上次中途失败留下规则。
     removeOwnedFirewallRules(publicModule, firewallsClass)
     validateCurrentSite(publicModule, site)
-    assertInternalPortClosed(publicModule)
+    assertInternalPortClosed(
+        publicModule,
+        trustedCaddyInterface,
+        trustedCaddyNetwork,
+        listenAddress,
+    )
 
     managedPaths = [
         NGINX_CONFIG_PATH,
@@ -601,6 +825,7 @@ def main():
         SITE_TOTAL_EXTENSION_PATH,
     ]
     snapshots = snapshotFiles(managedPaths)
+    scopedUfwRuleCreated = False
     try:
         # CreateProxy 会调用宝塔 serviceReload，故必须先把所有 listener 收口。
         disableDefaultPublicVhost()
@@ -614,9 +839,25 @@ def main():
         enableSiteTraffic(siteTotalConfigClass, int(site["id"]))
         trafficRequestsBefore = siteTrafficRequests()
         validateEffectiveNginxConfig(listenAddress)
+        scopedUfwRuleCreated = ensureScopedUfwRule(
+            trustedCaddyInterface,
+            trustedCaddyNetwork,
+            listenAddress,
+        )
         validateAndStartNginx(listenAddress)
+        validateCaddyToNginx(caddyContainerId, applicationHealth["releaseCommit"])
         validateSiteTraffic(listenAddress, trafficRequestsBefore)
     except Exception as originalError:
+        firewallRollbackError = None
+        if scopedUfwRuleCreated:
+            try:
+                removeScopedUfwRule(
+                    trustedCaddyInterface,
+                    trustedCaddyNetwork,
+                    listenAddress,
+                )
+            except Exception as rollbackError:
+                firewallRollbackError = rollbackError
         restoreFiles(snapshots)
         if wasNginxRunning:
             try:
@@ -628,7 +869,11 @@ def main():
             subprocess.call([NGINX_INIT_SCRIPT, "stop"])
             if nginxIsRunning():
                 raise RuntimeError("宝塔配置失败，且 Nginx 未能保持停止状态") from originalError
-        raise originalError
+        if firewallRollbackError:
+            raise RuntimeError(
+                "宝塔配置失败，且本次新增的窄范围 UFW 规则无法回滚"
+            ) from firewallRollbackError
+        raise
 
     print(
         json.dumps(
@@ -639,6 +884,12 @@ def main():
                 "listen": f"{listenAddress}:{SITE_PORT}",
                 "upstream": APP_URL,
                 "trustedCaddyNetwork": trustedCaddyNetwork,
+                "trustedCaddyInterface": trustedCaddyInterface,
+                "scopedUfwRulePresent": scopedUfwRulePresent(
+                    trustedCaddyInterface,
+                    trustedCaddyNetwork,
+                    listenAddress,
+                ),
                 "siteTotalRequests": siteTrafficRequests(),
             },
             ensure_ascii=False,
