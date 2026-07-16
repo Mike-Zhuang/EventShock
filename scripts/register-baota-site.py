@@ -352,14 +352,27 @@ def validateEffectiveNginxConfig(listenAddress):
 
 
 def nginxIsRunning():
-    return (
-        subprocess.call(
-            [NGINX_INIT_SCRIPT, "status"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        == 0
+    # 宝塔 10.0.2 的 init 脚本把“stopped”返回为 0、把“running”返回为 1，
+    # 不能按常规 service 退出码判断。直接核对进程名与 /proc 可执行文件，
+    # 同时拒绝同名但并非宝塔二进制的进程。
+    result = subprocess.run(
+        ["pgrep", "-x", "nginx"],
+        check=False,
+        capture_output=True,
+        text=True,
     )
+    if result.returncode == 1:
+        return False
+    if result.returncode != 0:
+        raise RuntimeError("无法判断宝塔 Nginx 进程状态")
+    processIds = [value for value in result.stdout.splitlines() if value.isdigit()]
+    if not processIds:
+        return False
+    expectedBinary = os.path.realpath(NGINX_BINARY)
+    processBinaries = {os.path.realpath(f"/proc/{processId}/exe") for processId in processIds}
+    if processBinaries != {expectedBinary}:
+        raise RuntimeError("检测到并非宝塔二进制的同名 Nginx 进程")
+    return True
 
 
 def validateAndStartNginx(listenAddress):

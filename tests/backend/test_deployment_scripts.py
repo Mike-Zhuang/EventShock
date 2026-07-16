@@ -76,6 +76,35 @@ def testValidateAndStartNginxUsesCorrectServiceAction(
     assert serviceCalls == [[module.NGINX_INIT_SCRIPT, expectedAction]]
 
 
+@pytest.mark.parametrize(
+    ("returnCode", "processOutput", "expectedRunning"),
+    ((1, "", False), (0, "42\n43\n", True)),
+)
+def testNginxRunningUsesProcessIdentityInsteadOfBrokenInitStatus(
+    monkeypatch: pytest.MonkeyPatch,
+    returnCode: int,
+    processOutput: str,
+    expectedRunning: bool,
+) -> None:
+    module = loadBaotaSiteModule()
+    calls: list[list[str]] = []
+
+    def fakeRun(command, **_kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=returnCode, stdout=processOutput)
+
+    def fakeRealpath(path):
+        if str(path).startswith("/proc/"):
+            return module.NGINX_BINARY
+        return str(path)
+
+    monkeypatch.setattr(module.subprocess, "run", fakeRun)
+    monkeypatch.setattr(module.os.path, "realpath", fakeRealpath)
+
+    assert module.nginxIsRunning() is expectedRunning
+    assert calls == [["pgrep", "-x", "nginx"]]
+
+
 def testValidateEffectiveNginxConfigRejectsPublicListeners(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
