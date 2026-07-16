@@ -64,6 +64,7 @@ def testValidateAndStartNginxUsesCorrectServiceAction(
         module.subprocess,
         "check_output",
         lambda command, **_kwargs: (
+            'LISTEN 0 511 127.0.0.1:888 0.0.0.0:* users:(("nginx",pid=8,fd=8))\n'
             'LISTEN 0 511 172.17.0.1:18080 0.0.0.0:* users:(("nginx",pid=8,fd=9))\n'
         ),
     )
@@ -120,6 +121,29 @@ def testValidateEffectiveNginxConfigRejectsPublicListeners(
 
     with pytest.raises(RuntimeError, match="只允许一个"):
         module.validateEffectiveNginxConfig("172.17.0.1")
+
+
+def testRestrictPanelAuxiliaryListenersIsSafeAndIdempotent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = loadBaotaSiteModule()
+    nginxConfig = tmp_path / "nginx.conf"
+    statusConfig = tmp_path / "phpfpm_status.conf"
+    disabledStatusConfig = tmp_path / "phpfpm_status.conf.eventshock-disabled"
+    nginxConfig.write_text("http {\nserver {\n    listen 888;\n    server_name phpmyadmin;\n}\n}\n")
+    statusConfig.write_text("server {\n    listen 80;\n    server_name 127.0.0.1;\n}\n")
+    monkeypatch.setattr(module, "NGINX_CONFIG_PATH", str(nginxConfig))
+    monkeypatch.setattr(module, "PHPFPM_STATUS_PATH", str(statusConfig))
+    monkeypatch.setattr(module, "DISABLED_PHPFPM_STATUS_PATH", str(disabledStatusConfig))
+
+    module.restrictPanelAuxiliaryListeners()
+    module.restrictPanelAuxiliaryListeners()
+
+    assert "listen 127.0.0.1:888;" in nginxConfig.read_text()
+    assert "listen 888;" not in nginxConfig.read_text()
+    assert not statusConfig.exists()
+    assert disabledStatusConfig.read_text().startswith("server {")
 
 
 def testEventShockNginxExtensionDisablesStreamingBuffers() -> None:

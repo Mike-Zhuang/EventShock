@@ -19,15 +19,19 @@ SITE_PATH = "/www/wwwroot/eventshock.mikezhuang.cn"
 SITE_PORT = 18080
 APP_URL = "http://127.0.0.1:18000"
 NGINX_BINARY = "/www/server/nginx/sbin/nginx"
+NGINX_CONFIG_PATH = "/www/server/nginx/conf/nginx.conf"
 VHOST_PATH = f"/www/server/panel/vhost/nginx/{SITE_NAME}.conf"
 DEFAULT_VHOST_PATH = "/www/server/panel/vhost/nginx/0.default.conf"
 DISABLED_DEFAULT_VHOST_PATH = DEFAULT_VHOST_PATH + ".eventshock-disabled"
+PHPFPM_STATUS_PATH = "/www/server/panel/vhost/nginx/phpfpm_status.conf"
+DISABLED_PHPFPM_STATUS_PATH = PHPFPM_STATUS_PATH + ".eventshock-disabled"
 EXTENSION_DIR = f"/www/server/panel/vhost/nginx/extension/{SITE_NAME}"
 EXTENSION_PATH = os.path.join(EXTENSION_DIR, "99-eventshock.conf")
 NGINX_INIT_SCRIPT = "/etc/init.d/nginx"
 SITE_TOTAL_SOCKET = "/tmp/site_total.sock"
 SITE_TOTAL_EXTENSION_PATH = os.path.join(EXTENSION_DIR, "site_total.conf")
 SITE_TOTAL_DATA_GLOB = f"/www/server/site_total/data/total/{SITE_NAME}/*.json"
+PANEL_LOOPBACK_LISTENER = "127.0.0.1:888"
 
 
 def loadPanelModules():
@@ -260,6 +264,45 @@ def disableDefaultPublicVhost():
     os.replace(DEFAULT_VHOST_PATH, DISABLED_DEFAULT_VHOST_PATH)
 
 
+def restrictPanelAuxiliaryListeners():
+    if not os.path.isfile(NGINX_CONFIG_PATH):
+        raise RuntimeError("宝塔 Nginx 主配置不存在")
+    content = open(NGINX_CONFIG_PATH).read()
+    if "server_name phpmyadmin;" not in content:
+        raise RuntimeError("无法识别宝塔内置 phpMyAdmin server")
+    publicPattern = r"(?m)^(\s*)listen\s+888;\s*$"
+    loopbackPattern = r"(?m)^\s*listen\s+127\.0\.0\.1:888;\s*$"
+    publicCount = len(re.findall(publicPattern, content))
+    loopbackCount = len(re.findall(loopbackPattern, content))
+    if publicCount == 1 and loopbackCount == 0:
+        content = re.sub(
+            publicPattern,
+            rf"\1listen {PANEL_LOOPBACK_LISTENER};",
+            content,
+            count=1,
+        )
+        atomicWrite(
+            NGINX_CONFIG_PATH,
+            content,
+            os.stat(NGINX_CONFIG_PATH).st_mode & 0o777,
+        )
+    elif publicCount != 0 or loopbackCount != 1:
+        raise RuntimeError("宝塔 phpMyAdmin listener 与预期不一致")
+
+    if os.path.isfile(PHPFPM_STATUS_PATH):
+        statusContent = open(PHPFPM_STATUS_PATH).read()
+        if (
+            "server_name 127.0.0.1;" not in statusContent
+            or len(re.findall(r"(?m)^\s*listen\s+80;\s*$", statusContent)) != 1
+        ):
+            raise RuntimeError("phpfpm_status.conf 不是预期的宝塔默认状态站点")
+        if os.path.exists(DISABLED_PHPFPM_STATUS_PATH):
+            raise RuntimeError("phpfpm_status.conf 的停用备份已存在，拒绝覆盖")
+        os.replace(PHPFPM_STATUS_PATH, DISABLED_PHPFPM_STATUS_PATH)
+    elif not os.path.isfile(DISABLED_PHPFPM_STATUS_PATH):
+        raise RuntimeError("未找到可核验的 phpfpm_status.conf 或停用备份")
+
+
 def atomicWrite(path, content, mode=0o644):
     temporaryPath = path + ".eventshock-next"
     with open(temporaryPath, "wb") as output:
@@ -343,9 +386,10 @@ def validateEffectiveNginxConfig(listenAddress):
         for directive in re.findall(r"(?m)^\s*listen\s+([^;]+);", effectiveConfig)
     ]
     expectedEndpoint = f"{listenAddress}:{SITE_PORT}"
-    if endpoints != [expectedEndpoint]:
+    expectedEndpoints = sorted((PANEL_LOOPBACK_LISTENER, expectedEndpoint))
+    if len(endpoints) != len(expectedEndpoints) or sorted(set(endpoints)) != expectedEndpoints:
         raise RuntimeError(
-            "宝塔 Nginx 只允许一个内部 listener；实际为：{}".format(
+            "宝塔 Nginx 只允许一个非回环业务 listener；实际为：{}".format(
                 ", ".join(endpoints) or "<none>"
             )
         )
@@ -389,7 +433,8 @@ def validateAndStartNginx(listenAddress):
         if len(fields) >= 4:
             nginxListeners.append(fields[3])
     expectedListener = f"{listenAddress}:{SITE_PORT}"
-    if sorted(set(nginxListeners)) != [expectedListener]:
+    expectedListeners = sorted((PANEL_LOOPBACK_LISTENER, expectedListener))
+    if sorted(set(nginxListeners)) != expectedListeners:
         raise RuntimeError(
             "Nginx 进程监听不符合唯一内部端口约束：{}".format(", ".join(nginxListeners) or "<none>")
         )
@@ -546,9 +591,12 @@ def main():
     assertInternalPortClosed(publicModule)
 
     managedPaths = [
+        NGINX_CONFIG_PATH,
         VHOST_PATH,
         DEFAULT_VHOST_PATH,
         DISABLED_DEFAULT_VHOST_PATH,
+        PHPFPM_STATUS_PATH,
+        DISABLED_PHPFPM_STATUS_PATH,
         EXTENSION_PATH,
         SITE_TOTAL_EXTENSION_PATH,
     ]
@@ -556,6 +604,7 @@ def main():
     try:
         # CreateProxy 会调用宝塔 serviceReload，故必须先把所有 listener 收口。
         disableDefaultPublicVhost()
+        restrictPanelAuxiliaryListeners()
         restrictVhostListener(listenAddress, trustedCaddyNetwork)
         validateEffectiveNginxConfig(listenAddress)
 

@@ -360,7 +360,7 @@ sudo /opt/eventshock/bin/register-baota-site.py \
   --listen-address "${gatewayAddress}"
 ```
 
-注册工具调用宝塔自己的 `panelSite.AddSite` 与 `CreateProxy`，不会直接插入 `sites` 数据库；它还会停用宝塔默认公网 vhost、要求 Nginx 只有一个私网 `18080` listener、运行 `nginx -t`，并通过内部地址检查 `/api/health`。生成的站点扩展配置包含 `proxy_buffering off`，使实验 SSE 状态流不会被 Nginx 聚合后才一次性返回。站点会以 `project_type=PHP`、`version=00` 出现在宝塔 PHP 项目列表，但实际业务是指向 FastAPI 的反向代理，不会安装或执行 PHP。工具还会通过 `SiteTotalConfig.one_site_status` 启用该站点的 `free_site_total`，并要求服务、Unix socket、站点扩展配置和三次真实请求计数全部通过后才报告成功。
+注册工具调用宝塔自己的 `panelSite.AddSite` 与 `CreateProxy`，不会直接插入 `sites` 数据库；它还会停用宝塔默认公网 vhost 与 `phpfpm_status` vhost，把安装器内置的 phpMyAdmin `888` listener 收口到 `127.0.0.1:888`，并要求唯一非回环业务 listener 是私网 `18080`。随后工具运行 `nginx -t`，并通过内部地址检查 `/api/health`。生成的站点扩展配置包含 `proxy_buffering off`，使实验 SSE 状态流不会被 Nginx 聚合后才一次性返回。站点会以 `project_type=PHP`、`version=00` 出现在宝塔 PHP 项目列表，但实际业务是指向 FastAPI 的反向代理，不会安装或执行 PHP。工具还会通过 `SiteTotalConfig.one_site_status` 启用该站点的 `free_site_total`，并要求服务、Unix socket、站点扩展配置和三次真实请求计数全部通过后才报告成功。
 
 只有上述内部健康检查通过后，才把共享配置的 `CADDY_UPSTREAM` 改为 `host.docker.internal:18080` 并重新应用 Compose。最后确认：
 
@@ -373,7 +373,7 @@ sudo /opt/eventshock/bin/register-baota-site.py \
   --listen-address "${gatewayAddress}" --show
 ```
 
-验收时必须看到 Caddy 独占公网 80/443、应用只监听 `127.0.0.1:18000`、宝塔 Nginx 只监听私有 host-gateway 的 18080，并且一次公网请求后宝塔 access log / `site_total` 文件实际增长。
+验收时必须看到 Caddy 独占公网 80/443、应用只监听 `127.0.0.1:18000`、宝塔 Nginx 的业务入口只监听私有 host-gateway 的 18080；若保留安装器内置 phpMyAdmin listener，它必须只绑定 `127.0.0.1:888`。一次公网请求后，宝塔 access log / `site_total` 文件还必须实际增长。
 
 不要在未确认内部监听、端口冲突和完整请求路径前启用该模式。是否已经产生真实统计，应同时核对 Nginx access log 与宝塔网页，不能只看站点列表中是否出现名称。
 
