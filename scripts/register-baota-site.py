@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from collections import Counter
 
 PANEL_ROOT = "/www/server/panel"
 SITE_NAME = "eventshock.mikezhuang.cn"
@@ -29,6 +30,14 @@ DISABLED_PHPFPM_STATUS_PATH = PHPFPM_STATUS_PATH + ".eventshock-disabled"
 EXTENSION_DIR = f"/www/server/panel/vhost/nginx/extension/{SITE_NAME}"
 EXTENSION_PATH = os.path.join(EXTENSION_DIR, "99-eventshock.conf")
 NGINX_INIT_SCRIPT = "/etc/init.d/nginx"
+NGINX_SYSTEMD_SERVICE = "nginx.service"
+NGINX_SYSTEMD_INSTALLER = os.path.join(
+    os.path.dirname(os.path.realpath(__file__)),
+    "install-nginx-systemd-override.sh",
+)
+NGINX_SYSTEMD_FALLBACK_INSTALLER = (
+    "/opt/eventshock/current/scripts/install-nginx-systemd-override.sh"
+)
 SITE_TOTAL_SOCKET = "/tmp/site_total.sock"
 SITE_TOTAL_EXTENSION_PATH = os.path.join(EXTENSION_DIR, "site_total.conf")
 SITE_TOTAL_DATA_GLOB = f"/www/server/site_total/data/total/{SITE_NAME}/*.json"
@@ -266,6 +275,51 @@ def ufwRuleTargetsInternalPort(rule):
     return any(portPattern.search(token) for token in rule[1:])
 
 
+def internalPortUfwRules():
+    return [rule for rule in configuredUfwRules() if ufwRuleTargetsInternalPort(rule)]
+
+
+def ownedScopedUfwRule(rule, listenAddress):
+    """仅识别由 EventShock 创建的、严格限制在 RFC1918 网段内的规则。"""
+    if len(rule) != 15:
+        return False
+    expectedTokens = {
+        0: "ufw",
+        1: "allow",
+        2: "in",
+        3: "on",
+        5: "from",
+        7: "to",
+        9: "port",
+        10: str(SITE_PORT),
+        11: "proto",
+        12: "tcp",
+        13: "comment",
+        14: UFW_RULE_COMMENT,
+    }
+    if any(rule[index] != value for index, value in expectedTokens.items()):
+        return False
+    if not re.fullmatch(r"br-[0-9a-f]{12}", rule[4]):
+        return False
+
+    privateNetworks = tuple(
+        ipaddress.ip_network(network)
+        for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+    )
+    try:
+        sourceNetwork = ipaddress.ip_network(rule[6], strict=True)
+        targetAddress = ipaddress.ip_address(rule[8])
+    except ValueError:
+        return False
+    return (
+        sourceNetwork.version == 4
+        and targetAddress.version == 4
+        and sourceNetwork.prefixlen >= 16
+        and any(sourceNetwork.subnet_of(network) for network in privateNetworks)
+        and str(targetAddress) == listenAddress
+    )
+
+
 def ufwIsActive():
     if not os.path.isfile(UFW_BINARY_PATH):
         return False
@@ -279,8 +333,7 @@ def ufwIsActive():
 
 def scopedUfwRulePresent(bridgeInterface, trustedCaddyNetwork, listenAddress):
     expectedRule = scopedUfwRule(bridgeInterface, trustedCaddyNetwork, listenAddress)
-    internalPortRules = [rule for rule in configuredUfwRules() if ufwRuleTargetsInternalPort(rule)]
-    return internalPortRules == [expectedRule]
+    return internalPortUfwRules() == [expectedRule]
 
 
 def assertInternalPortClosed(
@@ -291,9 +344,9 @@ def assertInternalPortClosed(
 ):
     if publicModule.M("firewall").where("port=?", (str(SITE_PORT),)).count():
         raise RuntimeError("宝塔防火墙数据库仍包含 18080 放行规则")
-    expectedRule = scopedUfwRule(bridgeInterface, trustedCaddyNetwork, listenAddress)
-    internalPortRules = [rule for rule in configuredUfwRules() if ufwRuleTargetsInternalPort(rule)]
-    if internalPortRules not in ([], [expectedRule]):
+    internalPortRules = internalPortUfwRules()
+    safeRules = all(ownedScopedUfwRule(rule, listenAddress) for rule in internalPortRules)
+    if not safeRules:
         raise RuntimeError("UFW 存在非预期或重复的 18080 放行规则")
     if os.path.isfile("/usr/bin/firewall-cmd"):
         activeZones = subprocess.check_output(["firewall-cmd", "--get-active-zones"], text=True)
@@ -321,60 +374,128 @@ def assertInternalPortClosed(
                 raise RuntimeError(f"firewalld zone={zone} 仍对外放行 18080")
 
 
-def removeScopedUfwRule(bridgeInterface, trustedCaddyNetwork, listenAddress):
+def deleteOwnedScopedUfwRule(rule, listenAddress):
+    if not ownedScopedUfwRule(rule, listenAddress):
+        raise RuntimeError("拒绝删除不属于 EventShock 的 UFW 规则")
+    previousCount = configuredUfwRules().count(rule)
+    if previousCount < 1:
+        raise RuntimeError("待删除的 EventShock UFW 规则不存在")
     subprocess.check_call(
         [
             "ufw",
             "--force",
             "delete",
-            *scopedUfwRuleSpec(bridgeInterface, trustedCaddyNetwork, listenAddress),
+            *rule[1:13],
         ],
         env=ufwEnvironment(),
     )
-    if scopedUfwRulePresent(bridgeInterface, trustedCaddyNetwork, listenAddress):
-        raise RuntimeError("本次新增的 Caddy→Nginx UFW 规则删除后仍然存在")
+    if configuredUfwRules().count(rule) != previousCount - 1:
+        raise RuntimeError("EventShock UFW 规则未精确删除一次")
+
+
+def removeScopedUfwRule(bridgeInterface, trustedCaddyNetwork, listenAddress):
+    deleteOwnedScopedUfwRule(
+        scopedUfwRule(bridgeInterface, trustedCaddyNetwork, listenAddress),
+        listenAddress,
+    )
+
+
+def validateScopedUfwStatus(bridgeInterface, trustedCaddyNetwork, listenAddress):
+    status = subprocess.check_output(
+        ["ufw", "status"],
+        text=True,
+        env=ufwEnvironment(),
+    )
+    requiredValues = (
+        bridgeInterface,
+        trustedCaddyNetwork,
+        listenAddress,
+        str(SITE_PORT),
+        UFW_RULE_COMMENT,
+    )
+    if not any(all(value in line for value in requiredValues) for line in status.splitlines()):
+        raise RuntimeError("UFW 运行状态未显示完整的 Caddy→Nginx 内部放行边界")
+
+
+def rollbackScopedUfwMutation(mutation):
+    if not mutation:
+        return
+
+    listenAddress = mutation["listenAddress"]
+    previousRules = mutation["before"]
+    previousCounts = Counter(tuple(rule) for rule in previousRules)
+    rollbackErrors = []
+    currentCounts = Counter(tuple(rule) for rule in internalPortUfwRules())
+    # 回滚迁移时先恢复旧窄规则，再移除新增规则，避免产生防火墙放行空窗。
+    for ruleTuple, previousCount in previousCounts.items():
+        missingCount = previousCount - currentCounts[ruleTuple]
+        for _index in range(max(0, missingCount)):
+            rule = list(ruleTuple)
+            if not ownedScopedUfwRule(rule, listenAddress):
+                rollbackErrors.append("修改前规则不再满足 EventShock 的安全边界")
+                continue
+            try:
+                subprocess.check_call(rule, env=ufwEnvironment())
+            except Exception as error:  # pragma: no cover - 双重故障仅保留诊断信息
+                rollbackErrors.append(str(error))
+
+    currentCounts = Counter(tuple(rule) for rule in internalPortUfwRules())
+    for ruleTuple, currentCount in currentCounts.items():
+        excessCount = currentCount - previousCounts[ruleTuple]
+        for _index in range(max(0, excessCount)):
+            rule = list(ruleTuple)
+            if not ownedScopedUfwRule(rule, listenAddress):
+                rollbackErrors.append("检测到非 EventShock 的新增 18080 UFW 规则")
+                continue
+            try:
+                deleteOwnedScopedUfwRule(rule, listenAddress)
+            except Exception as error:  # pragma: no cover - 双重故障仅保留诊断信息
+                rollbackErrors.append(str(error))
+
+    if Counter(tuple(rule) for rule in internalPortUfwRules()) != previousCounts:
+        rollbackErrors.append("18080 UFW 规则未恢复到修改前状态")
+    if rollbackErrors:
+        raise RuntimeError("；".join(rollbackErrors))
 
 
 def ensureScopedUfwRule(bridgeInterface, trustedCaddyNetwork, listenAddress):
     if not ufwIsActive():
-        return False
+        return None
 
     expectedRule = scopedUfwRule(bridgeInterface, trustedCaddyNetwork, listenAddress)
-    rules = configuredUfwRules()
-    internalPortRules = [rule for rule in rules if ufwRuleTargetsInternalPort(rule)]
+    internalPortRules = internalPortUfwRules()
     if internalPortRules == [expectedRule]:
-        return False
-    if internalPortRules:
+        return None
+    if not all(ownedScopedUfwRule(rule, listenAddress) for rule in internalPortRules):
         raise RuntimeError("UFW 存在非预期或重复的 18080 放行规则")
 
-    created = False
+    mutation = {"before": internalPortRules, "listenAddress": listenAddress}
     try:
-        subprocess.check_call(expectedRule, env=ufwEnvironment())
-        created = True
-        if not scopedUfwRulePresent(bridgeInterface, trustedCaddyNetwork, listenAddress):
-            raise RuntimeError("UFW 未保存精确的 Caddy→Nginx 内部放行规则")
-        status = subprocess.check_output(
-            ["ufw", "status"],
-            text=True,
-            env=ufwEnvironment(),
-        )
-        requiredValues = (
+        if expectedRule not in internalPortRules:
+            subprocess.check_call(expectedRule, env=ufwEnvironment())
+            if sorted(internalPortUfwRules()) != sorted([*internalPortRules, expectedRule]):
+                raise RuntimeError("UFW 未保存精确的 Caddy→Nginx 内部放行规则")
+
+        keptExpected = False
+        for rule in list(internalPortUfwRules()):
+            if rule == expectedRule and not keptExpected:
+                keptExpected = True
+                continue
+            deleteOwnedScopedUfwRule(rule, listenAddress)
+        if not scopedUfwRulePresent(
             bridgeInterface,
             trustedCaddyNetwork,
             listenAddress,
-            str(SITE_PORT),
-            UFW_RULE_COMMENT,
-        )
-        if not all(value in status for value in requiredValues):
-            raise RuntimeError("UFW 运行状态未显示完整的 Caddy→Nginx 内部放行边界")
+        ):
+            raise RuntimeError("UFW 未完成到当前 Docker 网络的精确迁移")
+        validateScopedUfwStatus(bridgeInterface, trustedCaddyNetwork, listenAddress)
     except Exception:
-        if created:
-            try:
-                removeScopedUfwRule(bridgeInterface, trustedCaddyNetwork, listenAddress)
-            except Exception as rollbackError:
-                raise RuntimeError("UFW 规则添加失败，且本次新增规则无法回滚") from rollbackError
+        try:
+            rollbackScopedUfwMutation(mutation)
+        except Exception as rollbackError:
+            raise RuntimeError("UFW 规则更新失败，且无法恢复修改前状态") from rollbackError
         raise
-    return True
+    return mutation
 
 
 def ensureProxy(publicModule, panelSiteClass):
@@ -600,10 +721,43 @@ def nginxIsRunning():
     return True
 
 
-def validateAndStartNginx(listenAddress):
+def installNginxSystemdOverride():
+    installer = next(
+        (
+            candidate
+            for candidate in (NGINX_SYSTEMD_INSTALLER, NGINX_SYSTEMD_FALLBACK_INSTALLER)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK)
+        ),
+        None,
+    )
+    if installer is None:
+        raise RuntimeError("Nginx systemd drop-in 安装器不可执行")
+    output = subprocess.check_output([installer], text=True)
+    matches = re.findall(r"(?m)^\[eventshock-nginx-systemd\] changed=(true|false)\b", output)
+    if len(matches) != 1:
+        raise RuntimeError("Nginx systemd drop-in 安装器未返回唯一结果")
+    return matches[0] == "true"
+
+
+def validateAndStartNginx(listenAddress, forceRestart=False):
     isRunning = nginxIsRunning()
-    action = "reload" if isRunning else "start"
-    subprocess.check_call([NGINX_INIT_SCRIPT, action])
+    unitActive = subprocess.call(["systemctl", "is-active", "--quiet", NGINX_SYSTEMD_SERVICE]) == 0
+
+    subprocess.check_call([NGINX_BINARY, "-t"])
+    if isRunning and unitActive:
+        action = "restart" if forceRestart else "reload"
+        subprocess.check_call(["systemctl", action, NGINX_SYSTEMD_SERVICE])
+    else:
+        # 宝塔可能绕过 systemd 直接启动 init 脚本。若进程存在但
+        # systemd 状态不活跃，先停止孤儿进程，再由 systemd 统一接管。
+        if isRunning:
+            subprocess.check_call([NGINX_INIT_SCRIPT, "stop"])
+        subprocess.call(["systemctl", "reset-failed", NGINX_SYSTEMD_SERVICE])
+        action = "restart" if unitActive else "start"
+        subprocess.check_call(["systemctl", action, NGINX_SYSTEMD_SERVICE])
+
+    if subprocess.call(["systemctl", "is-active", "--quiet", NGINX_SYSTEMD_SERVICE]) != 0:
+        raise RuntimeError("Nginx systemd 服务未进入 active 状态")
 
     listeners = subprocess.check_output(["ss", "-H", "-ltnp"], text=True)
     nginxListeners = []
@@ -629,6 +783,34 @@ def validateAndStartNginx(listenAddress):
         payload = json.loads(response.read().decode("utf-8"))
     if payload.get("status") != "ok":
         raise RuntimeError("宝塔 Nginx 反向代理健康检查失败")
+
+
+def restoreNginxProcessState(wasNginxRunning):
+    """注册失败时恢复入口处的 Nginx 运行状态，避免接管失败扩大中断。"""
+    if not wasNginxRunning:
+        if nginxIsRunning():
+            subprocess.call([NGINX_INIT_SCRIPT, "stop"])
+        if nginxIsRunning():
+            raise RuntimeError("Nginx 未能恢复到停止状态")
+        return
+
+    subprocess.check_call([NGINX_BINARY, "-t"])
+    if nginxIsRunning():
+        if subprocess.call(["systemctl", "is-active", "--quiet", NGINX_SYSTEMD_SERVICE]) == 0:
+            subprocess.check_call(["systemctl", "reload", NGINX_SYSTEMD_SERVICE])
+        else:
+            subprocess.check_call([NGINX_INIT_SCRIPT, "reload"])
+    else:
+        subprocess.call(["systemctl", "reset-failed", NGINX_SYSTEMD_SERVICE])
+        try:
+            subprocess.check_call(["systemctl", "start", NGINX_SYSTEMD_SERVICE])
+        except subprocess.CalledProcessError:
+            # systemd 接管本身失败时，先恢复网站可用性；下一轮周期任务
+            # 会继续修复服务归属和启动顺序。
+            if not nginxIsRunning():
+                subprocess.check_call([NGINX_INIT_SCRIPT, "start"])
+    if not nginxIsRunning():
+        raise RuntimeError("Nginx 未能恢复到运行状态")
 
 
 def validateCaddyToNginx(caddyContainerId, expectedReleaseCommit):
@@ -825,7 +1007,7 @@ def main():
         SITE_TOTAL_EXTENSION_PATH,
     ]
     snapshots = snapshotFiles(managedPaths)
-    scopedUfwRuleCreated = False
+    scopedUfwMutation = None
     try:
         # CreateProxy 会调用宝塔 serviceReload，故必须先把所有 listener 收口。
         disableDefaultPublicVhost()
@@ -839,39 +1021,30 @@ def main():
         enableSiteTraffic(siteTotalConfigClass, int(site["id"]))
         trafficRequestsBefore = siteTrafficRequests()
         validateEffectiveNginxConfig(listenAddress)
-        scopedUfwRuleCreated = ensureScopedUfwRule(
+        scopedUfwMutation = ensureScopedUfwRule(
             trustedCaddyInterface,
             trustedCaddyNetwork,
             listenAddress,
         )
-        validateAndStartNginx(listenAddress)
+        systemdOverrideChanged = installNginxSystemdOverride()
+        validateAndStartNginx(listenAddress, forceRestart=systemdOverrideChanged)
         validateCaddyToNginx(caddyContainerId, applicationHealth["releaseCommit"])
         validateSiteTraffic(listenAddress, trafficRequestsBefore)
-    except Exception as originalError:
+    except Exception:
         firewallRollbackError = None
-        if scopedUfwRuleCreated:
+        if scopedUfwMutation:
             try:
-                removeScopedUfwRule(
-                    trustedCaddyInterface,
-                    trustedCaddyNetwork,
-                    listenAddress,
-                )
+                rollbackScopedUfwMutation(scopedUfwMutation)
             except Exception as rollbackError:
                 firewallRollbackError = rollbackError
         restoreFiles(snapshots)
-        if wasNginxRunning:
-            try:
-                subprocess.check_call([NGINX_BINARY, "-t"])
-                subprocess.check_call([NGINX_INIT_SCRIPT, "reload"])
-            except Exception as recoveryError:
-                raise RuntimeError("宝塔配置失败，且恢复原 Nginx 配置也失败") from recoveryError
-        else:
-            subprocess.call([NGINX_INIT_SCRIPT, "stop"])
-            if nginxIsRunning():
-                raise RuntimeError("宝塔配置失败，且 Nginx 未能保持停止状态") from originalError
+        try:
+            restoreNginxProcessState(wasNginxRunning)
+        except Exception as recoveryError:
+            raise RuntimeError("宝塔配置失败，且恢复原 Nginx 运行状态也失败") from recoveryError
         if firewallRollbackError:
             raise RuntimeError(
-                "宝塔配置失败，且本次新增的窄范围 UFW 规则无法回滚"
+                "宝塔配置失败，且窄范围 UFW 规则无法恢复到修改前状态"
             ) from firewallRollbackError
         raise
 

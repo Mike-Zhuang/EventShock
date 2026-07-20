@@ -7,6 +7,7 @@
 ```text
 本地功能分支完成测试与前端构建
   -> commit 并 push 到 GitHub
+  -> 通过 Pull Request 合入 main
   -> GitHub 三项必需 CI 全部通过
   -> 宝塔原生计划任务每 10 分钟运行一次
   -> 服务器匿名 fetch 公有仓库
@@ -16,7 +17,7 @@
   -> 切换 /opt/eventshock/current；失败则恢复上一版本
 ```
 
-当前部署分支固定为 `codex/self-hosted-mvp`。功能稳定并通过 Pull Request 合并后，可以按第 8 节把服务器改为跟踪稳定分支；不要通过修改服务器文件绕过 GitHub 与 CI。
+当前部署分支固定为 `main`。所有代码先在个人 `codex/*` 功能分支开发并通过 Pull Request 合入；不要直接向 `main` 推送，也不要通过修改服务器文件绕过 GitHub 与 CI。
 
 ## 1. 运行架构
 
@@ -75,11 +76,11 @@ UDP `443` 只用于可选 HTTP/3；不开放不会影响 TCP HTTPS。不要在�
 
 ## 3. 本地发布前准备
 
-在项目根目录确认当前位于部署功能分支，并先同步远程引用：
+在项目根目录确认当前位于本次任务的个人功能分支，并先同步远程引用：
 
 ```bash
 cd /Users/mike/Documents/University/Grade_1B/UCB_Summer_Session/Classes/ENGIN_170E/Project/repo
-git switch codex/self-hosted-mvp
+git switch codex/<your-feature-branch>
 git fetch origin
 git status --short
 ```
@@ -117,15 +118,15 @@ git add \
 git diff --cached --check
 git diff --cached --stat
 git commit -m "feat: describe the completed change"
-git push --set-upstream origin codex/self-hosted-mvp
+git push --set-upstream origin HEAD
 ```
 
-确认本地 `HEAD` 与 GitHub 上的部署分支一致：
+确认本地 `HEAD` 与当前功能分支的 GitHub upstream 一致；随后创建 Pull Request 并合入 `main`：
 
 ```bash
 git fetch origin
 git rev-parse HEAD
-git rev-parse origin/codex/self-hosted-mvp
+git rev-parse '@{upstream}'
 ```
 
 两个 SHA 应完全相同。禁止直接向 `main` 推送；评审与合并流程见 [Git 使用指南](git_use.md)。
@@ -156,11 +157,11 @@ sudo sed -n '1,120p' /opt/eventshock/shared/github-sync.env
 
 ```dotenv
 EVENTSHOCK_GITHUB_URL=https://github.com/Mike-Zhuang/EventShock.git
-EVENTSHOCK_GITHUB_BRANCH=codex/self-hosted-mvp
+EVENTSHOCK_GITHUB_BRANCH=main
 EVENTSHOCK_GITHUB_REPOSITORY=Mike-Zhuang/EventShock
 ```
 
-配置文件位于 `/opt/eventshock/shared/github-sync.env`，由 root 拥有且权限为 `0600`。仓库为公有仓库，配置中不应出现 GitHub Token、密码或部署密钥。
+配置文件位于 `/opt/eventshock/shared/github-sync.env`，由 root 拥有且权限为 `0600`。新安装默认跟踪 `main`；安装器不会覆盖已经存在的配置，因此旧服务器升级后必须人工确认该值。仓库为公有仓库，配置中不应出现 GitHub Token、密码或部署密钥。
 
 安装完成后，可先做只读检查：
 
@@ -220,7 +221,7 @@ SSH 查看稳定日志：
 
 ```bash
 sudo tail -n 200 /opt/eventshock/shared/logs/github-sync.log
-sudo grep -E 'NO_CHANGE|WAIT_CI|CI_BLOCKED|DEPLOY_(START|SUCCESS)|ERROR' \
+sudo grep -E 'NO_CHANGE|WAIT_CI|CI_BLOCKED|RUNTIME_(DRIFT|SELF_HEAL_)|TARGET_SELF_HEAL|INFRASTRUCTURE_BLOCKED|DEPLOY_(START|SUCCESS)|ERROR' \
   /opt/eventshock/shared/logs/github-sync.log | tail -n 100
 ```
 
@@ -231,15 +232,16 @@ sudo grep -E 'NO_CHANGE|WAIT_CI|CI_BLOCKED|DEPLOY_(START|SUCCESS)|ERROR' \
 `/opt/eventshock/bin/sync-from-github.sh` 每次运行会：
 
 1. 使用非阻塞文件锁，避免两轮部署并发执行。
-2. 以匿名 HTTPS 初始化或更新裸仓库镜像 `/opt/eventshock/shared/github-mirror.git`。
-3. 把配置分支抓取到固定内部引用，不在生产目录执行 `git pull` 或合并。
-4. 对照 `/opt/eventshock/shared/github-sync.state`，并同时核对 current 发布、容器环境与公网健康 SHA；只有四者一致才输出 `NO_CHANGE`，否则按运行时漂移处理。
+2. 在访问 GitHub 前核对 current 发布、容器环境与公网健康 SHA；发生漂移时先调用当前注册器自愈 Caddy→宝塔 Nginx→应用链路，因此 GitHub 临时不可达不会阻止本机恢复。
+3. 以匿名 HTTPS 初始化或更新裸仓库镜像 `/opt/eventshock/shared/github-mirror.git`，并把 `main` 抓取到固定内部引用；不在生产目录执行 `git pull` 或合并。
+4. 当前运行时、自愈结果、同步状态和目标 SHA 全部一致时才输出 `NO_CHANGE`。
 5. 要求上次已部署提交是目标提交的祖先；发现 force-push、rebase 或其他非快进历史时拒绝部署。
 6. 查询目标 SHA 的三项 GitHub CI；只有全部成功才继续。
-7. 使用 `git archive` 把该提交解包到临时目录，拒绝缺少 `frontend/dist/index.html`、后端入口或部署脚本的提交。
-8. 运行该提交自己的 `deploy-server.sh`，创建 `/opt/eventshock/releases/<release-id>`，并构建唯一镜像标签 `eventshock-app:<release-id>`。
-9. 等待应用容器健康，并要求公网 `/api/health` 同时返回 `status=ok` 与目标 40 位 `releaseCommit`。
-10. 成功后才写同步状态，并把 `/opt/eventshock/bin` 原子切换到目标 commit 的不可变运维脚本目录；失败时不写目标 SHA。
+7. 使用 `git archive` 把该提交解包到临时目录，拒绝缺少 `frontend/dist/index.html`、后端入口、注册器或 systemd 安装器的提交。旧注册器无法恢复代理但 GitHub 存在新目标时，会先用已经通过 CI 的目标注册器再自愈一次，避免修复版本被旧故障锁死。
+8. 本地应用健康但代理仍无法恢复时记录 `INFRASTRUCTURE_BLOCKED`，不把已知正常的已部署 commit 写入失败退避；只有需要实际发布的目标才进入发布失败退避。
+9. 运行目标提交自己的 `deploy-server.sh`，创建 `/opt/eventshock/releases/<release-id>`，并构建唯一镜像标签 `eventshock-app:<release-id>`。
+10. 等待应用容器健康，修复并验证宝塔代理，再要求公网 `/api/health` 同时返回 `status=ok` 与目标 40 位 `releaseCommit`。
+11. 成功后才写同步状态，并把 `/opt/eventshock/bin` 原子切换到目标 commit 的不可变运维脚本目录；失败时先验证宝塔代理和上一版本公网 SHA，再恢复上一发布目录。
 
 同一目标 SHA 部署失败后会进入有界退避：第一次至少等待 30 分钟，后续失败至少等待 60 分钟；分支出现新的 SHA 后自动解除。这样 10 分钟计划任务仍会持续记录状态，但不会反复构建一个已知失败版本。应用发布和运维脚本各保留最近 5 个不可变版本，当前版本不会被清理。
 
@@ -264,16 +266,16 @@ sudo /opt/eventshock/current/scripts/compose-current.sh logs --tail=100 caddy
 
 不要执行 `compose-current.sh down --volumes`，否则会删除 SQLite 与 Caddy 持久数据。不要手工改写 `github-sync.state` 来跳过非快进保护；发生历史重写时应先停止任务、查明 GitHub 分支和当前部署关系，再制定人工恢复方案。
 
-## 8. 从功能部署分支切换到稳定分支
+## 8. 确认或调整稳定部署分支
 
-当前固定轮询 `codex/self-hosted-mvp` 是 MVP 阶段的临时发布策略。代码通过 Pull Request 合入稳定分支、稳定分支自身三项 CI 全绿且当前部署 SHA 是其祖先后，才可修改 root 配置：
+新安装默认轮询稳定分支 `main`。旧服务器的安装器不会覆盖现有 root 配置；只有在代码已通过 Pull Request 合入目标稳定分支、该分支三项 CI 全绿且当前部署 SHA 是其祖先后，才可确认或修改配置：
 
 ```bash
 ssh sv
 sudoedit /opt/eventshock/shared/github-sync.env
 ```
 
-例如切换到 `main`：
+标准配置应为：
 
 ```dotenv
 EVENTSHOCK_GITHUB_URL=https://github.com/Mike-Zhuang/EventShock.git
@@ -362,13 +364,21 @@ sudo /opt/eventshock/bin/register-baota-site.py \
   --listen-address "${gatewayAddress}"
 ```
 
-注册工具调用宝塔自己的 `panelSite.AddSite` 与 `CreateProxy`，不会直接插入 `sites` 数据库；它还会停用宝塔默认公网 vhost 与 `phpfpm_status` vhost，把安装器内置的 phpMyAdmin `888` listener 收口到 `127.0.0.1:888`，并要求唯一非回环业务 listener 是私网 `18080`。工具从正在运行的 Caddy 容器动态读取 Docker network ID、subnet 与对应 Linux bridge；UFW 处于 active 状态时，幂等创建带 `EventShock-Caddy-Nginx` 注释的精确规则，只允许该 bridge/subnet 访问 host-gateway 的 `18080/tcp`，同时拒绝任何 broad/public 18080 放行。随后工具运行 `nginx -t`，先检查宿主机内部 `/api/health`，再从 Caddy 容器内请求 `http://host.docker.internal:18080/api/health`，确保真正的容器到 Nginx 链路可达。若注册过程失败，工具恢复 Nginx 配置快照，并且只删除本次新建的精确 UFW 规则，不会删除原先已存在且已验证的规则。生成的站点扩展配置包含 `proxy_buffering off`，使实验 SSE 状态流不会被 Nginx 聚合后才一次性返回。站点会以 `project_type=PHP`、`version=00` 出现在宝塔 PHP 项目列表，但实际业务是指向 FastAPI 的反向代理，不会安装或执行 PHP。工具还会通过 `SiteTotalConfig.one_site_status` 启用该站点的 `free_site_total`，并要求服务、Unix socket、站点扩展配置和三次真实请求计数全部通过后才报告成功。
+注册工具调用宝塔自己的 `panelSite.AddSite` 与 `CreateProxy`，不会直接插入 `sites` 数据库；它还会停用宝塔默认公网 vhost 与 `phpfpm_status` vhost，把安装器内置的 phpMyAdmin `888` listener 收口到 `127.0.0.1:888`，并要求唯一非回环业务 listener 是私网 `18080`。生成的站点扩展配置包含 `proxy_buffering off`，使实验 SSE 状态流不会被 Nginx 聚合后才一次性返回。站点会以 `project_type=PHP`、`version=00` 出现在宝塔 PHP 项目列表，但实际业务是指向 FastAPI 的反向代理，不会安装或执行 PHP。
+
+工具从正在运行的 Caddy 容器动态读取 Docker network ID、subnet 与对应 Linux bridge。UFW active 时，它只认领完整语法、Docker bridge、当前 host-gateway、`18080/tcp` 和 `EventShock-Caddy-Nginx` 注释都满足安全边界的规则；先添加当前窄规则，再删除旧 bridge 的自有窄规则，并能从“新旧规则同时存在”的中断状态继续收敛。任何 broad/public、错误目标、错误接口或未知规则都会在首次写操作前被拒绝。后续步骤失败时，规则按修改前的集合恢复。
+
+注册器还会原子安装 `/etc/systemd/system/nginx.service.d/eventshock-docker-order.conf`：`Wants=docker.service` 与 `After=docker.service` 确保开机时 Docker 先就绪；Nginx 启动失败后每 5 秒重试，并受 60 秒内 6 次的启动限制保护。这里有意不用 `Requires` 或 `PartOf`，避免停止 Docker 时连带停止承载其他宝塔站点的全局 Nginx。安装器会启用 `nginx.service`，验证 drop-in 已被 systemd 读取，并在写入或验证失败时恢复原文件。
+
+最后，工具运行 `nginx -t`，由 systemd 统一接管启动状态，先检查宿主机内部 `/api/health`，再从 Caddy 容器内请求 `http://host.docker.internal:18080/api/health`。若注册过程失败，它会恢复 Nginx 配置快照、UFW 规则集合和入口时的 Nginx 运行状态。工具同时通过 `SiteTotalConfig.one_site_status` 启用该站点的 `free_site_total`，并要求服务、Unix socket、站点扩展配置和三次真实请求计数全部通过后才报告成功。
 
 只有上述内部健康检查通过后，才把共享配置的 `CADDY_UPSTREAM` 改为 `host.docker.internal:18080` 并重新应用 Compose。最后确认：
 
 ```bash
 sudo ss -ltnp | grep -E ':(80|443|18000|18080)\b'
 sudo /www/server/nginx/sbin/nginx -t
+sudo systemctl show nginx.service \
+  --property=ActiveState,After,Wants,Restart,RestartUSec,DropInPaths
 sudo ufw status numbered
 sudo /opt/eventshock/current/scripts/compose-current.sh exec -T caddy \
   wget -q -O- -T 8 --header='Host: eventshock.mikezhuang.cn' \
@@ -418,6 +428,7 @@ IP 回退没有 HTTPS，只用于排查；问题解决后必须恢复域名。�
 
 - `app` 最多使用 1.5 个 CPU、1024 MiB 内存；`caddy` 最多使用 0.25 个 CPU、128 MiB 内存。
 - 容器采用 `restart: unless-stopped` 与日志轮转。应用以非 root 用户运行、根文件系统只读，并删除不需要的 Linux capabilities。
+- 宝塔 Nginx 的持久 systemd drop-in 要求 `After/Wants=docker.service` 并启用失败重试；10 分钟同步任务继续核对进程、内部代理和公网 SHA，覆盖运行期崩溃与配置漂移。
 - Caddy 将请求体限制为 2 MiB，并删除访问日志中的匿名会话请求头 `X-Session-ID`。
 - Caddy 与 Python 基础镜像锁定到仓库中审核过的版本或 digest；依赖分别由 `package-lock.json`、`requirements.lock` 和 `requirements-dev.lock` 固定。
 - GitHub 同步使用匿名只读请求；服务器不保存 GitHub Token。
@@ -459,9 +470,19 @@ sudo /opt/eventshock/current/scripts/compose-current.sh logs --tail=100 caddy
 
 ### Caddy 切换到 `host.docker.internal:18080` 后返回 503 或超时
 
-先保持或恢复 `CADDY_UPSTREAM=app:8000`，保证公网服务可用；然后重新运行 `register-baota-site.py --listen-address "${gatewayAddress}"`。注册器会重新识别当前 Caddy Docker bridge/subnet、检查精确 UFW 规则，并从 Caddy 容器内验证 Nginx 健康接口。Docker network 被重建后，bridge 名称或 subnet 可能改变，此时必须重跑注册器，不能沿用旧网络规则。
+先通过宝塔原生任务触发同一条自动自愈链路并查看日志：
 
-使用 `sudo ufw status numbered` 核对是否只有带 `EventShock-Caddy-Nginx` 注释的精确 18080 规则。不要用 `sudo ufw allow 18080`、面板“全部来源”放行或云安全组规则来临时解决超时；这些做法会把内部代理端口暴露到公网。只有注册器与容器内健康检查通过后，才能再次把 `CADDY_UPSTREAM` 切到 `host.docker.internal:18080`。
+```bash
+sudo /opt/eventshock/bin/register-baota-task.py --run
+sudo grep -E 'RUNTIME_(DRIFT|SELF_HEAL_)|TARGET_SELF_HEAL|INFRASTRUCTURE_BLOCKED' \
+  /opt/eventshock/shared/logs/github-sync.log | tail -n 50
+sudo systemctl status nginx.service --no-pager
+sudo systemctl cat nginx.service
+```
+
+注册器会重新识别当前 Caddy Docker bridge/subnet、迁移项目自有的旧窄 UFW 规则，并从 Caddy 容器内验证 Nginx 健康接口。Docker network 被重建后不能沿用旧网络规则；若日志显示未知或宽范围 18080 规则，必须先人工核对，注册器不会擅自删除。
+
+使用 `sudo ufw status numbered` 核对是否只有带 `EventShock-Caddy-Nginx` 注释的精确 18080 规则。不要用 `sudo ufw allow 18080`、面板“全部来源”放行或云安全组规则来临时解决超时；这些做法会把内部代理端口暴露到公网。只有在紧急诊断且明确接受暂时绕过宝塔流量统计时，才可短期把 `CADDY_UPSTREAM` 改为 `app:8000`；诊断结束后必须恢复正式值并重新完成内部、公网与流量统计验证。
 
 ### Docker 构建被系统终止
 

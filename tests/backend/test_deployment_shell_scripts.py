@@ -19,6 +19,7 @@ def readScript(scriptName: str) -> str:
         "baota-eventshock-task.sh",
         "deploy-server.sh",
         "install-github-sync.sh",
+        "install-nginx-systemd-override.sh",
         "sync-from-github.sh",
     ),
 )
@@ -59,12 +60,30 @@ def testGitHubSyncEnforcesCiFastForwardAndExactRuntimeCommit() -> None:
     assert '"+refs/heads/${DEPLOY_BRANCH}:${DEPLOY_REF}"' in script
     assert '[[ "${containerCommit}" == "${expectedCommit}" ]]' in script
     assert '.status == "ok" and .releaseCommit == $expectedCommit' in script
+    assert 'DEPLOY_BRANCH="main"' in script
 
+    selfHeal = script.index("attempting local proxy self-heal before GitHub access")
+    githubAccess = script.index("prepare_mirror", script.index("main() {"))
     ciGate = script.index('if verify_github_checks "${targetCommit}"')
     backoffGate = script.index('if check_deployment_backoff "${targetCommit}"')
     extraction = script.index('extract_commit "${targetCommit}"')
     deployment = script.index('bash "${STAGING_DIR}/scripts/deploy-server.sh"')
-    assert ciGate < backoffGate < extraction < deployment
+    assert selfHeal < githubAccess < ciGate < extraction < backoffGate < deployment
+
+
+def testGitHubSyncRepairsInfrastructureWithoutQuarantiningKnownGoodCommit() -> None:
+    script = readScript("sync-from-github.sh")
+    mainBody = script.split("main() {", 1)[1].split('\n}\n\nmain "$@"', 1)[0]
+
+    repairAttempt = mainBody.index('repair_baota_proxy "${deployedCommit}"')
+    infrastructureStop = mainBody.index("INFRASTRUCTURE_BLOCKED")
+    targetRepair = mainBody.index('"${STAGING_DIR}/scripts/register-baota-site.py"')
+    ciGate = mainBody.index('verify_github_checks "${targetCommit}"')
+    quarantine = mainBody.index('record_deployment_failure "${targetCommit}"')
+    assert repairAttempt < infrastructureStop < ciGate < targetRepair < quarantine
+    assert "RUNTIME_SELF_HEAL_SUCCESS" in script
+    assert "host.docker.internal:18080" in script
+    assert 'verify_local_runtime_commit "${deployedCommit}"' in mainBody
 
 
 def testGitHubSyncUsesCommitArchiveAndAtomicImmutableOperationsRelease() -> None:
@@ -76,6 +95,7 @@ def testGitHubSyncUsesCommitArchiveAndAtomicImmutableOperationsRelease() -> None
     assert 'mv "${operationsTemp}" "${operationsRelease}"' in script
     assert 'ln -sfnT "${operationsRelease}" "${BIN_DIR}"' in script
     assert 'write_state "${targetCommit}"' in script
+    assert '"install-nginx-systemd-override.sh"' in script
     assert "git reset --hard" not in script
     assert "git clean -" not in script
 
@@ -130,11 +150,13 @@ def testDeployServerPublishesCurrentOnlyAfterContainerAndPublicShaChecks() -> No
     deployRelease = script.split("deploy_release() {", 1)[1].split("\n}\n\nmain() {", 1)[0]
 
     containerHealth = deployRelease.index('wait_for_health "${releaseDir}"')
+    baotaHealth = deployRelease.index('ensure_baota_proxy "${releaseDir}"')
     publicHealth = deployRelease.index('verify_public_endpoint "${releaseDir}" "${RELEASE_COMMIT}"')
     activateRelease = deployRelease.index('ln -sfnT "${releaseDir}" "${TARGET_ROOT}/current"')
-    assert containerHealth < publicHealth < activateRelease
+    assert containerHealth < baotaHealth < publicHealth < activateRelease
     assert '[[ "${RELEASE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]' in script
     assert '.status == "ok" and .releaseCommit == $expectedCommit' in script
+    assert "拒绝绕过宝塔流量统计链路" in script
 
 
 def testDeployServerRollbackIsVerifiedAndRetentionProtectsActiveReleases() -> None:
@@ -148,11 +170,45 @@ def testDeployServerRollbackIsVerifiedAndRetentionProtectsActiveReleases() -> No
 
     restartPrevious = rollback.index('run_compose "${ROLLBACK_RELEASE}" up -d')
     verifyContainer = rollback.index('wait_for_health "${ROLLBACK_RELEASE}"')
+    verifyBaota = rollback.index('ensure_baota_proxy "${ROLLBACK_RELEASE}"')
     verifyPublic = rollback.index(
         'verify_public_endpoint "${ROLLBACK_RELEASE}" "${rollbackCommit}"'
     )
     activatePrevious = rollback.index('ln -sfnT "${ROLLBACK_RELEASE}" "${TARGET_ROOT}/current"')
-    assert restartPrevious < verifyContainer < verifyPublic < activatePrevious
+    assert restartPrevious < verifyContainer < verifyBaota < verifyPublic < activatePrevious
     assert "index <= 5" in retention
     assert '[[ "${releaseDir}" == "${currentRelease}" ]]' in retention
     assert '[[ "${releaseDir}" == "${ROLLBACK_RELEASE}" ]]' in retention
+
+
+def testNginxSystemdOverrideWaitsForDockerWithBoundedRetries() -> None:
+    script = readScript("install-nginx-systemd-override.sh")
+
+    assert 'DROP_IN_PATH="${DROP_IN_DIR}/eventshock-docker-order.conf"' in script
+    assert "'Wants=docker.service'" in script
+    assert "'After=docker.service'" in script
+    assert "'StartLimitIntervalSec=60'" in script
+    assert "'StartLimitBurst=6'" in script
+    assert "'Restart=on-failure'" in script
+    assert "'RestartSec=5s'" in script
+    assert "Requires=docker.service" not in script
+    assert "PartOf=docker.service" not in script
+    assert "RemainAfterExit=" not in script
+    assert "PIDFile=" not in script
+
+    installDropIn = script.index('mv -f -- "${temporaryPath}" "${DROP_IN_PATH}"')
+    daemonReload = script.index("systemctl daemon-reload", installDropIn)
+    enableService = script.index("systemctl enable nginx.service")
+    assert installDropIn < daemonReload < enableService
+    assert 'cp -a -- "${DROP_IN_PATH}" "${backupPath}"' in script
+    assert 'mv -f -- "${backupPath}" "${DROP_IN_PATH}" || true' in script
+    assert 'if ((exitCode != 0)) && [[ "${dropInReplaced}" == "true" ]]' in script
+
+
+def testOperationalBootstrapIncludesNginxSystemdInstaller() -> None:
+    script = readScript("install-github-sync.sh")
+
+    assert "scripts/install-nginx-systemd-override.sh" in script
+    assert "install-nginx-systemd-override.sh \\" in script
+    assert '"${bootstrapRelease}/install-nginx-systemd-override.sh"' in script
+    assert "EVENTSHOCK_GITHUB_BRANCH=main" in script
