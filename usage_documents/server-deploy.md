@@ -33,7 +33,7 @@ Internet :80/:443
 - `caddy` 是默认且唯一的公网入口，负责证书申请与续期。
 - `app` 同时提供 FastAPI 与已构建的 React 单页应用。它只映射到宿主机回环地址 `127.0.0.1:18000`，不能从公网直接访问。
 - 宝塔 Nginx 是真实的中间反向代理而不是面板占位记录；生产请求确实经过其 access log，供宝塔站点流量统计使用。
-- Caddy 不运行会持续写入 Nginx access log 的后台主动探针；它对连接失败执行最多 5 秒、间隔 250 毫秒的请求内重试，覆盖重启时容器与 Nginx 之间的短暂竞争窗口，同时避免系统探针主导宝塔访问计数。
+- Caddy 没有配置会持续写入 Nginx access log 的后台主动探针。正常重启时，Caddy 容器先等待应用健康，再等待最终代理链健康，之后才监听公网端口；默认等待上限为 90 秒，永久故障超时后仍启动 Caddy，以保留 TLS 与错误可观测性。运行期间则对连接失败执行最多 5 秒、间隔 250 毫秒的请求内重试。这样既不会把正常应用启动窗口暴露成 502，也避免系统探针主导宝塔访问计数。
 - UFW 启用时，注册工具只允许动态识别出的 Caddy Docker bridge 及其 subnet 访问 host-gateway 的 `18080`；该规则是容器到宿主机的内部通道，不是公网端口放行。
 - 实验状态接口使用 SSE；宝塔 Nginx 的 EventShock 代理配置必须关闭响应缓冲，保留长连接相关请求头，并且不能缓存 `/api/v1/experiments/*/events`。
 - SQLite 保存在 Docker 命名卷 `eventshock-data`；重新构建应用镜像不会删除该卷。
@@ -371,6 +371,8 @@ sudo /opt/eventshock/bin/register-baota-site.py \
 
 注册器还会原子安装 `/etc/systemd/system/nginx.service.d/eventshock-docker-order.conf`：`Wants=docker.service` 与 `After=docker.service` 确保开机时 Docker 先就绪；Nginx 启动失败后每 5 秒重试，并受 60 秒内 6 次的启动限制保护。这里有意不用 `Requires` 或 `PartOf`，避免停止 Docker 时连带停止承载其他宝塔站点的全局 Nginx。安装器会启用 `nginx.service`，验证 drop-in 已被 systemd 读取，并在写入或验证失败时恢复原文件。
 
+Docker 守护进程在主机重启时会并行恢复已有容器，不会重新执行 Compose 的 `depends_on`。因此 Caddy 使用独立的 POSIX `sh` 启动门控：先等待容器网络内的应用 `/api/health`，再携带正式域名 `Host` 头等待宝塔 Nginx 的 `/api/health`，两者都成功后才 `exec caddy run` 并监听 80/443。等待期间 Caddy 的 Admin API 尚未启动，容器健康检查不会把“配置可解析但服务未监听”误报为健康；停止容器时，门控也会响应 `SIGTERM`。共享配置可用 `CADDY_STARTUP_GATE_TIMEOUT_SECONDS` 调整默认 90 秒上限；超时后门控会明确记录日志并启动 Caddy，而不是永久隐藏故障。
+
 最后，工具运行 `nginx -t`，由 systemd 统一接管启动状态，先检查宿主机内部 `/api/health`，再从 Caddy 容器内请求 `http://host.docker.internal:18080/api/health`。若注册过程失败，它会恢复 Nginx 配置快照、UFW 规则集合和入口时的 Nginx 运行状态。工具同时通过 `SiteTotalConfig.one_site_status` 启用该站点的 `free_site_total`，并要求服务、Unix socket、站点扩展配置和三次真实请求计数全部通过后才报告成功。
 
 只有上述内部健康检查通过后，才把共享配置的 `CADDY_UPSTREAM` 改为 `host.docker.internal:18080` 并重新应用 Compose。最后确认：
@@ -482,6 +484,14 @@ sudo systemctl cat nginx.service
 ```
 
 注册器会重新识别当前 Caddy Docker bridge/subnet、迁移项目自有的旧窄 UFW 规则，并从 Caddy 容器内验证 Nginx 健康接口。Docker network 被重建后不能沿用旧网络规则；若日志显示未知或宽范围 18080 规则，必须先人工核对，注册器不会擅自删除。
+
+若主机刚重启且 80/443 尚未监听，先查看 Caddy 门控日志。`waiting for application` 表示 FastAPI 尚未就绪，`waiting for proxy` 表示宝塔 Nginx 或其到应用的链路尚未就绪；依次出现两条 `is ready` 后，Caddy 才会启动。若出现 `startup gate timed out`，说明链路在默认 90 秒内仍未恢复，Caddy 已为保留 TLS 与错误可观测性而启动，必须继续检查 Nginx、UFW 与应用日志：
+
+```bash
+sudo /opt/eventshock/current/scripts/compose-current.sh logs --tail=100 caddy
+sudo /opt/eventshock/current/scripts/compose-current.sh exec -T caddy \
+  wget -q -O- -T 3 http://127.0.0.1:2019/config/
+```
 
 使用 `sudo ufw status numbered` 核对是否只有带 `EventShock-Caddy-Nginx` 注释的精确 18080 规则。不要用 `sudo ufw allow 18080`、面板“全部来源”放行或云安全组规则来临时解决超时；这些做法会把内部代理端口暴露到公网。只有在紧急诊断且明确接受暂时绕过宝塔流量统计时，才可短期把 `CADDY_UPSTREAM` 改为 `app:8000`；诊断结束后必须恢复正式值并重新完成内部、公网与流量统计验证。
 

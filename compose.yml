@@ -52,9 +52,23 @@ services:
   caddy:
     image: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
     restart: unless-stopped
+    # Docker 守护进程在主机重启时会并行恢复容器，不会重新执行 Compose 的
+    # depends_on 顺序。先等待应用，再等待最终代理链健康，避免 Caddy 提前
+    # 监听公网端口并把应用启动窗口暴露为 502。
+    entrypoint:
+      - /bin/sh
+      - /usr/local/bin/caddy-startup-gate.sh
+    command:
+      - caddy
+      - run
+      - --config
+      - /etc/caddy/Caddyfile
+      - --adapter
+      - caddyfile
     environment:
       APP_DOMAIN: "${APP_DOMAIN:-eventshock.mikezhuang.cn}"
       CADDY_UPSTREAM: "${CADDY_UPSTREAM:-app:8000}"
+      CADDY_STARTUP_GATE_TIMEOUT_SECONDS: "${CADDY_STARTUP_GATE_TIMEOUT_SECONDS:-90}"
     depends_on:
       app:
         condition: service_healthy
@@ -67,17 +81,19 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./scripts/caddy-startup-gate.sh:/usr/local/bin/caddy-startup-gate.sh:ro
       - caddy-data:/data
       - caddy-config:/config
     healthcheck:
       test:
         - CMD
-        - caddy
-        - validate
-        - --config
-        - /etc/caddy/Caddyfile
-        - --adapter
-        - caddyfile
+        - wget
+        - -q
+        - -O
+        - /dev/null
+        - -T
+        - "3"
+        - http://127.0.0.1:2019/config/
       interval: 30s
       timeout: 5s
       start_period: 10s

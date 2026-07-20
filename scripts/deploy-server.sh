@@ -40,6 +40,7 @@ run_compose() {
   env \
     -u APP_DOMAIN \
     -u APP_ENV \
+    -u CADDY_STARTUP_GATE_TIMEOUT_SECONDS \
     -u CADDY_UPSTREAM \
     -u COMPOSE_FILE \
     -u COMPOSE_PROJECT_NAME \
@@ -162,6 +163,8 @@ check_source() {
     || fail "源码目录缺少可执行的 scripts/register-baota-site.py。"
   [[ -x "${SOURCE_ROOT}/scripts/install-nginx-systemd-override.sh" ]] \
     || fail "源码目录缺少可执行的 Nginx systemd 安装器。"
+  [[ -x "${SOURCE_ROOT}/scripts/caddy-startup-gate.sh" ]] \
+    || fail "源码目录缺少可执行的 Caddy 启动门控。"
   compgen -G "${SOURCE_ROOT}/event-packs/*/manifest.json" >/dev/null \
     || fail "源码目录没有可部署的 event-packs/*/manifest.json。"
 }
