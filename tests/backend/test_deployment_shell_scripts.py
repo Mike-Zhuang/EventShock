@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -15,11 +16,157 @@ def readScript(scriptName: str) -> str:
 
 def testCaddyRetriesStartupRaceWithoutSyntheticHealthTraffic() -> None:
     caddyfile = (PROJECT_ROOT / "Caddyfile").read_text()
+    composeFile = (PROJECT_ROOT / "compose.yml").read_text()
+    startupGate = readScript("caddy-startup-gate.sh")
 
     assert "lb_try_duration 5s" in caddyfile
     assert "lb_try_interval 250ms" in caddyfile
     assert "health_uri" not in caddyfile
     assert "health_interval" not in caddyfile
+    assert "/usr/local/bin/caddy-startup-gate.sh" in composeFile
+    assert "http://127.0.0.1:2019/config/" in composeFile
+    assert "caddy\n      - validate" not in composeFile
+    assert 'CADDY_STARTUP_GATE_TIMEOUT_SECONDS: "${CADDY_STARTUP_GATE_TIMEOUT_SECONDS:-90}"' in (
+        composeFile
+    )
+
+    applicationWait = startupGate.index("waitForUrl application")
+    proxyWait = startupGate.index('waitForUrl proxy "${upstreamHealthUrl}"')
+    caddyExec = startupGate.index('exec "$@"')
+    assert applicationWait < proxyWait < caddyExec
+    assert "http://app:8000/api/health?startup-gate=application" in startupGate
+    assert "/api/health?startup-gate=proxy" in startupGate
+    assert '--header "Host: ${waitHost}"' in startupGate
+    assert "--noproxy '*'" in startupGate
+    assert 'if [ "${responseCode}" = 200 ]' in startupGate
+    assert 'proxyHost="${proxyHost#https://}"' in startupGate
+    assert "startup gate timed out" in startupGate
+
+
+def testCaddyStartupGateHasValidPosixShellSyntax() -> None:
+    result = subprocess.run(
+        ["sh", "-n", str(SCRIPTS_DIR / "caddy-startup-gate.sh")],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def testCaddyStartupGateWaitsBeforeExecutingCaddy(tmp_path: Path) -> None:
+    fakeBin = tmp_path / "bin"
+    fakeBin.mkdir()
+    stateDir = tmp_path / "state"
+    stateDir.mkdir()
+
+    fakeCurl = fakeBin / "curl"
+    fakeCurl.write_text(
+        """#!/bin/sh
+countFile="${EVENTSHOCK_GATE_TEST_DIR}/curl-count"
+count=0
+if [ -f "${countFile}" ]; then count=$(cat "${countFile}"); fi
+count=$((count + 1))
+printf '%s' "${count}" > "${countFile}"
+printf '%s\\n' "$*" >> "${EVENTSHOCK_GATE_TEST_DIR}/curl-arguments"
+if [ "${count}" -ge 3 ]; then printf '200'; else printf '000'; exit 1; fi
+"""
+    )
+    fakeSleep = fakeBin / "sleep"
+    fakeSleep.write_text("#!/bin/sh\nexit 0\n")
+    fakeCaddy = fakeBin / "caddy"
+    fakeCaddy.write_text(
+        """#!/bin/sh
+cat "${EVENTSHOCK_GATE_TEST_DIR}/curl-count" > "${EVENTSHOCK_GATE_TEST_DIR}/caddy-after"
+printf '%s\\n' "$*" > "${EVENTSHOCK_GATE_TEST_DIR}/caddy-arguments"
+"""
+    )
+    for fakeCommand in (fakeCurl, fakeSleep, fakeCaddy):
+        fakeCommand.chmod(0o755)
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "APP_DOMAIN": "https://eventshock.mikezhuang.cn",
+            "CADDY_UPSTREAM": "host.docker.internal:18080",
+            "EVENTSHOCK_GATE_TEST_DIR": str(stateDir),
+            "PATH": f"{fakeBin}:{environment['PATH']}",
+        }
+    )
+    result = subprocess.run(
+        [
+            "sh",
+            str(SCRIPTS_DIR / "caddy-startup-gate.sh"),
+            "caddy",
+            "run",
+            "--config",
+            "/etc/caddy/Caddyfile",
+            "--adapter",
+            "caddyfile",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (stateDir / "curl-count").read_text() == "4"
+    assert (stateDir / "caddy-after").read_text() == "4"
+    assert (stateDir / "caddy-arguments").read_text().strip() == (
+        "run --config /etc/caddy/Caddyfile --adapter caddyfile"
+    )
+    curlArguments = (stateDir / "curl-arguments").read_text()
+    assert "startup-gate=application" in curlArguments
+    assert "startup-gate=proxy" in curlArguments
+    assert "Host: eventshock.mikezhuang.cn" in curlArguments
+
+
+def testCaddyStartupGateFailsOpenAfterBoundedTimeout(tmp_path: Path) -> None:
+    fakeBin = tmp_path / "bin"
+    fakeBin.mkdir()
+    stateDir = tmp_path / "state"
+    stateDir.mkdir()
+
+    fakeCurl = fakeBin / "curl"
+    fakeCurl.write_text("#!/bin/sh\nprintf '000'\nexit 1\n")
+    fakeSleep = fakeBin / "sleep"
+    fakeSleep.write_text("#!/bin/sh\nexit 99\n")
+    fakeCaddy = fakeBin / "caddy"
+    fakeCaddy.write_text(
+        """#!/bin/sh
+printf '%s\\n' "$*" > "${EVENTSHOCK_GATE_TEST_DIR}/caddy-arguments"
+"""
+    )
+    for fakeCommand in (fakeCurl, fakeSleep, fakeCaddy):
+        fakeCommand.chmod(0o755)
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CADDY_STARTUP_GATE_TIMEOUT_SECONDS": "0",
+            "EVENTSHOCK_GATE_TEST_DIR": str(stateDir),
+            "PATH": f"{fakeBin}:{environment['PATH']}",
+        }
+    )
+    result = subprocess.run(
+        ["sh", str(SCRIPTS_DIR / "caddy-startup-gate.sh"), "caddy", "run"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "startup gate timed out after 0s" in result.stderr
+    assert (stateDir / "caddy-arguments").read_text().strip() == "run"
+
+
+def testDeploymentRequiresExecutableCaddyStartupGate() -> None:
+    deployScript = readScript("deploy-server.sh")
+
+    assert '[[ -x "${SOURCE_ROOT}/scripts/caddy-startup-gate.sh" ]]' in deployScript
+    assert "源码目录缺少可执行的 Caddy 启动门控" in deployScript
 
 
 @pytest.mark.parametrize(

@@ -18,8 +18,8 @@
 
 	# 默认直连应用；启用宝塔真实流量统计后改为 host.docker.internal:18080。
 	reverse_proxy {$CADDY_UPSTREAM:app:8000} {
-		# Docker 恢复容器与 systemd 启动 Nginx 之间只有很短的竞争窗口。
-		# 请求内有界重试既覆盖该窗口，也避免后台健康探针污染宝塔访问统计。
+		# 容器入口负责主机重启时的首次就绪门控；这里继续覆盖运行期间的
+		# 短暂连接故障，并避免后台主动健康探针持续污染宝塔访问统计。
 		lb_try_duration 5s
 		lb_try_interval 250ms
 
