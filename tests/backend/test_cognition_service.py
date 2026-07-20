@@ -606,6 +606,26 @@ def closedLoopService(
     )
 
 
+def test_null_claim_confidence_uses_neutral_default_for_evidence_and_social_feed() -> None:
+    service = closedLoopService(ClosedLoopPilotCognition())
+    eventPack = closedLoopEventPack()
+    claim = eventPack["claims"][0]
+    claim.update(
+        {
+            "claimType": "SCENARIO_ASSUMPTION",
+            "confidence": None,
+            "impactChannels": ["social"],
+            "synthetic": True,
+        }
+    )
+
+    evidence = service._approvedEvidence(eventPack, KNOWN_AT)
+    socialFeed = service._socialFeed(eventPack, KNOWN_AT)
+
+    assert evidence[0].credibility == 0.5
+    assert socialFeed[0].author_trust == pytest.approx(0.35)
+
+
 def test_closed_loop_pilot_uses_endogenous_market_feedback_and_labeled_social_feed() -> None:
     cognition = ClosedLoopPilotCognition()
     service = closedLoopService(cognition)
