@@ -16,7 +16,7 @@ readonly LOCK_FILE="/run/lock/eventshock-github-sync.lock"
 readonly DEPLOY_REF="refs/remotes/origin/eventshock-deploy"
 
 REPOSITORY_URL="https://github.com/Mike-Zhuang/EventShock.git"
-DEPLOY_BRANCH="codex/self-hosted-mvp"
+DEPLOY_BRANCH="main"
 GITHUB_REPOSITORY="Mike-Zhuang/EventShock"
 STAGING_DIR=""
 
@@ -175,10 +175,9 @@ configured_health_endpoint() {
   fi
 }
 
-verify_runtime_commit() {
+verify_local_runtime_commit() {
   local expectedCommit="$1"
   local currentRelease releaseCommit appContainerId healthStatus containerCommit
-  local endpoint response
   currentRelease="$(readlink -f "${TARGET_ROOT}/current" 2>/dev/null || true)"
   [[ -d "${currentRelease}" ]] || return 1
   releaseCommit="$(read_current_release_commit 2>/dev/null || true)"
@@ -194,12 +193,65 @@ verify_runtime_commit() {
     "${appContainerId}" 2>/dev/null \
     | sed -n 's/^EVENTSHOCK_RELEASE_COMMIT=//p' | head -n 1)"
   [[ "${containerCommit}" == "${expectedCommit}" ]] || return 1
+}
+
+verify_runtime_commit() {
+  local expectedCommit="$1"
+  local endpoint response
+  verify_local_runtime_commit "${expectedCommit}" || return 1
   endpoint="$(configured_health_endpoint)" || return 1
   response="$(curl --fail --silent --location --connect-timeout 3 --max-time 8 \
     "${endpoint}" 2>/dev/null)" || return 1
   jq -e --arg expectedCommit "${expectedCommit}" \
     '.status == "ok" and .releaseCommit == $expectedCommit' \
     <<<"${response}" >/dev/null 2>&1
+}
+
+baota_proxy_enabled() {
+  local configuredUpstream
+  configuredUpstream="$(sed -n 's/^CADDY_UPSTREAM=//p' "${SHARED_DIR}/.env" 2>/dev/null \
+    | tail -n 1)"
+  [[ "${configuredUpstream}" == "host.docker.internal:18080" ]]
+}
+
+repair_baota_proxy() {
+  local expectedCommit="$1"
+  local registrarOverride="${2:-}"
+  local currentRelease gatewayAddress registrar remaining
+  baota_proxy_enabled || return 1
+  currentRelease="$(readlink -f "${TARGET_ROOT}/current" 2>/dev/null || true)"
+  [[ -d "${currentRelease}" ]] || return 1
+  [[ -x "${currentRelease}/scripts/compose-current.sh" ]] || return 1
+  registrar="${registrarOverride:-${currentRelease}/scripts/register-baota-site.py}"
+  [[ -x "${registrar}" ]] || return 1
+
+  gatewayAddress="$(
+    "${currentRelease}/scripts/compose-current.sh" exec -T caddy \
+      getent hosts host.docker.internal 2>/dev/null \
+      | awk 'NR == 1 {print $1}'
+  )"
+  [[ "${gatewayAddress}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+
+  log "RUNTIME_SELF_HEAL_START: repairing Caddy -> BaoTa Nginx -> app"
+  if ! timeout 180 "${registrar}" --listen-address "${gatewayAddress}"; then
+    log "RUNTIME_SELF_HEAL_FAILED: BaoTa proxy registration or validation failed" >&2
+    return 1
+  fi
+  # Caddy 主动健康检查周期为 30 秒；Nginx 重启后需给它一个
+  # 有界窗口重新将内部上游标记为可用。
+  remaining=12
+  while ((remaining > 0)); do
+    if verify_runtime_commit "${expectedCommit}"; then
+      log "RUNTIME_SELF_HEAL_SUCCESS: release=${expectedCommit}"
+      return
+    fi
+    remaining=$((remaining - 1))
+    if ((remaining > 0)); then
+      sleep 5
+    fi
+  done
+  log "RUNTIME_SELF_HEAL_FAILED: public health did not return ${expectedCommit}" >&2
+  return 1
 }
 
 failed_state_value() {
@@ -377,6 +429,8 @@ extract_commit() {
     || fail "commit does not contain scripts/deploy-server.sh"
   [[ -f "${STAGING_DIR}/scripts/sync-from-github.sh" ]] \
     || fail "commit does not contain scripts/sync-from-github.sh"
+  [[ -x "${STAGING_DIR}/scripts/install-nginx-systemd-override.sh" ]] \
+    || fail "commit does not contain an executable Nginx systemd installer"
   [[ -f "${STAGING_DIR}/frontend/dist/index.html" ]] \
     || fail "commit does not contain a prebuilt frontend/dist/index.html"
   [[ -f "${STAGING_DIR}/backend/app/main.py" ]] \
@@ -392,6 +446,7 @@ install_operational_scripts() {
     "baota-eventshock-task.sh"
     "register-baota-task.py"
     "register-baota-site.py"
+    "install-nginx-systemd-override.sh"
     "install-github-sync.sh"
   )
   [[ "${commitSha}" =~ ^[0-9a-f]{40}$ ]] || fail "invalid operations commit"
@@ -450,17 +505,45 @@ main() {
   load_configuration
   validate_configuration
   acquire_lock
-  prepare_mirror
 
-  local targetCommit deployedCommit currentCommit shortCommit subject
-  targetCommit="$(git --git-dir="${MIRROR_DIR}" rev-parse "${DEPLOY_REF}^{commit}")"
+  local targetCommit deployedCommit currentCommit shortCommit subject runtimeHealthy
+  local localRuntimeHealthy infrastructureBlocked
   deployedCommit="$(read_deployed_commit || true)"
-  if [[ "${targetCommit}" == "${deployedCommit}" ]]; then
-    if verify_runtime_commit "${targetCommit}"; then
-      log "NO_CHANGE: branch, state, current release, container and public health remain at ${targetCommit}"
-      exit 0
+  runtimeHealthy=0
+  localRuntimeHealthy=0
+  infrastructureBlocked=0
+  if [[ -n "${deployedCommit}" ]] && verify_runtime_commit "${deployedCommit}"; then
+    runtimeHealthy=1
+  elif [[ -n "${deployedCommit}" ]]; then
+    if verify_local_runtime_commit "${deployedCommit}"; then
+      localRuntimeHealthy=1
     fi
-    log "RUNTIME_DRIFT: state=${deployedCommit} target=${targetCommit}; attempting verified repair"
+    log "RUNTIME_DRIFT: state=${deployedCommit}; attempting local proxy self-heal before GitHub access"
+    if repair_baota_proxy "${deployedCommit}"; then
+      runtimeHealthy=1
+    else
+      if ((localRuntimeHealthy == 1)); then
+        infrastructureBlocked=1
+        log "RUNTIME_SELF_HEAL_DEFERRED: checking whether a verified target contains the repair"
+      else
+        log "RUNTIME_SELF_HEAL_FAILED: local application also requires verified redeployment"
+      fi
+    fi
+  fi
+
+  prepare_mirror
+  targetCommit="$(git --git-dir="${MIRROR_DIR}" rev-parse "${DEPLOY_REF}^{commit}")"
+  if [[ "${targetCommit}" == "${deployedCommit}" ]] && ((runtimeHealthy == 1)); then
+    rm -f -- "${FAILED_STATE_FILE}"
+    log "NO_CHANGE: branch, state, current release, container and public health remain at ${targetCommit}"
+    exit 0
+  fi
+  if ((infrastructureBlocked == 1)) && [[ "${targetCommit}" == "${deployedCommit}" ]]; then
+    log "INFRASTRUCTURE_BLOCKED: local release is healthy but the BaoTa proxy path could not be repaired" >&2
+    exit 1
+  fi
+  if [[ "${targetCommit}" == "${deployedCommit}" ]]; then
+    log "RUNTIME_DRIFT: proxy self-heal did not restore ${targetCommit}; attempting verified deployment repair"
   fi
   verify_fast_forward "${deployedCommit}" "${targetCommit}"
 
@@ -475,6 +558,24 @@ main() {
     exit 1
   fi
 
+  shortCommit="${targetCommit:0:12}"
+  subject="$(git --git-dir="${MIRROR_DIR}" show -s --format=%s "${targetCommit}" \
+    | tr '\r\n' ' ' | tr -cd '[:print:]' | cut -c1-160)"
+  log "DEPLOY_START: branch=${DEPLOY_BRANCH} commit=${shortCommit} subject=${subject}"
+  extract_commit "${targetCommit}"
+
+  if ((infrastructureBlocked == 1)); then
+    log "TARGET_SELF_HEAL_START: using verified target registrar before deployment"
+    if ! repair_baota_proxy \
+      "${deployedCommit}" \
+      "${STAGING_DIR}/scripts/register-baota-site.py"; then
+      log "INFRASTRUCTURE_BLOCKED: verified target could not repair the BaoTa proxy path" >&2
+      exit 1
+    fi
+    runtimeHealthy=1
+    infrastructureBlocked=0
+  fi
+
   local backoffStatus
   if check_deployment_backoff "${targetCommit}"; then
     backoffStatus=0
@@ -485,12 +586,6 @@ main() {
     fi
     exit 1
   fi
-
-  shortCommit="${targetCommit:0:12}"
-  subject="$(git --git-dir="${MIRROR_DIR}" show -s --format=%s "${targetCommit}" \
-    | tr '\r\n' ' ' | tr -cd '[:print:]' | cut -c1-160)"
-  log "DEPLOY_START: branch=${DEPLOY_BRANCH} commit=${shortCommit} subject=${subject}"
-  extract_commit "${targetCommit}"
 
   currentCommit="$(read_current_release_commit 2>/dev/null || true)"
   if [[ "${currentCommit}" == "${targetCommit}" ]] \

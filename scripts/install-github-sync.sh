@@ -25,6 +25,8 @@ fail() {
   || fail "缺少 scripts/register-baota-task.py。"
 [[ -f "${SOURCE_ROOT}/scripts/register-baota-site.py" ]] \
   || fail "缺少 scripts/register-baota-site.py。"
+[[ -f "${SOURCE_ROOT}/scripts/install-nginx-systemd-override.sh" ]] \
+  || fail "缺少 scripts/install-nginx-systemd-override.sh。"
 
 missingSystemCommand=0
 for localCommand in curl flock git jq tar timeout; do
@@ -62,6 +64,7 @@ for scriptName in \
   baota-eventshock-task.sh \
   register-baota-task.py \
   register-baota-site.py \
+  install-nginx-systemd-override.sh \
   install-github-sync.sh; do
   install -m 0755 \
     "${SOURCE_ROOT}/scripts/${scriptName}" \
@@ -71,11 +74,19 @@ ln -sfnT "${bootstrapRelease}" "${BIN_DIR}"
 [[ "$(readlink -f "${BIN_DIR}")" == "${bootstrapRelease}" ]] \
   || fail "无法激活原子运维脚本目录。"
 
+# 初次安装时即写入开机顺序；如果宝塔 Nginx 尚未安装，则由后续站点
+# 注册流程再次执行同一个安装器。
+if [[ -x /etc/init.d/nginx ]]; then
+  "${bootstrapRelease}/install-nginx-systemd-override.sh"
+else
+  printf '[eventshock-sync-install] 宝塔 Nginx 尚未安装，systemd drop-in 延后到站点注册时安装。\n'
+fi
+
 if [[ ! -f "${CONFIG_FILE}" ]]; then
   cat >"${CONFIG_FILE}" <<'EOF'
 # 公开仓库使用匿名 HTTPS 拉取，不在此文件保存 Token。
 EVENTSHOCK_GITHUB_URL=https://github.com/Mike-Zhuang/EventShock.git
-EVENTSHOCK_GITHUB_BRANCH=codex/self-hosted-mvp
+EVENTSHOCK_GITHUB_BRANCH=main
 EVENTSHOCK_GITHUB_REPOSITORY=Mike-Zhuang/EventShock
 EOF
 fi

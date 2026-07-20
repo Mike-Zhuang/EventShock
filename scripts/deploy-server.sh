@@ -82,6 +82,10 @@ rollback_on_exit() {
     wait_for_health "${ROLLBACK_RELEASE}"
     rollbackStatus=$?
   fi
+  if ((rollbackStatus == 0)); then
+    ensure_baota_proxy "${ROLLBACK_RELEASE}"
+    rollbackStatus=$?
+  fi
   if ((rollbackStatus == 0)) && [[ -n "${rollbackCommit}" ]]; then
     verify_public_endpoint "${ROLLBACK_RELEASE}" "${rollbackCommit}"
     rollbackStatus=$?
@@ -154,6 +158,10 @@ check_source() {
   [[ -f "${SOURCE_ROOT}/frontend/package-lock.json" ]] || fail "源码目录缺少 frontend/package-lock.json。"
   [[ -f "${SOURCE_ROOT}/frontend/dist/index.html" ]] || fail "源码目录缺少已验证的 frontend/dist/index.html。"
   [[ -f "${SOURCE_ROOT}/backend/app/main.py" ]] || fail "源码目录缺少 backend/app/main.py。"
+  [[ -x "${SOURCE_ROOT}/scripts/register-baota-site.py" ]] \
+    || fail "源码目录缺少可执行的 scripts/register-baota-site.py。"
+  [[ -x "${SOURCE_ROOT}/scripts/install-nginx-systemd-override.sh" ]] \
+    || fail "源码目录缺少可执行的 Nginx systemd 安装器。"
   compgen -G "${SOURCE_ROOT}/event-packs/*/manifest.json" >/dev/null \
     || fail "源码目录没有可部署的 event-packs/*/manifest.json。"
 }
@@ -423,6 +431,38 @@ verify_public_endpoint() {
   return 1
 }
 
+baota_proxy_enabled() {
+  local configuredUpstream
+  configuredUpstream="$(sed -n 's/^CADDY_UPSTREAM=//p' "${SHARED_DIR}/.env" 2>/dev/null \
+    | tail -n 1)"
+  [[ "${configuredUpstream}" == "host.docker.internal:18080" ]]
+}
+
+ensure_baota_proxy() {
+  local composeDirectory="$1"
+  local gatewayAddress registrar
+  if ! baota_proxy_enabled; then
+    log "生产部署要求 CADDY_UPSTREAM=host.docker.internal:18080，拒绝绕过宝塔流量统计链路。"
+    return 1
+  fi
+  registrar="${composeDirectory}/scripts/register-baota-site.py"
+  if [[ ! -x "${registrar}" ]]; then
+    log "当前发布缺少可执行的宝塔站点注册器。"
+    return 1
+  fi
+  gatewayAddress="$(
+    run_compose "${composeDirectory}" exec -T caddy \
+      getent hosts host.docker.internal \
+      | awk 'NR == 1 {print $1}'
+  )"
+  if [[ ! "${gatewayAddress}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+    log "无法从 Caddy 容器解析 Docker host-gateway。"
+    return 1
+  fi
+  log "校验并自愈 Caddy → 宝塔 Nginx → 应用链路。"
+  timeout 180 "${registrar}" --listen-address "${gatewayAddress}"
+}
+
 cleanup_old_releases() {
   local currentRelease releaseDir imageName index cleanupFailed
   currentRelease="$(readlink -f "${TARGET_ROOT}/current" 2>/dev/null || true)"
@@ -484,6 +524,9 @@ deploy_release() {
     fail "新应用未通过容器健康检查。"
   fi
   run_compose "${releaseDir}" ps
+  if ! ensure_baota_proxy "${releaseDir}"; then
+    fail "宝塔 Nginx 内部反向代理未能自愈。"
+  fi
   if ! verify_public_endpoint "${releaseDir}" "${RELEASE_COMMIT}"; then
     fail "请检查 DNS、阿里云安全组 TCP 80/443、端口占用和 Caddy 日志。"
   fi

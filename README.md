@@ -148,7 +148,7 @@ docker compose up --detach --build
 
 服务器内存较小，因此生产镜像直接复制已经通过本地与 CI 验证的 `frontend/dist`，服务器只构建 Python 运行层，不会在主机上运行 Node。`frontend/dist` 是受 Git 跟踪的发布工件：修改前端后必须执行 `npm run build`，并把源码和对应的 `dist` 一起提交。
 
-正式更新采用 GitHub 拉取式链路。开发者在 `codex/self-hosted-mvp` 功能分支完成测试、commit 和 push；服务器只有在 `Backend / Python 3.12.13`、`Frontend / Node 22` 与 `Production container` 三项 GitHub CI 全绿后才接受该 SHA。宝塔原生计划任务每 10 分钟调用 `/opt/eventshock/bin/baota-eventshock-task.sh`，服务器匿名 fetch 公有仓库、拒绝非快进更新，并从目标 commit 的 `git archive` 构建带唯一镜像标签的发布版本。容器与公网健康检查必须返回目标 commit SHA，失败时自动恢复上一发布版本。
+正式更新采用 GitHub 拉取式链路。开发者在个人 `codex/*` 功能分支完成测试、commit 和 push，通过 Pull Request 合入 `main`；服务器只有在 `main` 上的 `Backend / Python 3.12.13`、`Frontend / Node 22` 与 `Production container` 三项 GitHub CI 全绿后才接受该 SHA。宝塔原生计划任务每 10 分钟调用 `/opt/eventshock/bin/baota-eventshock-task.sh`，每轮先核对当前运行时并尝试自愈 Caddy→宝塔 Nginx→应用链路，再匿名 fetch 公有仓库、拒绝非快进更新，并从目标 commit 的 `git archive` 构建带唯一镜像标签的发布版本。容器与公网健康检查必须返回目标 commit SHA，失败时自动恢复上一发布版本。
 
 默认公网链路由 Caddy 独占 80/443 并处理 TLS，应用只额外映射到 `127.0.0.1:18000`。宝塔任务的原生输出可在面板“计划任务”的日志中查看，稳定审计日志写入 `/opt/eventshock/shared/logs/github-sync.log`。正式监测链路必须采用 `Caddy -> Nginx:18080 -> app:18000` 的真实转发路径，并用仅覆盖 Caddy bridge/subnet 的精确 UFW 规则连接容器与宿主机；Caddy 直连应用只用于引导或故障诊断。不能通过公网放行 18080 或伪造宝塔“PHP 项目”数据库记录来制造监控数据。
 

@@ -44,21 +44,75 @@ class FakeHealthResponse:
 
 
 @pytest.mark.parametrize(
-    ("isRunning", "expectedAction"),
-    ((True, "reload"), (False, "start")),
+    ("isRunning", "forceRestart", "expectedAction"),
+    ((True, False, "reload"), (True, True, "restart"), (False, False, "start")),
 )
 def testValidateAndStartNginxUsesCorrectServiceAction(
     monkeypatch: pytest.MonkeyPatch,
     isRunning: bool,
+    forceRestart: bool,
     expectedAction: str,
 ) -> None:
     module = loadBaotaSiteModule()
-    serviceCalls: list[list[str]] = []
+    checkCalls: list[list[str]] = []
+    isActiveChecks = 0
     monkeypatch.setattr(module, "nginxIsRunning", lambda: isRunning)
+
+    def fakeCall(command, **_kwargs):
+        nonlocal isActiveChecks
+        if command[:3] == ["systemctl", "is-active", "--quiet"]:
+            isActiveChecks += 1
+            if isRunning or isActiveChecks > 1:
+                return 0
+            return 1
+        assert command[:2] == ["systemctl", "reset-failed"]
+        return 0
+
+    monkeypatch.setattr(module.subprocess, "call", fakeCall)
     monkeypatch.setattr(
         module.subprocess,
         "check_call",
-        lambda command: serviceCalls.append(command) or 0,
+        lambda command: checkCalls.append(command) or 0,
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "check_output",
+        lambda command, **_kwargs: (
+            'LISTEN 0 511 127.0.0.1:888 0.0.0.0:* users:(("nginx",pid=8,fd=8))\n'
+            'LISTEN 0 511 172.17.0.1:18080 0.0.0.0:* users:(("nginx",pid=8,fd=9))\n'
+        ),
+    )
+    monkeypatch.setattr(
+        module.urllib.request, "urlopen", lambda *_args, **_kwargs: FakeHealthResponse()
+    )
+
+    module.validateAndStartNginx("172.17.0.1", forceRestart=forceRestart)
+
+    assert checkCalls == [
+        [module.NGINX_BINARY, "-t"],
+        ["systemctl", expectedAction, module.NGINX_SYSTEMD_SERVICE],
+    ]
+
+
+def testValidateAndStartNginxReconcilesOrphanProcess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = loadBaotaSiteModule()
+    checkCalls: list[list[str]] = []
+    activeChecks = iter((1, 0))
+    monkeypatch.setattr(module, "nginxIsRunning", lambda: True)
+
+    def fakeCall(command, **_kwargs):
+        if command[:3] == ["systemctl", "is-active", "--quiet"]:
+            return next(activeChecks)
+        assert command[:2] == ["systemctl", "reset-failed"]
+        return 0
+
+    monkeypatch.setattr(module.subprocess, "call", fakeCall)
+    monkeypatch.setattr(
+        module.subprocess,
+        "check_call",
+        lambda command: checkCalls.append(command) or 0,
     )
     monkeypatch.setattr(
         module.subprocess,
@@ -74,7 +128,95 @@ def testValidateAndStartNginxUsesCorrectServiceAction(
 
     module.validateAndStartNginx("172.17.0.1")
 
-    assert serviceCalls == [[module.NGINX_INIT_SCRIPT, expectedAction]]
+    assert checkCalls == [
+        [module.NGINX_BINARY, "-t"],
+        [module.NGINX_INIT_SCRIPT, "stop"],
+        ["systemctl", "start", module.NGINX_SYSTEMD_SERVICE],
+    ]
+
+
+def testRestoreNginxFallsBackToInitWhenSystemdTakeoverFails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = loadBaotaSiteModule()
+    runningStates = iter((False, False, True))
+    checkCalls: list[list[str]] = []
+    plainCalls: list[list[str]] = []
+
+    monkeypatch.setattr(module, "nginxIsRunning", lambda: next(runningStates))
+    monkeypatch.setattr(
+        module.subprocess,
+        "call",
+        lambda command, **_kwargs: plainCalls.append(command) or 0,
+    )
+
+    def fakeCheckCall(command, **_kwargs):
+        checkCalls.append(command)
+        if command == ["systemctl", "start", module.NGINX_SYSTEMD_SERVICE]:
+            raise module.subprocess.CalledProcessError(1, command)
+        return 0
+
+    monkeypatch.setattr(module.subprocess, "check_call", fakeCheckCall)
+
+    module.restoreNginxProcessState(True)
+
+    assert plainCalls == [["systemctl", "reset-failed", module.NGINX_SYSTEMD_SERVICE]]
+    assert checkCalls == [
+        [module.NGINX_BINARY, "-t"],
+        ["systemctl", "start", module.NGINX_SYSTEMD_SERVICE],
+        [module.NGINX_INIT_SCRIPT, "start"],
+    ]
+
+
+@pytest.mark.parametrize(
+    ("installerOutput", "expectedChanged"),
+    (
+        ("[eventshock-nginx-systemd] changed=true path=/tmp/unit\n", True),
+        ("[eventshock-nginx-systemd] changed=false path=/tmp/unit\n", False),
+    ),
+)
+def testInstallNginxSystemdOverrideParsesUniqueResult(
+    monkeypatch: pytest.MonkeyPatch,
+    installerOutput: str,
+    expectedChanged: bool,
+) -> None:
+    module = loadBaotaSiteModule()
+    monkeypatch.setattr(module.os.path, "isfile", lambda _path: True)
+    monkeypatch.setattr(module.os, "access", lambda *_args: True)
+    monkeypatch.setattr(
+        module.subprocess,
+        "check_output",
+        lambda command, **_kwargs: installerOutput,
+    )
+
+    assert module.installNginxSystemdOverride() is expectedChanged
+
+
+def testInstallNginxSystemdOverrideFallsBackToCurrentRelease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = loadBaotaSiteModule()
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        module.os.path,
+        "isfile",
+        lambda path: path == module.NGINX_SYSTEMD_FALLBACK_INSTALLER,
+    )
+    monkeypatch.setattr(
+        module.os,
+        "access",
+        lambda path, _mode: path == module.NGINX_SYSTEMD_FALLBACK_INSTALLER,
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "check_output",
+        lambda command, **_kwargs: (
+            calls.append(command) or "[eventshock-nginx-systemd] changed=false path=/tmp/unit\n"
+        ),
+    )
+
+    assert module.installNginxSystemdOverride() is False
+    assert calls == [[module.NGINX_SYSTEMD_FALLBACK_INSTALLER]]
 
 
 @pytest.mark.parametrize(
@@ -341,6 +483,55 @@ def testAssertInternalPortClosedAllowsSingleExactScopedUfwRule(
     )
 
 
+@pytest.mark.parametrize(
+    ("tokenIndex", "unsafeValue"),
+    (
+        (4, "eth0"),
+        (6, "172.16.0.0/12"),
+        (8, "172.17.0.2"),
+        (12, "udp"),
+        (14, "Manual-Rule"),
+    ),
+)
+def testOwnedScopedUfwRuleRejectsOverbroadOrUnownedVariants(
+    tokenIndex: int,
+    unsafeValue: str,
+) -> None:
+    module = loadBaotaSiteModule()
+    rule = module.scopedUfwRule(
+        "br-607487476fbf",
+        "172.19.0.0/16",
+        "172.17.0.1",
+    )
+    assert module.ownedScopedUfwRule(rule, "172.17.0.1")
+
+    rule[tokenIndex] = unsafeValue
+
+    assert not module.ownedScopedUfwRule(rule, "172.17.0.1")
+
+
+def testValidateScopedUfwStatusRequiresOneCompleteRuleLine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = loadBaotaSiteModule()
+    monkeypatch.setattr(
+        module.subprocess,
+        "check_output",
+        lambda *_args, **_kwargs: (
+            "Status: active\n"
+            "172.17.0.1 18080/tcp ALLOW IN 172.19.0.0/16\n"
+            "br-607487476fbf # EventShock-Caddy-Nginx\n"
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="运行状态未显示完整"):
+        module.validateScopedUfwStatus(
+            "br-607487476fbf",
+            "172.19.0.0/16",
+            "172.17.0.1",
+        )
+
+
 def testEnsureScopedUfwRuleAddsOnlyExactCaddyBridgeRule(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -378,14 +569,11 @@ def testEnsureScopedUfwRuleAddsOnlyExactCaddyBridgeRule(
     monkeypatch.setattr(module.subprocess, "check_output", fakeCheckOutput)
     monkeypatch.setattr(module.subprocess, "check_call", fakeCheckCall)
 
-    assert (
-        module.ensureScopedUfwRule(
-            "br-607487476fbf",
-            "172.19.0.0/16",
-            "172.17.0.1",
-        )
-        is True
-    )
+    assert module.ensureScopedUfwRule(
+        "br-607487476fbf",
+        "172.19.0.0/16",
+        "172.17.0.1",
+    ) == {"before": [], "listenAddress": "172.17.0.1"}
     assert calls == [expectedRule]
 
 
@@ -393,6 +581,7 @@ def testEnsureScopedUfwRuleRollsBackFailedPostAddVerification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = loadBaotaSiteModule()
+    state = {"created": False}
     calls: list[list[str]] = []
     expectedRule = module.scopedUfwRule(
         "br-607487476fbf",
@@ -411,20 +600,30 @@ def testEnsureScopedUfwRuleRollsBackFailedPostAddVerification(
     ]
 
     monkeypatch.setattr(module.os.path, "isfile", lambda path: path == module.UFW_BINARY_PATH)
-    monkeypatch.setattr(
-        module.subprocess,
-        "check_output",
-        lambda command, **_kwargs: (
-            "Status: active\n" if command == ["ufw", "status"] else "Added user rules:\n"
-        ),
-    )
-    monkeypatch.setattr(
-        module.subprocess,
-        "check_call",
-        lambda command, **_kwargs: calls.append(command) or 0,
-    )
 
-    with pytest.raises(RuntimeError, match="未保存精确"):
+    def fakeCheckOutput(command, **_kwargs):
+        if command == ["ufw", "show", "added"]:
+            if state["created"]:
+                return " ".join(expectedRule[:-1]) + f" '{expectedRule[-1]}'\n"
+            return "Added user rules:\n"
+        if command == ["ufw", "status"]:
+            return "Status: active\n"
+        raise AssertionError(command)
+
+    def fakeCheckCall(command, **_kwargs):
+        calls.append(command)
+        if command == expectedRule:
+            state["created"] = True
+        elif command == expectedDelete:
+            state["created"] = False
+        else:
+            raise AssertionError(command)
+        return 0
+
+    monkeypatch.setattr(module.subprocess, "check_output", fakeCheckOutput)
+    monkeypatch.setattr(module.subprocess, "check_call", fakeCheckCall)
+
+    with pytest.raises(RuntimeError, match="运行状态未显示完整"):
         module.ensureScopedUfwRule(
             "br-607487476fbf",
             "172.19.0.0/16",
@@ -432,6 +631,164 @@ def testEnsureScopedUfwRuleRollsBackFailedPostAddVerification(
         )
 
     assert calls == [expectedRule, expectedDelete]
+
+
+def testEnsureScopedUfwRuleMigratesOwnedDockerBridgeRuleAndCanRollBack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = loadBaotaSiteModule()
+    oldRule = module.scopedUfwRule(
+        "br-111111111111",
+        "172.18.0.0/16",
+        "172.17.0.1",
+    )
+    newRule = module.scopedUfwRule(
+        "br-222222222222",
+        "172.19.0.0/16",
+        "172.17.0.1",
+    )
+    oldDelete = ["ufw", "--force", "delete", *oldRule[1:13]]
+    newDelete = ["ufw", "--force", "delete", *newRule[1:13]]
+    state = {"rules": [oldRule]}
+    calls: list[list[str]] = []
+
+    def renderedRules():
+        lines = ["Added user rules:"]
+        for rule in state["rules"]:
+            lines.append(" ".join(rule[:-1]) + f" '{rule[-1]}'")
+        return "\n".join(lines) + "\n"
+
+    def fakeCheckOutput(command, **_kwargs):
+        if command == ["ufw", "show", "added"]:
+            return renderedRules()
+        if command == ["ufw", "status"]:
+            return (
+                "Status: active\n"
+                "172.17.0.1 18080/tcp on br-222222222222 ALLOW IN "
+                "172.19.0.0/16 # EventShock-Caddy-Nginx\n"
+            )
+        raise AssertionError(command)
+
+    def fakeCheckCall(command, **_kwargs):
+        calls.append(command)
+        if command == newRule:
+            state["rules"].append(newRule)
+        elif command == oldDelete:
+            state["rules"].remove(oldRule)
+        elif command == newDelete:
+            state["rules"].remove(newRule)
+        elif command == oldRule:
+            state["rules"].append(oldRule)
+        else:
+            raise AssertionError(command)
+        return 0
+
+    monkeypatch.setattr(module.os.path, "isfile", lambda path: path == module.UFW_BINARY_PATH)
+    monkeypatch.setattr(module.subprocess, "check_output", fakeCheckOutput)
+    monkeypatch.setattr(module.subprocess, "check_call", fakeCheckCall)
+
+    mutation = module.ensureScopedUfwRule(
+        "br-222222222222",
+        "172.19.0.0/16",
+        "172.17.0.1",
+    )
+
+    assert mutation == {"before": [oldRule], "listenAddress": "172.17.0.1"}
+    assert state["rules"] == [newRule]
+    module.rollbackScopedUfwMutation(mutation)
+    assert state["rules"] == [oldRule]
+    assert calls == [newRule, oldDelete, oldRule, newDelete]
+
+
+def testEnsureScopedUfwRuleConvergesAfterInterruptedMigration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = loadBaotaSiteModule()
+    oldRule = module.scopedUfwRule(
+        "br-111111111111",
+        "172.18.0.0/16",
+        "172.17.0.1",
+    )
+    expectedRule = module.scopedUfwRule(
+        "br-222222222222",
+        "172.19.0.0/16",
+        "172.17.0.1",
+    )
+    oldDelete = ["ufw", "--force", "delete", *oldRule[1:13]]
+    expectedDelete = ["ufw", "--force", "delete", *expectedRule[1:13]]
+    state = {"rules": [oldRule, expectedRule, expectedRule]}
+    calls: list[list[str]] = []
+
+    def fakeCheckOutput(command, **_kwargs):
+        if command == ["ufw", "show", "added"]:
+            return "\n".join(
+                ["Added user rules:"]
+                + [" ".join(rule[:-1]) + f" '{rule[-1]}'" for rule in state["rules"]]
+            )
+        if command == ["ufw", "status"]:
+            return (
+                "Status: active\n"
+                "172.17.0.1 18080/tcp on br-222222222222 ALLOW IN "
+                "172.19.0.0/16 # EventShock-Caddy-Nginx\n"
+            )
+        raise AssertionError(command)
+
+    def fakeCheckCall(command, **_kwargs):
+        calls.append(command)
+        if command == oldDelete:
+            state["rules"].remove(oldRule)
+        elif command == expectedDelete:
+            state["rules"].remove(expectedRule)
+        else:
+            raise AssertionError(command)
+        return 0
+
+    monkeypatch.setattr(module.os.path, "isfile", lambda path: path == module.UFW_BINARY_PATH)
+    monkeypatch.setattr(module.subprocess, "check_output", fakeCheckOutput)
+    monkeypatch.setattr(module.subprocess, "check_call", fakeCheckCall)
+
+    mutation = module.ensureScopedUfwRule(
+        "br-222222222222",
+        "172.19.0.0/16",
+        "172.17.0.1",
+    )
+
+    assert mutation == {
+        "before": [oldRule, expectedRule, expectedRule],
+        "listenAddress": "172.17.0.1",
+    }
+    assert state["rules"] == [expectedRule]
+    assert calls == [oldDelete, expectedDelete]
+
+
+def testEnsureScopedUfwRuleNeverDeletesUnownedRule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = loadBaotaSiteModule()
+    unsafeRule = module.scopedUfwRule(
+        "br-111111111111",
+        "172.18.0.0/16",
+        "172.17.0.1",
+    )
+    unsafeRule[-1] = "Manual-Rule"
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(module, "ufwIsActive", lambda: True)
+    monkeypatch.setattr(module, "internalPortUfwRules", lambda: [unsafeRule])
+    monkeypatch.setattr(
+        module.subprocess,
+        "check_call",
+        lambda command, **_kwargs: calls.append(command) or 0,
+    )
+
+    with pytest.raises(RuntimeError, match="非预期或重复"):
+        module.ensureScopedUfwRule(
+            "br-222222222222",
+            "172.19.0.0/16",
+            "172.17.0.1",
+        )
+
+    assert calls == []
 
 
 @pytest.mark.parametrize(
