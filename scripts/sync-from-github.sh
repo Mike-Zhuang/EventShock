@@ -237,8 +237,8 @@ repair_baota_proxy() {
     log "RUNTIME_SELF_HEAL_FAILED: BaoTa proxy registration or validation failed" >&2
     return 1
   fi
-  # Caddy 主动健康检查周期为 30 秒；Nginx 重启后需给它一个
-  # 有界窗口重新将内部上游标记为可用。
+  # Nginx reload、DNS 与 TLS 状态恢复可能存在短暂延迟，因此在
+  # 固定窗口内继续核对完整公网 SHA，而不是立即触发应用重建。
   remaining=12
   while ((remaining > 0)); do
     if verify_runtime_commit "${expectedCommit}"; then

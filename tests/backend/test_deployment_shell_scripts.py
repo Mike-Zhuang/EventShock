@@ -13,6 +13,15 @@ def readScript(scriptName: str) -> str:
     return (SCRIPTS_DIR / scriptName).read_text()
 
 
+def testCaddyRetriesStartupRaceWithoutSyntheticHealthTraffic() -> None:
+    caddyfile = (PROJECT_ROOT / "Caddyfile").read_text()
+
+    assert "lb_try_duration 5s" in caddyfile
+    assert "lb_try_interval 250ms" in caddyfile
+    assert "health_uri" not in caddyfile
+    assert "health_interval" not in caddyfile
+
+
 @pytest.mark.parametrize(
     "scriptName",
     (
