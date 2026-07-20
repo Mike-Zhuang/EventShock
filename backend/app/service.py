@@ -2466,7 +2466,7 @@ class ExperimentService:
                     claim=claim["text"],
                     source_type=_evidenceSourceType(source),
                     known_at=knownAt,
-                    credibility=float(claim.get("confidence", 0.5)),
+                    credibility=_claimConfidence(claim),
                     human_approved=True,
                 )
             )
@@ -2496,7 +2496,7 @@ class ExperimentService:
                 for marker in ("RUMOR", "NARRATIVE", "OPINION", "SCENARIO_ASSUMPTION")
             ):
                 continue
-            confidence = float(claim.get("confidence", 0.5))
+            confidence = _claimConfidence(claim)
             socialPosts.append(
                 SocialPost(
                     post_id=f"social-{claim['claimId']}"[:128],
@@ -2929,6 +2929,13 @@ def _parseUtc(value: Any) -> datetime:
     if parsedValue.tzinfo is None or parsedValue.utcoffset() is None:
         parsedValue = parsedValue.replace(tzinfo=UTC)
     return parsedValue.astimezone(UTC)
+
+
+def _claimConfidence(claim: dict[str, Any]) -> float:
+    """将未赋值的假设可信度映射为既有的中性默认值。"""
+
+    rawConfidence = claim.get("confidence")
+    return 0.5 if rawConfidence is None else float(rawConfidence)
 
 
 def _evidenceSourceType(source: dict[str, Any]) -> EvidenceSourceType:
