@@ -33,6 +33,7 @@ Internet :80/:443
 - `caddy` 是默认且唯一的公网入口，负责证书申请与续期。
 - `app` 同时提供 FastAPI 与已构建的 React 单页应用。它只映射到宿主机回环地址 `127.0.0.1:18000`，不能从公网直接访问。
 - 宝塔 Nginx 是真实的中间反向代理而不是面板占位记录；生产请求确实经过其 access log，供宝塔站点流量统计使用。
+- Caddy 不运行会持续写入 Nginx access log 的后台主动探针；它对连接失败执行最多 5 秒、间隔 250 毫秒的请求内重试，覆盖重启时容器与 Nginx 之间的短暂竞争窗口，同时避免系统探针主导宝塔访问计数。
 - UFW 启用时，注册工具只允许动态识别出的 Caddy Docker bridge 及其 subnet 访问 host-gateway 的 `18080`；该规则是容器到宿主机的内部通道，不是公网端口放行。
 - 实验状态接口使用 SSE；宝塔 Nginx 的 EventShock 代理配置必须关闭响应缓冲，保留长连接相关请求头，并且不能缓存 `/api/v1/experiments/*/events`。
 - SQLite 保存在 Docker 命名卷 `eventshock-data`；重新构建应用镜像不会删除该卷。
