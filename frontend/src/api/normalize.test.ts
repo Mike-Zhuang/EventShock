@@ -10,6 +10,7 @@ import {
   normalizeEventPack,
   normalizeExperiment,
   normalizeGovernanceInventory,
+  normalizeLlmCatalog,
   normalizeRedTeamRegistry,
   normalizeReleaseGate,
   normalizeResults,
@@ -26,6 +27,113 @@ import {
 } from './normalize';
 
 describe('API normalizers', () => {
+  it('兼容多供应商目录并保留供应商原币种价格与能力元数据', () => {
+    const catalog = normalizeLlmCatalog({
+      default_provider: 'zhipu',
+      pricing_snapshot_version: '2026-07-20',
+      providers: [{
+        id: 'zhipu',
+        name: 'Zhipu AI',
+        base_url: 'https://open.bigmodel.cn/api/paas/v4',
+        documentation_url: 'https://docs.bigmodel.cn/',
+        pricing_url: 'https://open.bigmodel.cn/pricing',
+        region: 'CN',
+        structured_output_mode: 'JSON_OBJECT',
+        structured_output_note: 'JSON object plus local schema validation.',
+        models: [{
+          provider: 'zhipu', id: 'glm-5.2', name: 'GLM-5.2', context_tokens: 200_000,
+          max_output_tokens: 131_072, official_max_output_tokens: 131_072,
+          application_max_output_tokens: 32_768,
+          supports_thinking: true, thinking_always_on: false,
+          supports_function_calling: true, recommended: true,
+          quality_tier: 'PREMIUM', free_tier: false, legacy: false,
+          pricing_status: 'VERIFIED_UPPER_BOUND', billing_currency: 'CNY',
+          input_rate_upper_per_million: 4, cached_input_rate_per_million: 1,
+          output_rate_upper_per_million: 16, pricing_verified_at: '2026-07-20',
+          budget_input_rate_upper_per_million: 8,
+          budget_output_rate_upper_per_million: 20,
+        }],
+      }, {
+        id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1',
+        documentationUrl: 'https://platform.openai.com/docs', pricingUrl: 'https://openai.com/api/pricing/',
+        region: 'US', structuredOutputMode: 'JSON_SCHEMA_STRICT',
+        structuredOutputNote: 'Strict JSON Schema.',
+        models: [{
+          provider: 'openai', id: 'gpt-5.2', name: 'GPT-5.2', contextTokens: 400_000,
+          maxOutputTokens: 128_000, supportsThinking: true, supportsFunctionCalling: true,
+          recommended: true, qualityTier: 'PREMIUM', freeTier: false, legacy: false,
+          pricingStatus: 'VERIFIED_UPPER_BOUND', billingCurrency: 'USD',
+          inputRateUpperPerMillion: 1.75, outputRateUpperPerMillion: 14,
+          pricingVerifiedAt: '2026-07-20',
+        }],
+      }],
+    });
+
+    expect(catalog.defaultProvider).toBe('zhipu');
+    expect(catalog.providers).toHaveLength(2);
+    expect(catalog.providers[0]).toMatchObject({
+      structuredOutputMode: 'JSON_OBJECT',
+      models: [{
+        provider: 'zhipu', id: 'glm-5.2', qualityTier: 'PREMIUM',
+        inputRateUpperPerMillion: 4, cachedInputRatePerMillion: 1,
+        applicationMaxOutputTokens: 32_768,
+        budgetInputRateUpperPerMillion: 8,
+        budgetOutputRateUpperPerMillion: 20,
+        thinkingAlwaysOn: false,
+      }],
+    });
+    expect(catalog.providers[1].models[0]).toMatchObject({
+      provider: 'openai', billingCurrency: 'USD', outputRateUpperPerMillion: 14,
+    });
+  });
+
+  it('把旧版智谱单供应商目录提升为新的 providers 结构', () => {
+    const catalog = normalizeLlmCatalog({
+      provider: 'zhipu', providerName: 'Zhipu AI', baseUrl: 'https://example.test',
+      documentationUrl: 'https://docs.example.test', pricingUrl: 'https://price.example.test',
+      models: [{
+        id: 'glm-legacy', name: 'GLM Legacy', contextTokens: 128_000, maxOutputTokens: 8_192,
+        pricingStatus: 'VERIFIED_UPPER_BOUND', billingCurrency: 'CNY',
+        inputRateUpperCnyPerMillion: 1, outputRateUpperCnyPerMillion: 2,
+      }],
+    });
+
+    expect(catalog.defaultProvider).toBe('zhipu');
+    expect(catalog.providers).toHaveLength(1);
+    expect(catalog.providers[0].models[0]).toMatchObject({
+      id: 'glm-legacy', provider: 'zhipu', inputRateUpperPerMillion: 1,
+      outputRateUpperPerMillion: 2, qualityTier: 'BALANCED',
+    });
+  });
+
+  it('保留缺少可核验输出上限的模型并将其维持为关闭状态', () => {
+    const catalog = normalizeLlmCatalog({
+      defaultProvider: 'moonshot',
+      providers: [{
+        id: 'moonshot', name: 'Moonshot AI / Kimi', baseUrl: 'https://api.moonshot.cn/v1',
+        documentationUrl: 'https://platform.kimi.com/docs', pricingUrl: 'https://platform.kimi.com/docs/pricing/chat-k26',
+        region: 'CN', structuredOutputMode: 'json_schema', structuredOutputNote: 'JSON Schema mode.',
+        models: [{
+          provider: 'moonshot', id: 'kimi-k2.6', name: 'Kimi K2.6', contextTokens: 262_144,
+          supportsThinking: true, supportsFunctionCalling: true, recommended: false,
+          qualityTier: 'PREMIUM', freeTier: false, legacy: false,
+          pricingStatus: 'VERIFIED_UPPER_BOUND', billingCurrency: 'CNY',
+          inputRateUpperPerMillion: 6.5, outputRateUpperPerMillion: 27,
+          capabilityNote: 'Official output cap is not verifiable.',
+        }],
+      }],
+    });
+
+    expect(catalog.providers[0].models).toEqual([
+      expect.objectContaining({
+        id: 'kimi-k2.6',
+        maxOutputTokens: undefined,
+        pricingStatus: 'VERIFIED_UPPER_BOUND',
+        capabilityNote: 'Official output cap is not verifiable.',
+      }),
+    ]);
+  });
+
   it('normalizes authenticated accounts, verification receipts, and privacy-minimized admin records', () => {
     expect(normalizeAuthSession({
       authentication_required: true,
@@ -677,6 +785,55 @@ describe('API normalizers', () => {
     });
   });
 
+  it('keeps historical CNY cost budgets on the FX-converted display path', () => {
+    const legacy = normalizeResults({
+      experimentId: 'exp-legacy-cny-budget',
+      cognition: {
+        costBudget: {
+          capUsd: 5,
+          chargedUsdUpperBound: 1.25,
+          remainingUsd: 3.75,
+          billingCurrency: 'CNY',
+          cnyPerUsdBudgetFloor: 6,
+          pricingSnapshotVersion: 'zhipu-public-list-2026-07-15',
+        },
+      },
+    });
+    const oldest = normalizeResults({
+      experimentId: 'exp-oldest-cny-budget',
+      cognition: {
+        costBudget: {
+          capUsd: 5,
+          chargedUsdUpperBound: 1.25,
+          cnyPerUsdBudgetFloor: 6,
+          pricingSnapshotVersion: 'zhipu-public-list-2026-07-15',
+        },
+      },
+    });
+    const usd = normalizeResults({
+      experimentId: 'exp-usd-budget',
+      cognition: {
+        costBudget: {
+          billingCurrency: 'USD',
+          fxConversionApplied: false,
+        },
+      },
+    });
+
+    expect(legacy.cognition?.costBudget).toMatchObject({
+      billingCurrency: 'CNY',
+      fxConversionApplied: true,
+    });
+    expect(oldest.cognition?.costBudget).toMatchObject({
+      billingCurrency: 'CNY',
+      fxConversionApplied: true,
+    });
+    expect(usd.cognition?.costBudget).toMatchObject({
+      billingCurrency: 'USD',
+      fxConversionApplied: false,
+    });
+  });
+
   it('normalizes saved scenarios, scenario diffs, executable evaluations, and runtime metrics', () => {
     const saved = normalizeSavedScenario({
       id: 'scenario-1',
@@ -690,9 +847,17 @@ describe('API normalizers', () => {
         seedRoot: 20260707,
         populationSize: 56,
         steps: 120,
+        llmPolicy: {
+          mode: 'HYBRID_LLM', provider: 'openai', modelId: 'gpt-5.2',
+          representativeAgentCount: 8, decisionIntervalSteps: 12,
+          callBudget: 24, maxCostUsd: 10, fallbackToRules: true,
+        },
       },
     });
-    expect(saved).toMatchObject({ id: 'scenario-1', frozen: true, config: { seedRoot: 20260707 } });
+    expect(saved).toMatchObject({
+      id: 'scenario-1', frozen: true,
+      config: { seedRoot: 20260707, llmPolicy: { provider: 'openai', modelId: 'gpt-5.2' } },
+    });
 
     const diff = normalizeScenarioDiff({
       changeCount: 1,

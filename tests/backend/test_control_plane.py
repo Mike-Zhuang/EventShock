@@ -53,8 +53,8 @@ def test_model_catalog_and_session_secret_lifecycle_are_safe(tmp_path: Path) -> 
             "/api/v1/llm/config",
             headers={"X-Session-ID": SESSION_ID},
             json={
-                "provider": "zhipu",
-                "model": "glm-5.2",
+                "provider": "openai",
+                "model": "gpt-5.6-luna",
                 "apiKey": "test-secret-api-key-123456",
                 "thinkingEnabled": False,
                 "maxTokens": 2048,
@@ -75,8 +75,32 @@ def test_model_catalog_and_session_secret_lifecycle_are_safe(tmp_path: Path) -> 
 
     modelIds = {item["id"] for item in catalog.json()["models"]}
     assert {"glm-5.2", "glm-5.1", "glm-5", "glm-4.7-flash"}.issubset(modelIds)
+    assert catalog.json()["defaultProvider"] == "zhipu"
+    providers = {item["id"]: item for item in catalog.json()["providers"]}
+    assert set(providers) == {
+        "zhipu",
+        "openai",
+        "anthropic",
+        "google",
+        "deepseek",
+        "alibaba",
+        "moonshot",
+    }
+    assert providers["openai"]["baseUrl"] == "https://api.openai.com/v1/responses"
+    assert providers["openai"]["structuredOutputMode"] == "json_schema"
+    assert providers["openai"]["models"][0]["billingCurrency"] == "USD"
+    kimi26 = next(item for item in providers["moonshot"]["models"] if item["id"] == "kimi-k2.6")
+    assert kimi26["maxOutputTokens"] is None
+    assert kimi26["pricingStatus"] == "VERIFIED_UPPER_BOUND"
+    kimi3 = next(item for item in providers["moonshot"]["models"] if item["id"] == "kimi-k3")
+    assert kimi3["maxOutputTokens"] == 131_072
+    assert kimi3["officialMaxOutputTokens"] == 1_048_576
+    assert kimi3["applicationMaxOutputTokens"] == 131_072
+    assert kimi3["thinkingAlwaysOn"] is True
     assert saved.status_code == 200
     assert viewed.json()["configured"] is True
+    assert viewed.json()["provider"] == "openai"
+    assert viewed.json()["model"] == "gpt-5.6-luna"
     assert viewed.json()["credential_hint"] == "••••3456"
     assert "test-secret-api-key" not in str(saved.json())
     assert "test-secret-api-key" not in str(audit.json())
@@ -131,6 +155,49 @@ def test_hybrid_preflight_requires_worst_case_cost_reservation(tmp_path: Path) -
     assert insufficient.json()["llmPricingStatus"] == "VERIFIED_UPPER_BOUND"
     assert insufficient.json()["llmMinimumCallReservationUsd"] == pytest.approx(8.057344)
     assert sufficientCostCheck["status"] == "PASS"
+
+
+def test_hybrid_preflight_rejects_a_different_configured_provider_route(
+    tmp_path: Path,
+) -> None:
+    with TestClient(createApp(tmp_path)) as client:
+        _freezeCanonicalPack(client)
+        configured = client.put(
+            "/api/v1/llm/config",
+            headers={"X-Session-ID": SESSION_ID},
+            json={
+                "provider": "openai",
+                "model": "gpt-5.6-luna",
+                "apiKey": "test-openai-provider-route-key",
+                "thinkingEnabled": False,
+                "maxTokens": 2_048,
+            },
+        )
+        payload = _experimentPayload()
+        payload["llmPolicy"] = {
+            "mode": "HYBRID_LLM",
+            "provider": "zhipu",
+            "modelId": "glm-5.2",
+            "representativeAgentCount": 2,
+            "decisionIntervalSteps": 12,
+            "callBudget": 4,
+            "maxCostUsd": 10.0,
+            "fallbackToRules": False,
+        }
+        checked = client.post(
+            "/api/v1/scenarios/validate",
+            headers={"X-Session-ID": SESSION_ID},
+            json=payload,
+        )
+
+    assert configured.status_code == 200
+    runtimeCheck = next(
+        item for item in checked.json()["checks"] if item["code"] == "LLM_RUNTIME_CONFIG"
+    )
+    assert runtimeCheck["status"] == "FAIL"
+    assert any(
+        item["code"] == "LLM_PROVIDER_MODEL_CONFIG_MISMATCH" for item in checked.json()["errors"]
+    )
 
 
 def test_uploaded_source_text_is_hashed_but_not_retained(tmp_path: Path) -> None:

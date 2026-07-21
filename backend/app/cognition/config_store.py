@@ -8,13 +8,12 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Literal
 
 from pydantic import Field
 
-from backend.app.cognition.catalog import getZhipuModel
+from backend.app.cognition.catalog import DEFAULT_PROVIDER, ProviderId, getModel
 from backend.app.cognition.models import StrictFrozenModel
-from backend.app.cognition.pricing import getZhipuTokenPrice
+from backend.app.cognition.pricing import getTokenPrice, getZhipuTokenPrice
 
 SESSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
 
@@ -25,7 +24,7 @@ class CredentialNotConfiguredError(LookupError):
 
 class SessionProviderConfigView(StrictFrozenModel):
     configured: bool
-    provider: Literal["zhipu"] | None = None
+    provider: ProviderId | None = None
     model: str | None = None
     thinking_enabled: bool | None = None
     max_tokens: int | None = Field(default=None, ge=1)
@@ -35,7 +34,7 @@ class SessionProviderConfigView(StrictFrozenModel):
 
 @dataclass(frozen=True, slots=True)
 class RuntimeProviderConfig:
-    provider: Literal["zhipu"]
+    provider: ProviderId
     model: str
     thinkingEnabled: bool
     maxTokens: int
@@ -44,7 +43,7 @@ class RuntimeProviderConfig:
 
 @dataclass(frozen=True, slots=True)
 class _SessionCredential:
-    provider: Literal["zhipu"]
+    provider: ProviderId
     model: str
     thinkingEnabled: bool
     maxTokens: int
@@ -74,26 +73,35 @@ class SessionConfigStore:
         sessionId: str,
         apiKey: str,
         model: str,
+        provider: ProviderId = DEFAULT_PROVIDER,
         thinkingEnabled: bool = False,
         maxTokens: int = 2_048,
     ) -> SessionProviderConfigView:
         self._validateSessionId(sessionId)
         self._validateApiKey(apiKey)
-        descriptor = getZhipuModel(model)
-        if getZhipuTokenPrice(model) is None:
+        descriptor = getModel(provider, model)
+        price = getZhipuTokenPrice(model) if provider == "zhipu" else getTokenPrice(provider, model)
+        if price is None:
             raise ValueError(
-                f"{model} cannot be configured because no verified public token price is available"
+                f"{provider}/{model} cannot be configured because no verified public token "
+                "price is available"
+            )
+        if descriptor.max_output_tokens is None:
+            raise ValueError(
+                f"{provider}/{model} cannot be configured because no verified maximum output "
+                "limit is available"
             )
         if not 1 <= maxTokens <= descriptor.max_output_tokens:
             raise ValueError(
-                f"maxTokens must be between 1 and {descriptor.max_output_tokens} for {model}"
+                f"maxTokens must be between 1 and the application limit "
+                f"{descriptor.max_output_tokens} for {provider}/{model}"
             )
         if thinkingEnabled and not descriptor.supports_thinking:
             raise ValueError(f"{model} does not support thinking")
 
         expiresAt = self._clock() + self._ttlSeconds
         credential = _SessionCredential(
-            provider="zhipu",
+            provider=provider,
             model=model,
             thinkingEnabled=thinkingEnabled,
             maxTokens=maxTokens,

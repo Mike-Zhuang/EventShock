@@ -11,7 +11,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from backend.app.cognition.catalog import ZHIPU_CHAT_MODELS, ZhipuModelDescriptor
+from backend.app.cognition.catalog import (
+    ModelDescriptor,
+    ProviderId,
+    getProvider,
+    listModels,
+)
 from backend.app.cognition.prompts import PROMPT_REGISTRY, PromptSpec
 from backend.app.simulation.analytics import METRIC_KEYS
 
@@ -95,16 +100,17 @@ class FallbackDefinition(GovernanceModel):
 
 
 class ModelDetails(GovernanceModel):
-    provider: Literal["zhipu"] = "zhipu"
-    modelId: str = Field(pattern=r"^glm-[a-z0-9.-]+$")
+    provider: ProviderId
+    modelId: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$")
     contextTokens: int = Field(ge=16_000)
-    maxOutputTokens: int = Field(ge=1_024)
+    maxOutputTokens: int | None = Field(default=None, ge=1_024)
     supportsJsonObject: bool
+    supportsJsonSchema: bool
     supportsFunctionCalling: bool
     supportsThinking: bool
     recommended: bool
     legacy: bool
-    metadataReviewedDate: Literal["2026-07-15"] = "2026-07-15"
+    metadataReviewedDate: Literal["2026-07-20"] = "2026-07-20"
 
 
 class PromptDetails(GovernanceModel):
@@ -204,7 +210,8 @@ def _fallback(
     )
 
 
-def _modelComponent(model: ZhipuModelDescriptor) -> ComponentRecord:
+def _modelComponent(model: ModelDescriptor) -> ComponentRecord:
+    provider = getProvider(model.provider)
     limitations = [
         "Provider behavior may change under a stable model identifier.",
         "No completed live-provider quality, latency, multilingual, or cost study is stored in this repository.",
@@ -213,8 +220,8 @@ def _modelComponent(model: ZhipuModelDescriptor) -> ComponentRecord:
     if model.legacy:
         limitations.append("The catalog marks this model as legacy or approaching retirement.")
     return ComponentRecord(
-        componentId=f"zhipu.{model.model_id}",
-        name=f"Zhipu {model.display_name}",
+        componentId=f"{model.provider}.{model.model_id}",
+        name=f"{provider.display_name} {model.display_name}",
         kind=ComponentKind.PROVIDER_MODEL,
         owner="LLM & Evaluation Lead",
         purpose="Produce schema-constrained extraction or simulated belief outputs through the provider-neutral model gateway.",
@@ -224,7 +231,7 @@ def _modelComponent(model: ZhipuModelDescriptor) -> ComponentRecord:
         inputs=(
             _input(
                 "messages",
-                "Zhipu chat/completions messages",
+                f"{provider.api_style} request",
                 "Versioned system prompt plus delimited untrusted user evidence.",
                 trustBoundary=TrustBoundary.VALIDATED_EXTERNAL,
             ),
@@ -260,13 +267,22 @@ def _modelComponent(model: ZhipuModelDescriptor) -> ComponentRecord:
             "Prevents an unvalidated provider response from becoming a belief or candidate fact.",
         ),
         approvalStatus=ApprovalStatus.PENDING_HUMAN_EVIDENCE,
-        sourceFiles=("backend/app/cognition/catalog.py", "backend/app/cognition/zhipu.py"),
+        sourceFiles=(
+            "backend/app/cognition/catalog.py",
+            (
+                "backend/app/cognition/zhipu.py"
+                if model.provider == "zhipu"
+                else "backend/app/cognition/provider_gateways.py"
+            ),
+        ),
         external=True,
         modelDetails=ModelDetails(
+            provider=model.provider,
             modelId=model.model_id,
             contextTokens=model.context_tokens,
             maxOutputTokens=model.max_output_tokens,
             supportsJsonObject=model.supports_json_object,
+            supportsJsonSchema=model.supports_json_schema,
             supportsFunctionCalling=model.supports_function_calling,
             supportsThinking=model.supports_thinking,
             recommended=model.recommended,
@@ -640,13 +656,13 @@ def _coreComponents() -> tuple[ComponentRecord, ...]:
             sourceFiles=("backend/app/information/models.py",),
         ),
         ComponentRecord(
-            componentId="cognition.zhipu-rest-gateway",
-            name="Zhipu structured-output REST gateway",
+            componentId="cognition.provider-rest-gateway",
+            name="Allowlisted multi-provider structured-output REST gateway",
             kind=ComponentKind.MODEL_GATEWAY,
             owner="LLM & Evaluation Lead",
-            purpose="Call the official Zhipu Chat Completions endpoint with bounded retries, JSON-object output, local validation, caching, and safe fallback.",
+            purpose="Call fixed official provider endpoints with bounded retries, schema-constrained output, local validation, caching, and safe fallback.",
             materiality=Materiality.CRITICAL,
-            version="zhipu-rest-gateway-v1.0.0",
+            version="provider-rest-gateway-v2.0.0",
             schemaRef="ModelRequest -> ModelResult[BaseModel]",
             inputs=(
                 _input(
@@ -699,7 +715,11 @@ def _coreComponents() -> tuple[ComponentRecord, ...]:
                 "Prevents provider failure from bypassing local authority, evidence, or schema controls.",
             ),
             approvalStatus=ApprovalStatus.PENDING_HUMAN_EVIDENCE,
-            sourceFiles=("backend/app/cognition/gateway.py", "backend/app/cognition/zhipu.py"),
+            sourceFiles=(
+                "backend/app/cognition/gateway.py",
+                "backend/app/cognition/provider_gateways.py",
+                "backend/app/cognition/zhipu.py",
+            ),
             external=True,
         ),
         ComponentRecord(
@@ -715,7 +735,7 @@ def _coreComponents() -> tuple[ComponentRecord, ...]:
                 _input(
                     "apiKey",
                     "opaque provider credential",
-                    "User-provided Zhipu API key scoped to one application session.",
+                    "User-provided model-provider API key scoped to one application session.",
                     trustBoundary=TrustBoundary.SECRET,
                     containsSecrets=True,
                 ),
@@ -863,7 +883,7 @@ def _buildInventory() -> tuple[ComponentRecord, ...]:
     records = (
         *_coreComponents(),
         *(_promptComponent(prompt) for prompt in PROMPT_REGISTRY),
-        *(_modelComponent(model) for model in ZHIPU_CHAT_MODELS),
+        *(_modelComponent(model) for model in listModels()),
     )
     ordered = tuple(sorted(records, key=lambda record: record.componentId))
     errors = validateInventory(ordered)
@@ -891,12 +911,14 @@ def validateInventory(records: tuple[ComponentRecord, ...] | None = None) -> tup
         errors.append("metric component is missing")
     if not any(record.kind is ComponentKind.VALIDATION_COMPONENT for record in resolved):
         errors.append("validation component is missing")
-    modelIds = {
-        record.modelDetails.modelId for record in resolved if record.modelDetails is not None
+    modelRoutes = {
+        (record.modelDetails.provider, record.modelDetails.modelId)
+        for record in resolved
+        if record.modelDetails is not None
     }
-    expectedModelIds = {model.model_id for model in ZHIPU_CHAT_MODELS}
-    if modelIds != expectedModelIds:
-        errors.append("Zhipu provider-model inventory does not match the runtime catalog")
+    expectedModelRoutes = {(model.provider, model.model_id) for model in listModels()}
+    if modelRoutes != expectedModelRoutes:
+        errors.append("provider-model inventory does not match the runtime catalog")
     promptHashes = {
         record.promptDetails.promptHash for record in resolved if record.promptDetails is not None
     }

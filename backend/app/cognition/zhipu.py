@@ -106,18 +106,21 @@ class ZhipuRestGateway:
         payload = self._buildPayload(request)
         totalUsage = ModelUsage()
         totalAttempts = 0
+        uncertainBillableAttempts = 0
         failureCodes: list[FailureCode] = []
         repairUsed = False
         lastError: ModelGatewayError | None = None
         rawContent = ""
 
         try:
-            body, rawBody, attempts = await self._postWithRetry(
+            body, rawBody, attempts, uncertainAttempts = await self._postWithRetry(
                 payload=payload,
                 request=request,
                 policy=policy,
             )
             totalAttempts += attempts
+            uncertainBillableAttempts += uncertainAttempts
+            # 200 响应即可能产生费用；先登记 usage，再解析内容或执行语义校验。
             callUsage = self._usageFromBody(body)
             totalUsage = totalUsage.plus(callUsage)
             rawContent = self._contentFromBody(body)
@@ -130,6 +133,7 @@ class ZhipuRestGateway:
             responseHash = hashlib.sha256(rawBody).hexdigest()
         except ModelGatewayError as error:
             totalAttempts += error.attempts
+            uncertainBillableAttempts += error.uncertainBillableAttempts
             lastError = error
             failureCodes.append(error.code)
             data = None
@@ -143,12 +147,13 @@ class ZhipuRestGateway:
                 error=lastError,
             )
             try:
-                body, rawBody, attempts = await self._postWithRetry(
+                body, rawBody, attempts, uncertainAttempts = await self._postWithRetry(
                     payload=repairPayload,
                     request=request,
                     policy=policy,
                 )
                 totalAttempts += attempts
+                uncertainBillableAttempts += uncertainAttempts
                 totalUsage = totalUsage.plus(self._usageFromBody(body))
                 repairedContent = self._contentFromBody(body)
                 data = self._validateContent(
@@ -161,6 +166,7 @@ class ZhipuRestGateway:
                 lastError = None
             except ModelGatewayError as error:
                 totalAttempts += error.attempts
+                uncertainBillableAttempts += error.uncertainBillableAttempts
                 lastError = error
                 failureCodes.append(error.code)
 
@@ -190,6 +196,7 @@ class ZhipuRestGateway:
                 repairUsed=repairUsed,
                 fallbackUsed=True,
                 cacheHit=False,
+                uncertainBillableAttempts=uncertainBillableAttempts,
                 failureCodes=tuple(failureCodes),
             )
 
@@ -216,6 +223,7 @@ class ZhipuRestGateway:
             repairUsed=repairUsed,
             fallbackUsed=False,
             cacheHit=False,
+            uncertainBillableAttempts=uncertainBillableAttempts,
             failureCodes=tuple(failureCodes),
         )
 
@@ -320,8 +328,9 @@ class ZhipuRestGateway:
         payload: dict[str, Any],
         request: ModelRequest,
         policy: ModelPolicy,
-    ) -> tuple[dict[str, Any], bytes, int]:
+    ) -> tuple[dict[str, Any], bytes, int, int]:
         lastError: ModelGatewayError | None = None
+        uncertainBillableAttempts = 0
         for attemptIndex in range(policy.max_transport_attempts):
             attemptNumber = attemptIndex + 1
             try:
@@ -337,22 +346,26 @@ class ZhipuRestGateway:
                     follow_redirects=False,
                 )
             except httpx.TimeoutException as error:
+                uncertainBillableAttempts += 1
                 lastError = ModelGatewayError(
                     FailureCode.MODEL_TIMEOUT,
                     "model request timed out",
                     retryable=True,
                     attempts=attemptNumber,
+                    uncertainBillableAttempts=uncertainBillableAttempts,
                 )
                 if attemptNumber < policy.max_transport_attempts:
                     await self._backoff(policy, attemptIndex, None)
                     continue
                 raise lastError from error
             except httpx.TransportError as error:
+                uncertainBillableAttempts += 1
                 lastError = ModelGatewayError(
                     FailureCode.MODEL_TRANSPORT_ERROR,
                     "model transport failed",
                     retryable=True,
                     attempts=attemptNumber,
+                    uncertainBillableAttempts=uncertainBillableAttempts,
                 )
                 if attemptNumber < policy.max_transport_attempts:
                     await self._backoff(policy, attemptIndex, None)
@@ -362,7 +375,11 @@ class ZhipuRestGateway:
             try:
                 body = self._decodeBody(response)
             except ModelGatewayError as error:
+                if response.status_code == 200:
+                    # 200 但无法解析 usage 时，账单状态仍未知，必须保留单次响应上界。
+                    uncertainBillableAttempts += 1
                 error.attempts = attemptNumber
+                error.uncertainBillableAttempts = uncertainBillableAttempts
                 if error.retryable and attemptNumber < policy.max_transport_attempts:
                     await self._backoff(
                         policy,
@@ -372,10 +389,11 @@ class ZhipuRestGateway:
                     continue
                 raise
             if response.status_code == 200:
-                return body, response.content, attemptNumber
+                return body, response.content, attemptNumber, uncertainBillableAttempts
 
-            lastError = self._classifyError(response.status_code, body)
+            lastError = self._classifyError(response.status_code, body, request.apiKey)
             lastError.attempts = attemptNumber
+            lastError.uncertainBillableAttempts = uncertainBillableAttempts
             if lastError.retryable and attemptNumber < policy.max_transport_attempts:
                 await self._backoff(
                     policy,
@@ -430,15 +448,29 @@ class ZhipuRestGateway:
         return body
 
     @staticmethod
-    def _classifyError(statusCode: int, body: dict[str, Any]) -> ModelGatewayError:
+    def _classifyError(
+        statusCode: int,
+        body: dict[str, Any],
+        apiKey: str = "",
+    ) -> ModelGatewayError:
         errorBody = body.get("error")
-        providerCode = str(errorBody.get("code", "")) if isinstance(errorBody, dict) else ""
+        rawProviderCode = str(errorBody.get("code", "")) if isinstance(errorBody, dict) else ""
         providerMessage = (
             str(errorBody.get("message", "provider request failed"))
             if isinstance(errorBody, dict)
             else "provider request failed"
         )
-        safeMessage = " ".join(providerMessage.split())[:300]
+        # 供应商错误正文不可信，可能原样回显请求头或密钥；进入异常和日志前
+        # 必须显式替换，不依赖供应商“通常不会回显”的行为。
+        redactedMessage = providerMessage
+        for secret in (f"Bearer {apiKey}", apiKey):
+            if secret:
+                redactedMessage = redactedMessage.replace(secret, "[REDACTED]")
+        providerCode = rawProviderCode
+        for secret in (f"Bearer {apiKey}", apiKey):
+            if secret:
+                providerCode = providerCode.replace(secret, "[REDACTED]")
+        safeMessage = " ".join(redactedMessage.split())[:300]
 
         if providerCode in {"1000", "1001", "1003", "1005"} or statusCode == 401:
             code = FailureCode.MODEL_AUTHENTICATION_ERROR
@@ -503,7 +535,23 @@ class ZhipuRestGateway:
                 "provider response did not contain choices",
             )
         firstChoice = choices[0]
+        if not isinstance(firstChoice, dict):
+            raise ModelGatewayError(
+                FailureCode.MODEL_RESPONSE_INVALID,
+                "provider choice was not an object",
+            )
+        finishReason = firstChoice.get("finish_reason")
+        if finishReason == "length":
+            raise ModelGatewayError(
+                FailureCode.MODEL_RESPONSE_INVALID,
+                "provider truncated structured output at max_tokens",
+            )
+        if finishReason == "content_filter":
+            raise ModelGatewayError(FailureCode.CONTENT_FILTERED, "provider filtered content")
         message = firstChoice.get("message") if isinstance(firstChoice, dict) else None
+        refusal = message.get("refusal") if isinstance(message, dict) else None
+        if isinstance(refusal, str) and refusal.strip():
+            raise ModelGatewayError(FailureCode.REFUSAL, "model refused structured output")
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str) or not content.strip():
             raise ModelGatewayError(FailureCode.REFUSAL, "model returned no structured content")
@@ -520,7 +568,12 @@ class ZhipuRestGateway:
             value = schema.model_validate_json(content)
         except ValidationError as error:
             details = error.errors(include_url=False, include_input=False)
-            safeDetails = json.dumps(details, ensure_ascii=False, separators=(",", ":"))[:600]
+            safeDetails = json.dumps(
+                details,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            )[:600]
             raise ModelGatewayError(
                 FailureCode.SCHEMA_INVALID,
                 f"structured output failed schema validation: {safeDetails}",

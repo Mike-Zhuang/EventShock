@@ -29,6 +29,7 @@ from backend.app.cognition import (
     IntentSide,
     IntentStatus,
     IntentTimeInForce,
+    ModelGatewayError,
     ModelPolicy,
     ModelRequest,
     Observation,
@@ -452,6 +453,120 @@ def test_schema_failure_gets_exactly_one_repair_and_usage_is_accumulated() -> No
     assert result.usage.completionTokens == 18
 
 
+def test_invalid_200_content_still_accumulates_usage_before_repair() -> None:
+    observation = makeObservation()
+    truncated = providerResponse(decisionPayload(), promptTokens=7, outputTokens=8)
+    truncated["choices"][0]["finish_reason"] = "length"
+    responses = [
+        truncated,
+        providerResponse(decisionPayload(), promptTokens=9, outputTokens=10),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=responses.pop(0), request=request)
+
+    result = runGateway(
+        handler,
+        lambda gateway: gateway.generateStructured(
+            makeRequest(observation),
+            BeliefDecision,
+            ModelPolicy(base_backoff_seconds=0.0),
+        ),
+    )
+
+    assert result.repairUsed is True
+    assert result.fallbackUsed is False
+    assert result.usage.promptTokens == 16
+    assert result.usage.completionTokens == 18
+
+
+def test_unparseable_200_response_is_marked_unknown_billable_before_repair() -> None:
+    observation = makeObservation()
+    requestCount = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requestCount
+        requestCount += 1
+        if requestCount == 1:
+            return httpx.Response(200, content=b"not-json", request=request)
+        return httpx.Response(200, json=providerResponse(decisionPayload()), request=request)
+
+    result = runGateway(
+        handler,
+        lambda gateway: gateway.generateStructured(
+            makeRequest(observation),
+            BeliefDecision,
+            ModelPolicy(base_backoff_seconds=0.0),
+        ),
+    )
+
+    assert requestCount == 2
+    assert result.repairUsed is True
+    assert result.fallbackUsed is False
+    assert result.uncertainBillableAttempts == 1
+    assert result.usage.totalTokens > 0
+
+
+def test_timeout_before_success_is_marked_as_an_uncertain_billable_attempt() -> None:
+    observation = makeObservation()
+    requestCount = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requestCount
+        requestCount += 1
+        if requestCount == 1:
+            raise httpx.ReadTimeout("response status is unknown", request=request)
+        return httpx.Response(200, json=providerResponse(decisionPayload()), request=request)
+
+    result = runGateway(
+        handler,
+        lambda gateway: gateway.generateStructured(
+            makeRequest(observation),
+            BeliefDecision,
+            ModelPolicy(base_backoff_seconds=0.0),
+        ),
+    )
+
+    assert requestCount == 2
+    assert result.transportAttempts == 2
+    assert result.uncertainBillableAttempts == 1
+
+
+def test_repair_transport_failure_preserves_prior_usage_and_unknown_attempts() -> None:
+    observation = makeObservation()
+    requestCount = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requestCount
+        requestCount += 1
+        if requestCount == 1:
+            return httpx.Response(
+                200,
+                json=providerResponse(
+                    decisionPayload(targetFraction=2.0),
+                    promptTokens=7,
+                    outputTokens=8,
+                ),
+                request=request,
+            )
+        raise httpx.ReadTimeout("repair response status is unknown", request=request)
+
+    result = runGateway(
+        handler,
+        lambda gateway: gateway.generateStructured(
+            makeRequest(observation),
+            BeliefDecision,
+            ModelPolicy(max_transport_attempts=2, base_backoff_seconds=0.0),
+        ),
+    )
+
+    assert result.fallbackUsed is True
+    assert result.usage.promptTokens == 7
+    assert result.usage.completionTokens == 8
+    assert result.transportAttempts == 3
+    assert result.uncertainBillableAttempts == 2
+
+
 def test_unknown_evidence_after_repair_uses_explicit_rule_fallback() -> None:
     observation = makeObservation()
     invalidResponse = providerResponse(decisionPayload(evidenceId="invented_evidence_id"))
@@ -533,6 +648,36 @@ def test_retryable_rate_limit_retries_but_authentication_does_not() -> None:
     assert authResult.transportAttempts == 1
     assert authResult.fallbackUsed is True
     assert FailureCode.MODEL_AUTHENTICATION_ERROR in authResult.failureCodes
+
+
+def test_zhipu_provider_error_redacts_api_key_before_exception_or_log() -> None:
+    observation = makeObservation()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            401,
+            json={
+                "error": {
+                    "code": "1001",
+                    "message": f"Rejected Authorization: Bearer {API_KEY}",
+                }
+            },
+            request=request,
+        )
+
+    with pytest.raises(ModelGatewayError) as error:
+        runGateway(
+            handler,
+            lambda gateway: gateway.generateStructured(
+                makeRequest(observation),
+                BeliefDecision,
+                ModelPolicy(base_backoff_seconds=0.0, allow_rule_fallback=False),
+            ),
+        )
+
+    assert error.value.code == FailureCode.MODEL_AUTHENTICATION_ERROR
+    assert API_KEY not in str(error.value)
+    assert "[REDACTED]" in str(error.value)
 
 
 def test_immutable_cache_prevents_second_call_and_conflicting_overwrite() -> None:

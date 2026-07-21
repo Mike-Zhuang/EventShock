@@ -225,8 +225,8 @@ export function EventPackUploadModal({
     >
       <p className="modal-help">
         {isZh
-          ? '上传内容被视为不可信数据。完整 raw source document 不落盘；系统保存来源元数据、内容哈希，以及从原文抽取的短候选 claim 文本，供人工审核与冻结。已配置智谱 API 时使用结构化 LLM 抽取，否则明确使用规则抽取。'
-          : 'Uploads are treated as untrusted data. The full raw source document is not persisted. The system stores source metadata, a content hash, and short candidate claim text extracted for human review and freezing. A configured Zhipu API uses structured LLM extraction; otherwise extraction explicitly falls back to rules.'}
+          ? '上传内容被视为不可信数据。完整原始来源文档不落盘；系统只保存来源元数据、内容哈希，以及从原文抽取的短候选主张，供人工审核与冻结。已配置任一受支持供应商的 API 时使用结构化 LLM 抽取，否则明确使用规则抽取。'
+          : 'Uploads are treated as untrusted data. The full raw source document is not persisted. The system stores source metadata, a content hash, and short candidate claim text extracted for human review and freezing. A configured provider API uses structured LLM extraction; otherwise extraction explicitly falls back to rules.'}
       </p>
       {error ? (
         <InlineNotification
@@ -255,7 +255,7 @@ export function EventPackUploadModal({
             ? `正在为 ${existingEventPack?.nameZh ?? existingEventPack?.name ?? ''} 重新提供来源原文。现有原文未被服务器保留。`
             : `Provide source text again for ${existingEventPack?.name ?? ''}. The previous raw documents were not retained by the server.`}</p>
           <div className="upload-form-grid">
-            <Toggle id="reextract-use-llm" labelText={isZh ? '使用已配置的智谱结构化抽取' : 'Use configured Zhipu structured extraction'} labelA={isZh ? '规则' : 'Rules'} labelB={isZh ? '智谱' : 'Zhipu'} toggled={useLlm} onToggle={setUseLlm} />
+            <Toggle id="reextract-use-llm" labelText={isZh ? '使用已配置供应商进行结构化抽取' : 'Use the configured provider for structured extraction'} labelA={isZh ? '规则' : 'Rules'} labelB={isZh ? 'AI' : 'AI'} toggled={useLlm} onToggle={setUseLlm} />
             <NumberInput id="reextract-maximum-claims" label={isZh ? '最多候选主张' : 'Maximum candidate claims'} min={1} max={50} step={1} value={maximumClaims} onChange={(_event, state) => { const value = Number(state.value); if (Number.isFinite(value)) setMaximumClaims(Math.max(1, Math.min(50, Math.round(value)))); }} />
           </div>
         </section>

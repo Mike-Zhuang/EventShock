@@ -97,7 +97,7 @@ function NavigationItems({
               <button
                 key={item.id}
                 type="button"
-                className={view === item.id ? 'is-active' : ''}
+                className={`navigation-item${view === item.id ? ' is-active' : ''}`}
                 aria-current={view === item.id ? 'page' : undefined}
                 onClick={() => onNavigate(item.id)}
               >

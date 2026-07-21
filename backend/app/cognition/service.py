@@ -14,7 +14,12 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, Field, model_validator
 
 from backend.app.cognition.cache import ImmutableDecisionCache
-from backend.app.cognition.catalog import ZhipuModelDescriptor, listZhipuModels
+from backend.app.cognition.catalog import (
+    DEFAULT_PROVIDER,
+    ProviderId,
+    ZhipuModelDescriptor,
+    listZhipuModels,
+)
 from backend.app.cognition.config_store import (
     RuntimeProviderConfig,
     SessionConfigStore,
@@ -47,7 +52,7 @@ from backend.app.cognition.prompts import (
     buildBeliefUserMessage,
     buildEvidenceUserMessage,
 )
-from backend.app.cognition.zhipu import ZhipuRestGateway
+from backend.app.cognition.provider_gateways import ProviderGatewayRouter
 
 SourceType = Literal["OFFICIAL", "REPORTING", "ESTIMATE", "USER_PROVIDED"]
 
@@ -76,7 +81,7 @@ class PromptRegistryView(StrictFrozenModel):
 
 class ConnectionTestResult(StrictFrozenModel):
     success: Literal[True] = True
-    provider: Literal["zhipu"] = "zhipu"
+    provider: ProviderId = DEFAULT_PROVIDER
     model: str
     request_id: str
     schema_version: str
@@ -89,7 +94,7 @@ class ConnectionTestResult(StrictFrozenModel):
 class EventClaimExtractionRun(StrictFrozenModel):
     extraction: EventExtractionResult
     event_pack_claims: tuple[dict[str, Any], ...]
-    provider: Literal["zhipu"] = "zhipu"
+    provider: ProviderId = DEFAULT_PROVIDER
     model: str
     request_id: str
     cache_hit: bool
@@ -101,7 +106,7 @@ class EventClaimExtractionRun(StrictFrozenModel):
 
 class BeliefDecisionRun(StrictFrozenModel):
     decision: BeliefDecision
-    provider: Literal["zhipu"] = "zhipu"
+    provider: ProviderId = DEFAULT_PROVIDER
     model: str
     request_id: str
     cache_hit: bool
@@ -192,8 +197,8 @@ INVALID_OUTPUT_CODES = frozenset(
 
 
 def _defaultGatewayFactory(cache: ImmutableDecisionCache) -> ClosableModelGateway:
-    # 供应商端点固定在 ZhipuRestGateway 内；服务不接受用户填写任意 URL。
-    return ZhipuRestGateway(cache=cache)
+    # Router 仍只接收 cache，以保持测试与现有注入契约；所有端点来自固定目录。
+    return ProviderGatewayRouter(cache=cache)
 
 
 class CognitionService:
@@ -226,6 +231,7 @@ class CognitionService:
         sessionId: str,
         apiKey: str,
         model: str,
+        provider: ProviderId = DEFAULT_PROVIDER,
         thinkingEnabled: bool = False,
         maxTokens: int = 2_048,
     ) -> SessionProviderConfigView:
@@ -233,6 +239,7 @@ class CognitionService:
             sessionId=sessionId,
             apiKey=apiKey,
             model=model,
+            provider=provider,
             thinkingEnabled=thinkingEnabled,
             maxTokens=maxTokens,
         )
@@ -305,6 +312,7 @@ class CognitionService:
             resultValidator=validateConnection,
         )
         return ConnectionTestResult(
+            provider=result.provider,
             model=result.model,
             request_id=result.requestId,
             schema_version=EVENT_EXTRACTION_PROMPT.schemaVersion,
@@ -390,6 +398,7 @@ class CognitionService:
         return EventClaimExtractionRun(
             extraction=result.data,
             event_pack_claims=claims,
+            provider=result.provider,
             model=result.model,
             request_id=result.requestId,
             cache_hit=result.cacheHit,
@@ -436,6 +445,7 @@ class CognitionService:
         )
         return BeliefDecisionRun(
             decision=result.data,
+            provider=result.provider,
             model=result.model,
             request_id=result.requestId,
             cache_hit=result.cacheHit,

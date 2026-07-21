@@ -31,6 +31,9 @@ import type {
   LlmCatalog,
   LlmConfigView,
   LlmConnectionTest,
+  LlmModelDescriptor,
+  LlmProviderDescriptor,
+  LlmProviderId,
   MarketPathPoint,
   MetricDisplayUnit,
   MetricResult,
@@ -91,6 +94,16 @@ const NETWORK_TOPOLOGIES: NetworkTopology[] = [
   'STOCHASTIC_BLOCK',
   'ECHO_CHAMBER',
   'CORE_PERIPHERY',
+];
+
+const LLM_PROVIDER_IDS: LlmProviderId[] = [
+  'zhipu',
+  'openai',
+  'anthropic',
+  'google',
+  'deepseek',
+  'alibaba',
+  'moonshot',
 ];
 
 const METRIC_UNITS: Record<string, MetricDisplayUnit> = {
@@ -308,6 +321,12 @@ function asParameter(value: unknown): InterventionParameter | undefined {
     : undefined;
 }
 
+function asLlmProviderId(value: unknown): LlmProviderId | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.toLowerCase() as LlmProviderId;
+  return LLM_PROVIDER_IDS.includes(normalized) ? normalized : undefined;
+}
+
 function normalizeIntervention(value: unknown): InterventionDefinition | undefined {
   if (!isRecord(value)) return undefined;
   const parameter = asParameter(read(value, 'parameter'));
@@ -384,7 +403,7 @@ function normalizeLlmPolicy(value: unknown): ScenarioDraft['llmPolicy'] | undefi
     || callBudget === undefined || maxCostUsd === undefined) return undefined;
   return {
     mode,
-    provider: 'zhipu',
+    provider: asLlmProviderId(read(value, 'provider')) ?? 'zhipu',
     modelId,
     representativeAgentCount,
     decisionIntervalSteps,
@@ -1068,6 +1087,10 @@ function normalizeCognitionDecision(value: unknown): CognitionDecisionSummary | 
 
 function normalizeCognitionCostBudget(value: unknown): CognitionRunMetadata['costBudget'] {
   if (!isRecord(value)) return undefined;
+  // 多供应商上线前的历史结果没有 fxConversionApplied，且预算只可能来自智谱 CNY
+  // 刊例价；因此缺省币种按 CNY 迁移，显式的新字段始终优先。
+  const billingCurrency = asString(read(value, 'billingCurrency', 'billing_currency'), 'CNY');
+  const explicitFxConversion = asBoolean(read(value, 'fxConversionApplied', 'fx_conversion_applied'));
   return {
     capUsd: asNumber(read(value, 'capUsd', 'cap_usd')) ?? 0,
     chargedUsdUpperBound: asNumber(read(value, 'chargedUsdUpperBound', 'charged_usd_upper_bound')) ?? 0,
@@ -1082,7 +1105,9 @@ function normalizeCognitionCostBudget(value: unknown): CognitionRunMetadata['cos
     settledCalls: asNumber(read(value, 'settledCalls', 'settled_calls')) ?? 0,
     blockedCalls: asNumber(read(value, 'blockedCalls', 'blocked_calls')) ?? 0,
     unknownUsageCalls: asNumber(read(value, 'unknownUsageCalls', 'unknown_usage_calls')) ?? 0,
-    billingCurrency: asString(read(value, 'billingCurrency', 'billing_currency')),
+    provider: asOptionalString(read(value, 'provider')),
+    billingCurrency,
+    fxConversionApplied: explicitFxConversion ?? billingCurrency.toUpperCase() === 'CNY',
     pricingSnapshotVersion: asString(read(value, 'pricingSnapshotVersion', 'pricing_snapshot_version')),
     pricingVerifiedAt: asString(read(value, 'pricingVerifiedAt', 'pricing_verified_at')),
     priceSourceUrl: asString(read(value, 'priceSourceUrl', 'price_source_url')),
@@ -1292,46 +1317,138 @@ export function normalizeValidation(value: unknown): ScenarioValidation {
 
 export function normalizeLlmCatalog(value: unknown): LlmCatalog {
   if (!isRecord(value)) throw new TypeError('Model catalog response is not an object.');
-  const models = unwrapItems(read(value, 'models')).flatMap((item) => {
+
+  const normalizeModels = (modelValue: unknown, fallbackProvider: LlmProviderId): LlmModelDescriptor[] => (
+    unwrapItems(modelValue).flatMap((item) => {
     if (!isRecord(item)) return [];
     const id = asString(read(item, 'id', 'modelId', 'model_id'));
     const name = asString(read(item, 'name', 'displayName', 'display_name'));
     const contextTokens = asNumber(read(item, 'contextTokens', 'context_tokens'));
     const maxOutputTokens = asNumber(read(item, 'maxOutputTokens', 'max_output_tokens'));
-    if (!id || !name || contextTokens === undefined || maxOutputTokens === undefined) return [];
+    if (!id || !name || contextTokens === undefined) return [];
     return [{
+      provider: asLlmProviderId(read(item, 'provider')) ?? fallbackProvider,
       id,
       name,
       contextTokens,
       maxOutputTokens,
+      officialMaxOutputTokens: asNumber(read(item, 'officialMaxOutputTokens', 'official_max_output_tokens')),
+      applicationMaxOutputTokens: asNumber(read(
+        item,
+        'applicationMaxOutputTokens',
+        'application_max_output_tokens',
+      )),
       supportsThinking: asBoolean(read(item, 'supportsThinking', 'supports_thinking')) ?? false,
+      thinkingAlwaysOn: asBoolean(read(item, 'thinkingAlwaysOn', 'thinking_always_on')) ?? false,
       supportsFunctionCalling: asBoolean(read(item, 'supportsFunctionCalling', 'supports_function_calling')) ?? false,
       recommended: asBoolean(read(item, 'recommended')) ?? false,
+      qualityTier: ((): LlmModelDescriptor['qualityTier'] => {
+        const qualityTier = asString(read(item, 'qualityTier', 'quality_tier')).toUpperCase();
+        return qualityTier === 'ECONOMY' || qualityTier === 'PREMIUM' ? qualityTier : 'BALANCED';
+      })(),
       freeTier: asBoolean(read(item, 'freeTier', 'free_tier')) ?? false,
       legacy: asBoolean(read(item, 'legacy')) ?? false,
       deprecationNote: asOptionalString(read(item, 'deprecationNote', 'deprecation_note')),
+      capabilityNote: asOptionalString(read(item, 'capabilityNote', 'capability_note')),
+      officialModelUrl: asOptionalString(read(item, 'officialModelUrl', 'official_model_url')),
+      catalogVerifiedAt: asOptionalString(read(item, 'catalogVerifiedAt', 'catalog_verified_at')),
       pricingStatus: asString(read(item, 'pricingStatus', 'pricing_status'), 'UNAVAILABLE_FAIL_CLOSED') === 'VERIFIED_UPPER_BOUND'
         ? 'VERIFIED_UPPER_BOUND' as const
         : 'UNAVAILABLE_FAIL_CLOSED' as const,
-      billingCurrency: asString(read(item, 'billingCurrency', 'billing_currency')) === 'CNY' ? 'CNY' as const : undefined,
-      inputRateUpperCnyPerMillion: asNumber(read(item, 'inputRateUpperCnyPerMillion', 'input_rate_upper_cny_per_million')),
-      outputRateUpperCnyPerMillion: asNumber(read(item, 'outputRateUpperCnyPerMillion', 'output_rate_upper_cny_per_million')),
+      billingCurrency: asOptionalString(read(item, 'billingCurrency', 'billing_currency')),
+      inputRateUpperPerMillion: asNumber(read(
+        item,
+        'inputRateUpperPerMillion',
+        'input_rate_upper_per_million',
+        'inputRateUpperCnyPerMillion',
+        'input_rate_upper_cny_per_million',
+      )),
+      outputRateUpperPerMillion: asNumber(read(
+        item,
+        'outputRateUpperPerMillion',
+        'output_rate_upper_per_million',
+        'outputRateUpperCnyPerMillion',
+        'output_rate_upper_cny_per_million',
+      )),
+      budgetInputRateUpperPerMillion: asNumber(read(
+        item,
+        'budgetInputRateUpperPerMillion',
+        'budget_input_rate_upper_per_million',
+      )),
+      budgetOutputRateUpperPerMillion: asNumber(read(
+        item,
+        'budgetOutputRateUpperPerMillion',
+        'budget_output_rate_upper_per_million',
+      )),
+      cachedInputRatePerMillion: asNumber(read(
+        item,
+        'cachedInputRatePerMillion',
+        'cached_input_rate_per_million',
+      )),
       pricingVerifiedAt: asOptionalString(read(item, 'pricingVerifiedAt', 'pricing_verified_at')),
       pricingNote: asOptionalString(read(item, 'pricingNote', 'pricing_note')),
     }];
+    })
+  );
+
+  const providers = unwrapItems(read(value, 'providers')).flatMap((item): LlmProviderDescriptor[] => {
+    if (!isRecord(item)) return [];
+    const id = asLlmProviderId(read(item, 'id', 'provider'));
+    const name = asString(read(item, 'name', 'providerName', 'provider_name'));
+    if (!id || !name) return [];
+    return [{
+      id,
+      name,
+      baseUrl: asString(read(item, 'baseUrl', 'base_url')),
+      documentationUrl: asString(read(item, 'documentationUrl', 'documentation_url')),
+      pricingUrl: asString(read(item, 'pricingUrl', 'pricing_url')),
+      region: asString(read(item, 'region')),
+      structuredOutputMode: asString(
+        read(item, 'structuredOutputMode', 'structured_output_mode'),
+        'JSON_OBJECT',
+      ),
+      structuredOutputNote: asString(read(item, 'structuredOutputNote', 'structured_output_note')),
+      models: normalizeModels(read(item, 'models'), id),
+    }];
   });
+
+  if (providers.length === 0) {
+    const legacyProvider = asLlmProviderId(read(value, 'provider')) ?? 'zhipu';
+    providers.push({
+      id: legacyProvider,
+      name: asString(read(value, 'providerName', 'provider_name'), 'Zhipu AI'),
+      baseUrl: asString(read(value, 'baseUrl', 'base_url')),
+      documentationUrl: asString(read(value, 'documentationUrl', 'documentation_url')),
+      pricingUrl: asString(read(value, 'pricingUrl', 'pricing_url')),
+      region: asString(read(value, 'region'), 'CN'),
+      structuredOutputMode: asString(
+        read(value, 'structuredOutputMode', 'structured_output_mode'),
+        'JSON_OBJECT',
+      ),
+      structuredOutputNote: asString(read(value, 'structuredOutputNote', 'structured_output_note')),
+      models: normalizeModels(read(value, 'models'), legacyProvider),
+    });
+  }
+
+  const requestedDefault = asLlmProviderId(read(value, 'defaultProvider', 'default_provider'));
+  const defaultProvider = providers.some((provider) => provider.id === requestedDefault)
+    ? requestedDefault as LlmProviderId
+    : providers.find((provider) => provider.id === 'zhipu')?.id ?? providers[0].id;
+  const defaultDescriptor = providers.find((provider) => provider.id === defaultProvider) ?? providers[0];
   return {
-    provider: 'zhipu',
-    providerName: asString(read(value, 'providerName', 'provider_name'), 'Zhipu AI'),
-    baseUrl: asString(read(value, 'baseUrl', 'base_url')),
-    documentationUrl: asString(read(value, 'documentationUrl', 'documentation_url')),
-    pricingUrl: asString(read(value, 'pricingUrl', 'pricing_url')),
+    defaultProvider,
+    providers,
+    provider: defaultProvider,
+    providerName: defaultDescriptor.name,
+    baseUrl: defaultDescriptor.baseUrl,
+    documentationUrl: defaultDescriptor.documentationUrl,
+    pricingUrl: defaultDescriptor.pricingUrl,
     pricingSnapshotVersion: asString(read(value, 'pricingSnapshotVersion', 'pricing_snapshot_version')),
     fxSourceUrl: asString(read(value, 'fxSourceUrl', 'fx_source_url')),
     officialFxSnapshotCnyPerUsd: asNumber(read(value, 'officialFxSnapshotCnyPerUsd', 'official_fx_snapshot_cny_per_usd')) ?? 0,
     cnyPerUsdBudgetFloor: asNumber(read(value, 'cnyPerUsdBudgetFloor', 'cny_per_usd_budget_floor')) ?? 0,
     costCapSemantics: asString(read(value, 'costCapSemantics', 'cost_cap_semantics')),
-    models,
+    models: defaultDescriptor.models,
   };
 }
 
@@ -1351,7 +1468,7 @@ export function normalizeLlmConfig(value: unknown): LlmConfigView {
   if (!isRecord(value)) throw new TypeError('Model configuration response is not an object.');
   return {
     configured: asBoolean(read(value, 'configured')) ?? false,
-    provider: asString(read(value, 'provider')) === 'zhipu' ? 'zhipu' : undefined,
+    provider: asLlmProviderId(read(value, 'provider')),
     model: asOptionalString(read(value, 'model')),
     thinkingEnabled: asBoolean(read(value, 'thinkingEnabled', 'thinking_enabled')),
     maxTokens: asNumber(read(value, 'maxTokens', 'max_tokens')),

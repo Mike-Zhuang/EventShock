@@ -209,6 +209,7 @@ export type NetworkTopology =
   | 'CORE_PERIPHERY';
 
 export type AgentMode = 'RULE_ONLY' | 'HYBRID_LLM';
+export type LlmProviderId = 'zhipu' | 'openai' | 'anthropic' | 'google' | 'deepseek' | 'alibaba' | 'moonshot';
 
 export interface InterventionDefinition {
   parameter: InterventionParameter;
@@ -252,7 +253,7 @@ export interface ScenarioDraft {
   };
   llmPolicy?: {
     mode: AgentMode;
-    provider: 'zhipu';
+    provider: LlmProviderId;
     modelId: string;
     representativeAgentCount: number;
     decisionIntervalSteps: number;
@@ -293,27 +294,59 @@ export interface EventPackCreateInput {
   acknowledgedContentReview?: boolean;
 }
 
-export interface ZhipuModelDescriptor {
+export type ModelQualityTier = 'ECONOMY' | 'BALANCED' | 'PREMIUM';
+export type ModelPricingStatus = 'VERIFIED_UPPER_BOUND' | 'UNAVAILABLE_FAIL_CLOSED';
+
+export interface LlmModelDescriptor {
+  provider: LlmProviderId;
   id: string;
   name: string;
   contextTokens: number;
-  maxOutputTokens: number;
+  maxOutputTokens?: number;
+  officialMaxOutputTokens?: number;
+  applicationMaxOutputTokens?: number;
   supportsThinking: boolean;
+  thinkingAlwaysOn?: boolean;
   supportsFunctionCalling: boolean;
   recommended: boolean;
+  qualityTier: ModelQualityTier;
   freeTier: boolean;
   legacy: boolean;
   deprecationNote?: string;
-  pricingStatus: 'VERIFIED_UPPER_BOUND' | 'UNAVAILABLE_FAIL_CLOSED';
-  billingCurrency?: 'CNY';
-  inputRateUpperCnyPerMillion?: number;
-  outputRateUpperCnyPerMillion?: number;
+  capabilityNote?: string;
+  officialModelUrl?: string;
+  catalogVerifiedAt?: string;
+  pricingStatus: ModelPricingStatus;
+  billingCurrency?: string;
+  inputRateUpperPerMillion?: number;
+  outputRateUpperPerMillion?: number;
+  budgetInputRateUpperPerMillion?: number;
+  budgetOutputRateUpperPerMillion?: number;
+  cachedInputRatePerMillion?: number;
   pricingVerifiedAt?: string;
   pricingNote?: string;
 }
 
+/** @deprecated 新代码应使用供应商中立的 LlmModelDescriptor。 */
+export type ZhipuModelDescriptor = LlmModelDescriptor;
+
+export interface LlmProviderDescriptor {
+  id: LlmProviderId;
+  name: string;
+  baseUrl: string;
+  documentationUrl: string;
+  pricingUrl: string;
+  region: string;
+  structuredOutputMode: string;
+  structuredOutputNote: string;
+  models: LlmModelDescriptor[];
+}
+
 export interface LlmCatalog {
-  provider: 'zhipu';
+  defaultProvider: LlmProviderId;
+  providers: LlmProviderDescriptor[];
+  /** 以下字段用于兼容旧版单供应商响应和渐进迁移中的调用方。 */
+  provider: LlmProviderId;
   providerName: string;
   baseUrl: string;
   documentationUrl: string;
@@ -323,7 +356,7 @@ export interface LlmCatalog {
   officialFxSnapshotCnyPerUsd: number;
   cnyPerUsdBudgetFloor: number;
   costCapSemantics: string;
-  models: ZhipuModelDescriptor[];
+  models: LlmModelDescriptor[];
 }
 
 export interface PromptRegistryItem {
@@ -335,7 +368,7 @@ export interface PromptRegistryItem {
 
 export interface LlmConfigView {
   configured: boolean;
-  provider?: 'zhipu';
+  provider?: LlmProviderId;
   model?: string;
   thinkingEnabled?: boolean;
   maxTokens?: number;
@@ -344,7 +377,7 @@ export interface LlmConfigView {
 }
 
 export interface LlmConfigInput {
-  provider: 'zhipu';
+  provider: LlmProviderId;
   model: string;
   apiKey: string;
   thinkingEnabled: boolean;
@@ -670,7 +703,9 @@ export interface CognitionCostBudget {
   settledCalls: number;
   blockedCalls: number;
   unknownUsageCalls: number;
+  provider?: string;
   billingCurrency: string;
+  fxConversionApplied: boolean;
   pricingSnapshotVersion: string;
   pricingVerifiedAt: string;
   priceSourceUrl: string;

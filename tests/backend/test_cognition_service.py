@@ -285,6 +285,30 @@ def test_public_catalog_prompts_config_and_live_connection_are_redacted() -> Non
     assert service.getConfig(SESSION_ID).configured is False
 
 
+def test_service_propagates_non_zhipu_provider_to_request_and_result() -> None:
+    emptyExtraction = EventExtractionResult(
+        claims=(),
+        source_summary="The connectivity probe contains no event claim.",
+        abstain_reason="No event fact was supplied.",
+    )
+    harness = GatewayHarness([FakeOutcome(emptyExtraction)])
+    service = CognitionService(gatewayFactory=harness)
+    config = service.setConfig(
+        sessionId=SESSION_ID,
+        apiKey=API_KEY,
+        provider="openai",
+        model="gpt-5.6-luna",
+        maxTokens=4_096,
+    )
+
+    connection = asyncio.run(service.testConnection(SESSION_ID))
+
+    assert config.provider == "openai"
+    assert connection.provider == "openai"
+    assert connection.model == "gpt-5.6-luna"
+    assert harness.requests[0].provider == "openai"
+
+
 def test_extraction_safely_wraps_sources_and_builds_event_pack_claims() -> None:
     source = ExternalEvidenceSource(
         sourceId="source-official-001",

@@ -53,6 +53,7 @@ class ModelGatewayError(RuntimeError):
         httpStatus: int | None = None,
         providerCode: str | None = None,
         attempts: int = 0,
+        uncertainBillableAttempts: int = 0,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -60,6 +61,7 @@ class ModelGatewayError(RuntimeError):
         self.httpStatus = httpStatus
         self.providerCode = providerCode
         self.attempts = attempts
+        self.uncertainBillableAttempts = uncertainBillableAttempts
 
 
 class SamplingConfig(StrictFrozenModel):
@@ -137,6 +139,8 @@ class ModelResult[ModelT: BaseModel]:
     repairUsed: bool
     fallbackUsed: bool
     cacheHit: bool
+    # 超时或传输异常无法证明请求未到达供应商；预算必须为这些尝试保留上界费用。
+    uncertainBillableAttempts: int = 0
     failureCodes: tuple[FailureCode, ...] = ()
     costUpperBoundUsd: float | None = None
 

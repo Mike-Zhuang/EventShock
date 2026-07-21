@@ -24,6 +24,8 @@ import type { ViewId } from '../app';
 import type {
   InterventionParameter,
   LlmCatalog,
+  LlmModelDescriptor,
+  LlmProviderId,
   SavedScenario,
   ScenarioDiffResult,
   ScenarioDraft,
@@ -143,6 +145,36 @@ function numericInputValue(value: string | number): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+export type LlmModelAvailability = 'READY' | 'PRICE_UNVERIFIED' | 'OUTPUT_LIMIT_UNVERIFIED' | 'MISSING';
+
+export function getLlmModelAvailability(model: LlmModelDescriptor | undefined): LlmModelAvailability {
+  if (!model) return 'MISSING';
+  if (model.pricingStatus !== 'VERIFIED_UPPER_BOUND') return 'PRICE_UNVERIFIED';
+  if ((model.officialMaxOutputTokens ?? model.maxOutputTokens) === undefined) {
+    return 'OUTPUT_LIMIT_UNVERIFIED';
+  }
+  return 'READY';
+}
+
+export function SecondaryOutcomeOption({
+  id,
+  label,
+  checked,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  checked: boolean;
+  onChange: () => void;
+}) {
+  return (
+    <label className="native-check-row">
+      <input type="checkbox" value={id} checked={checked} onChange={onChange} />
+      <strong className="native-check-row__label">{label}</strong>
+    </label>
+  );
+}
+
 export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => void }) {
   const { language, t } = useI18n();
   const {
@@ -192,7 +224,9 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
     population.representativeLlmAgents,
     llmPolicy.representativeAgentCount,
   );
-  const selectedLlmModel = modelCatalog?.models.find((item) => item.id === llmPolicy.modelId);
+  const selectedLlmProvider = modelCatalog?.providers.find((item) => item.id === llmPolicy.provider);
+  const selectedLlmModel = selectedLlmProvider?.models.find((item) => item.id === llmPolicy.modelId);
+  const selectedLlmModelAvailability = getLlmModelAvailability(selectedLlmModel);
   const selectedSavedScenario = savedScenarios.find((item) => item.id === selectedScenarioId);
 
   const refreshSavedScenarios = async () => {
@@ -554,8 +588,34 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
               ))}
             </div>
             <div className="number-grid agent-config-grid">
-              <Select id="scenario-model" labelText={isZh ? '智谱模型' : 'Zhipu model'} decorator={parameterHelp('model', isZh ? '智谱模型' : 'Zhipu model')} value={llmPolicy.modelId} disabled={llmPolicy.mode === 'RULE_ONLY'} onChange={(event) => updateLlmPolicy({ modelId: event.target.value })}>
-                {(modelCatalog?.models ?? []).map((item) => <SelectItem key={item.id} value={item.id} disabled={item.pricingStatus !== 'VERIFIED_UPPER_BOUND'} text={`${item.id}${item.pricingStatus !== 'VERIFIED_UPPER_BOUND' ? isZh ? '（价格未知，禁止调用）' : ' (unpriced — blocked)' : ''}`} />)}
+              <Select
+                id="scenario-provider"
+                labelText={isZh ? '模型供应商' : 'Model provider'}
+                decorator={parameterHelp('provider', isZh ? '模型供应商' : 'Model provider')}
+                value={llmPolicy.provider}
+                disabled={llmPolicy.mode === 'RULE_ONLY'}
+                onChange={(event) => {
+                  const providerId = event.target.value as LlmProviderId;
+                  const provider = modelCatalog?.providers.find((item) => item.id === providerId);
+                  const nextModel = provider?.models.find((item) => item.recommended && getLlmModelAvailability(item) === 'READY')
+                    ?? provider?.models.find((item) => getLlmModelAvailability(item) === 'READY')
+                    ?? provider?.models[0];
+                  updateLlmPolicy({ provider: providerId, modelId: nextModel?.id ?? llmPolicy.modelId });
+                }}
+              >
+                {(modelCatalog?.providers ?? []).map((item) => <SelectItem key={item.id} value={item.id} text={`${item.name}${item.id === modelCatalog?.defaultProvider ? isZh ? '（默认）' : ' (default)' : ''}`} />)}
+                {!modelCatalog ? <SelectItem value="zhipu" text="Zhipu AI" /> : null}
+              </Select>
+              <Select id="scenario-model" labelText={isZh ? '模型' : 'Model'} decorator={parameterHelp('model', isZh ? '模型' : 'Model')} value={llmPolicy.modelId} disabled={llmPolicy.mode === 'RULE_ONLY'} onChange={(event) => updateLlmPolicy({ modelId: event.target.value })}>
+                {(selectedLlmProvider?.models ?? []).map((item) => {
+                  const availability = getLlmModelAvailability(item);
+                  const unavailableSuffix = availability === 'PRICE_UNVERIFIED'
+                    ? isZh ? '（价格未核验，禁止调用）' : ' (price unverified — blocked)'
+                    : availability === 'OUTPUT_LIMIT_UNVERIFIED'
+                      ? isZh ? '（输出上限未核验，禁止调用）' : ' (output cap unverified — blocked)'
+                      : '';
+                  return <SelectItem key={item.id} value={item.id} disabled={availability !== 'READY'} text={`${item.id}${unavailableSuffix}`} />;
+                })}
                 {!modelCatalog ? <SelectItem value="glm-5.2" text="glm-5.2" /> : null}
               </Select>
               <NumberInput id="scenario-llm-count" label={isZh ? '代表性节点数' : 'Representative node count'} decorator={parameterHelp('representativeLlmAgents', isZh ? '代表性节点数' : 'Representative node count')} min={0} max={100} value={representativeLlmAgentCount} disabled={llmPolicy.mode === 'RULE_ONLY'} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) { const count = Math.round(value); setScenario({ ...scenario, llmPolicy: { ...llmPolicy, representativeAgentCount: count }, population: { ...population, representativeLlmAgents: count } }); } }} />
@@ -565,17 +625,27 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
             </div>
             {llmPolicy.mode === 'HYBRID_LLM' ? (
               <InlineNotification
-                kind={selectedLlmModel?.pricingStatus === 'VERIFIED_UPPER_BOUND' ? 'info' : 'error'}
+                kind={selectedLlmModelAvailability === 'READY' ? 'info' : 'error'}
                 lowContrast
                 hideCloseButton
-                title={selectedLlmModel?.pricingStatus === 'VERIFIED_UPPER_BOUND' ? isZh ? '费用硬闸门已启用' : 'Hard cost gate enabled' : isZh ? '该型号价格未知' : 'This model is unpriced'}
-                subtitle={selectedLlmModel?.pricingStatus === 'VERIFIED_UPPER_BOUND'
+                title={selectedLlmModelAvailability === 'READY'
+                  ? isZh ? '费用硬闸门已启用' : 'Hard cost gate enabled'
+                  : selectedLlmModelAvailability === 'OUTPUT_LIMIT_UNVERIFIED'
+                    ? isZh ? '该型号输出上限未核验' : 'This model has no verified output cap'
+                    : selectedLlmModelAvailability === 'PRICE_UNVERIFIED'
+                      ? isZh ? '该型号价格未核验' : 'This model has no verified price'
+                      : isZh ? '目录中找不到所选型号' : 'The selected model is missing from the catalog'}
+                subtitle={selectedLlmModelAvailability === 'READY'
                   ? isZh
-                    ? `按最高公开刊例价计入输入/输出 token；免费、缓存折扣和资源包不会被用于放宽上限。换算与价格快照：${modelCatalog?.pricingSnapshotVersion ?? '—'}。`
-                    : `Input/output tokens use the highest public list-price tier. Free credits, cache discounts, and bundles never relax the cap. Conversion and price snapshot: ${modelCatalog?.pricingSnapshotVersion ?? '—'}.`
-                  : isZh
-                    ? '系统不会猜测单价；启用回退时改用规则智能体，否则预检失败，且请求不会发送给供应商。'
-                    : 'The system will not invent a rate. It falls back to rules when allowed; otherwise preflight fails, and no provider request is sent.'}
+                    ? `费用闸门使用目录中按 ${selectedLlmModel?.billingCurrency ?? '原币种'} 记录的保守输入/输出预留上界，而不是用缓存优惠放宽预算；免费额度、折扣和资源包同样不会放宽上限。价格快照：${modelCatalog?.pricingSnapshotVersion ?? '—'}。`
+                    : `The cost gate uses the catalog's conservative input/output reservation bounds in ${selectedLlmModel?.billingCurrency ?? 'the original currency'}; cache discounts, free credits, discounts, and bundles never relax the cap. Pricing snapshot: ${modelCatalog?.pricingSnapshotVersion ?? '—'}.`
+                  : selectedLlmModelAvailability === 'OUTPUT_LIMIT_UNVERIFIED'
+                    ? isZh
+                      ? '系统不会猜测最大输出 token；启用回退时改用规则智能体，否则预检失败，且请求不会发送给供应商。'
+                      : 'The system will not guess a maximum output token count. It falls back to rules when allowed; otherwise preflight fails and no provider request is sent.'
+                    : isZh
+                      ? '系统不会猜测价格或目录记录；启用回退时改用规则智能体，否则预检失败，且请求不会发送给供应商。'
+                      : 'The system will not guess a price or catalog entry. It falls back to rules when allowed; otherwise preflight fails and no provider request is sent.'}
               />
             ) : null}
             <div className="toggle-grid">
@@ -661,11 +731,13 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
               <p>{isZh ? '主要指标预先登记后保持唯一，次要指标用于解释，不替代主要结论。' : 'The preregistered primary metric remains unique. Secondary metrics support interpretation and do not replace it.'}</p>
               <div>
                 {OUTCOME_OPTIONS.filter((outcome) => outcome.id !== scenario.primaryOutcome).map((outcome) => (
-                  <label key={outcome.id} className="native-check-row">
-                    <input type="checkbox" checked={(scenario.secondaryOutcomes ?? []).includes(outcome.id)} onChange={() => toggleSecondaryOutcome(outcome.id)} />
-                    <span aria-hidden="true" />
-                    <strong>{t(outcome.key)}</strong>
-                  </label>
+                  <SecondaryOutcomeOption
+                    key={outcome.id}
+                    id={outcome.id}
+                    label={t(outcome.key)}
+                    checked={(scenario.secondaryOutcomes ?? []).includes(outcome.id)}
+                    onChange={() => toggleSecondaryOutcome(outcome.id)}
+                  />
                 ))}
               </div>
             </fieldset>

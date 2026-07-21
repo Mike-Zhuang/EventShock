@@ -8,6 +8,14 @@ from typing import Annotated, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from backend.app.cognition.catalog import (
+    APPLICATION_MAX_OUTPUT_TOKENS,
+    DEFAULT_MODEL,
+    DEFAULT_PROVIDER,
+    ProviderId,
+    getModel,
+)
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -136,13 +144,18 @@ class NetworkConfig(StrictModel):
 
 class LlmPolicy(StrictModel):
     mode: AgentMode = AgentMode.RULE_ONLY
-    provider: Literal["zhipu"] = "zhipu"
-    modelId: str = Field(default="glm-5.2", min_length=1, max_length=100)
+    provider: ProviderId = DEFAULT_PROVIDER
+    modelId: str = Field(default=DEFAULT_MODEL, min_length=1, max_length=128)
     representativeAgentCount: int = Field(default=8, ge=0, le=100)
     decisionIntervalSteps: int = Field(default=12, ge=1, le=100)
     callBudget: int = Field(default=24, ge=0, le=500)
     maxCostUsd: float = Field(default=10.0, ge=0, le=100)
     fallbackToRules: bool = True
+
+    @model_validator(mode="after")
+    def validateProviderModelPair(self) -> LlmPolicy:
+        getModel(self.provider, self.modelId)
+        return self
 
 
 class StoppingRule(StrictModel):
@@ -278,11 +291,31 @@ class ScenarioDiffRequest(StrictModel):
 
 
 class LlmConfigRequest(StrictModel):
-    provider: Literal["zhipu"] = "zhipu"
-    model: str = Field(min_length=3, max_length=100, pattern=r"^glm-[a-z0-9.-]+$")
+    provider: ProviderId = DEFAULT_PROVIDER
+    model: str = Field(
+        default=DEFAULT_MODEL,
+        min_length=3,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$",
+    )
     apiKey: str = Field(min_length=8, max_length=4_096)
     thinkingEnabled: bool = False
-    maxTokens: int = Field(default=2_048, ge=256, le=131_072)
+    maxTokens: int = Field(default=2_048, ge=256, le=APPLICATION_MAX_OUTPUT_TOKENS)
+
+    @model_validator(mode="after")
+    def validateProviderModelPair(self) -> LlmConfigRequest:
+        descriptor = getModel(self.provider, self.model)
+        if descriptor.max_output_tokens is None:
+            raise ValueError(
+                f"no verified maximum output limit is available for {self.provider}/{self.model}"
+            )
+        if self.maxTokens > descriptor.max_output_tokens:
+            raise ValueError(
+                f"maxTokens exceeds the application limit for {self.provider}/{self.model}"
+            )
+        if self.thinkingEnabled and not descriptor.supports_thinking:
+            raise ValueError(f"{self.provider}/{self.model} does not support thinking")
+        return self
 
 
 class EvalRunRequest(StrictModel):
