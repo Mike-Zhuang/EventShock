@@ -25,6 +25,7 @@ EventShock Lab 是一个可复现的事件驱动市场反事实实验室。它�
 ## 已实现功能
 
 - 英文和简体中文完整界面，默认英文；语言和明暗主题在浏览器中持久化。
+- 邮箱注册、双语验证码、登录、退出与密码重置；研究数据按已验证账号永久归属，管理员可在独立面板查看用户状态、实验数量及经过隐私最小化的操作记录。
 - SpaceX 2026 IPO 与 Nasdaq-100 快速纳入旗舰包：真实事件事实、官方来源链接和 PIT 时间边界，与合成行情及机制假设严格分层。
 - CrowdStrike 2024 故障与 GameStop 2021 社交级联历史案例包：均可审核、冻结和运行，但状态明确为“案例可用、真实历史研究待执行”，不能冒充已校准验证。
 - Event Pack 文本/文件导入、确定性或智谱结构化候选主张抽取、人工审核、双语编辑、拒绝和冻结；所有上传正文与来源元数据在抽取或调用智谱前先经过确定性内容安全扫描，高风险内容直接阻断，可复核内容必须人工确认并脱敏，安全摘要不包含命中原文且上传正文不持久化。
@@ -39,12 +40,12 @@ EventShock Lab 是一个可复现的事件驱动市场反事实实验室。它�
 - 可执行的顺序停止规则，以及预注册主指标的负对照、参数恢复 knockout、两水平局部敏感性、精确 sign test 和 Holm 多重比较诊断；这些仍是模型内部诊断，不是外部因果证明。
 - Study Workbench 提供 7 个预注册模板、全因子与有界 Latin hypercube 设计、common seeds、2–4 个主指标、8 类负对照、10 类消融、family-level Holm 校正、探索性 rank-correlation 敏感性和不可变运行历史。Study 只执行受限规模的合成模型内部研究；认知臂使用冻结证据绑定 tape，若干消融是明确标注的最近可执行代理，所有结果都固定返回 `historicalValidityEstablished=false`。
 - Executive Risk Cards、Market Dynamics、Trace Explorer、验证梯度、模型清单、红队定义、发布门与哈希链审计。
-- 已完成实验可在当前匿名会话内按原因码和说明标记为 `INVALIDATED`；底层结果与审计哈希保留，但结果、runs、metrics、traces 与导出接口会拒绝把它继续作为有效研究使用。按模型、版本或时间窗口批量失效仍未实现。
-- 实验历史按匿名浏览器会话隔离：每个会话最多保留 30 条，终态实验最多保留 90 天，全站最多保留 500 条并滚动淘汰；需要长期保存的研究工件必须在到期或淘汰前导出。
+- 已完成实验可在当前账号内按原因码和说明标记为 `INVALIDATED`；底层结果与审计哈希保留，但结果、runs、metrics、traces 与导出接口会拒绝把它继续作为有效研究使用。按模型、版本或时间窗口批量失效仍未实现。
+- 实验历史按已验证账号隔离：每个账号最多保留 30 条，终态实验最多保留 90 天，全站最多保留 500 条并滚动淘汰；需要长期保存的研究工件必须在到期或淘汰前导出。升级前已有的匿名记录由一次性管理员引导安全认领，不改写原审计链。
 - 可复现 ZIP 含 Manifest、事件包、场景、结果、认知决策、Trace、双语报告、CSV，以及六张固定 Schema Parquet 表。
 - 参数上限、单仿真 worker、有限队列、请求体限制、稳定错误码和生产环境 API 文档关闭。
 
-默认运行仍是无需密钥、可确定性重放的 `RULE_ONLY`。用户可在当前匿名会话中临时填写智谱 API Key 并选择 `HYBRID_LLM`；Key 只保存在服务器内存中、按 TTL 过期且不写入 SQLite、日志或导出。LLM 只能提出候选事实或有限的信念与行动偏好，不能设置价格、绕过风险控制或直接提交订单，最终订单必须经过固定策略、账本风控与确定性撮合层。若部分结构化输出失败并按用户策略安全回退，结果会明确标记为 `HYBRID_LLM_PARTIAL_RULE_FALLBACK`，逐条保留修复、回退与失败原因；关闭 `fallbackToRules` 后任何规则回退都会使实验失败关闭。
+默认运行仍是无需密钥、可确定性重放的 `RULE_ONLY`。用户可在当前登录会话中临时填写智谱 API Key 并选择 `HYBRID_LLM`；Key 按登录会话隔离，只保存在服务器进程内存中，退出、过期或服务重启后必须重新填写，且不写入账号、SQLite、日志或导出。LLM 只能提出候选事实或有限的信念与行动偏好，不能设置价格、绕过风险控制或直接提交订单，最终订单必须经过固定策略、账本风控与确定性撮合层。若部分结构化输出失败并按用户策略安全回退，结果会明确标记为 `HYBRID_LLM_PARTIAL_RULE_FALLBACK`，逐条保留修复、回退与失败原因；关闭 `fallbackToRules` 后任何规则回退都会使实验失败关闭。
 
 混合模式按 `decisionIntervalSteps` 和 `callBudget` 生成时点安全的认知决策序列，并将同一冻结序列复用于基准/干预及 matched seeds。模型能看到届时已知的证据、受限社交摘要和自身上轮记忆；确定性策略会响应当前模拟订单簿，但模型不会在每个随机种子中重新观察内生价格。AI 页面同时提供不计费的 code-grader 自检和显式触发的真实 GLM golden/攻击集，两者在结果中严格区分。
 
@@ -55,7 +56,8 @@ Browser
   -> Caddy (HTTPS, security headers, compression)
   -> BaoTa Nginx (private :18080 reverse proxy and real traffic accounting)
   -> EventShock app (FastAPI API + built React/TypeScript/Carbon assets)
-       -> SQLite session, scenario, audit, experiment and Study state
+       -> SQLite account ownership, scenario, audit, experiment and Study state
+       -> SMTP SSL bilingual verification mail (registration and password reset only)
        -> Zhipu structured cognition gateway (optional, BYOK)
        -> deterministic event queue, information network, ledger and order-book core
 ```
@@ -95,6 +97,8 @@ npm run dev
 
 打开 `http://127.0.0.1:5173`。
 
+本地开发默认关闭邮箱登录，以继续使用隔离的 `X-Session-ID` 测试数据；生产环境会强制开启账号认证与 Secure Cookie，缺少认证密钥或 SMTP 配置时启动失败关闭。生产密钥只能按[自有服务器部署指南](usage_documents/server-deploy.md)写入服务器受限文件，禁止加入 `.env`、Git 或日志。
+
 ### 生产式本地构建
 
 ```bash
@@ -132,7 +136,7 @@ npm test
 npm run build
 ```
 
-后端测试覆盖价格—时间优先、部分成交、价格保护、开盘竞价、研究级波动停牌、PIT 信息隔离、六类网络、借券/保证金、内容安全策略、认知 Schema 与安全回退、确定性重放、baseline-vs-baseline 零差异、配对统计、Study 编排、会话隔离、哈希链审计、断点恢复、单实验 invalidation、SSE 状态流、完整实验生命周期和 ZIP/Parquet 导出。
+后端测试覆盖价格—时间优先、部分成交、价格保护、开盘竞价、研究级波动停牌、PIT 信息隔离、六类网络、借券/保证金、内容安全策略、认知 Schema 与安全回退、确定性重放、baseline-vs-baseline 零差异、配对统计、Study 编排、账号隔离、邮箱验证码、Cookie/CSRF、历史数据认领、哈希链审计、断点恢复、单实验 invalidation、SSE 状态流、完整实验生命周期和 ZIP/Parquet 导出。
 
 ## Docker 与服务器部署
 
@@ -193,7 +197,7 @@ requirements*.lock             已验证的生产与开发 Python 依赖锁
 - 当前模型是单标的简化现货订单簿，包含受限借券、保证金和强平代理，但不包含完整期权市场、跨场所路由、清算会员制度或完整交易所规则。
 - 配对差异只描述所选模型假设下的内部机制，不构成现实世界因果效应。
 - 10 个 seeds 仅适合课程 Demo；界面会显示区间、有效样本数和限制，不能把单条路径当作统计结论。
-- 浏览器会话 ID 只用于隔离匿名草稿与实验历史；项目不接券商账户、不自动交易，也不采集支付信息。上传来源的完整原文不持久化，但用于人工审核的候选主张片段会保存到当前会话。确定性扫描器不是反病毒沙箱、完整附件解析器或隐私合规系统，用户仍不得上传不可信二进制、受监管个人数据或无权发送给第三方模型的材料。
+- 生产环境只收集账号访问所必需的邮箱地址，不收集姓名、身份证件、支付信息、券商凭据、IP 行为画像或私人通信；管理员才能查看邮箱与最小化活动摘要。密码采用带随机盐的 scrypt 摘要，验证码和会话令牌只保存不可逆摘要，智谱 API Key 不进入账号数据库。上传来源的完整原文不持久化，但用于人工审核的候选主张片段会保存到当前账号。确定性扫描器不是反病毒沙箱、完整附件解析器或完整隐私合规系统，用户仍不得上传不可信二进制、受监管个人数据或无权发送给第三方模型的材料。
 
 ## 许可证
 

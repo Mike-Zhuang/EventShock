@@ -16,9 +16,14 @@ class ScenarioService:
         self.database = database
         self.eventPacks = eventPacks
 
-    def createScenario(self, requestData: ScenarioSaveRequest, sessionId: str) -> dict[str, Any]:
+    def createScenario(
+        self,
+        requestData: ScenarioSaveRequest,
+        sessionId: str,
+        credentialSessionId: str | None = None,
+    ) -> dict[str, Any]:
         if requestData.frozen:
-            self._requireValid(requestData.config, sessionId)
+            self._requireValid(requestData.config, sessionId, credentialSessionId)
         scenarioId = f"scn-{uuid.uuid4().hex[:16]}"
         scenario = self.database.saveScenario(
             scenarioId,
@@ -89,12 +94,17 @@ class ScenarioService:
         )
         return clone
 
-    def freezeScenario(self, scenarioId: str, sessionId: str) -> dict[str, Any]:
+    def freezeScenario(
+        self,
+        scenarioId: str,
+        sessionId: str,
+        credentialSessionId: str | None = None,
+    ) -> dict[str, Any]:
         existing = self.getScenario(scenarioId, sessionId)
         if existing["frozen"]:
             return existing
         config = ExperimentRequest.model_validate(existing["config"])
-        self._requireValid(config, sessionId)
+        self._requireValid(config, sessionId, credentialSessionId)
         frozen = self.database.saveScenario(
             scenarioId,
             sessionId,
@@ -142,8 +152,17 @@ class ScenarioService:
             and changes[0]["path"].startswith("intervention."),
         }
 
-    def _requireValid(self, config: ExperimentRequest, sessionId: str) -> None:
-        validation = self.eventPacks.validateExperiment(config, sessionId)
+    def _requireValid(
+        self,
+        config: ExperimentRequest,
+        sessionId: str,
+        credentialSessionId: str | None = None,
+    ) -> None:
+        validation = self.eventPacks.validateExperiment(
+            config,
+            sessionId,
+            credentialSessionId,
+        )
         if not validation["valid"]:
             firstError = validation["errors"][0]
             raise ApiError(firstError["code"], 422, firstError["message"])

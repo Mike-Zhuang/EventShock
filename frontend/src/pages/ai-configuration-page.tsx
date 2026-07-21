@@ -164,8 +164,8 @@ export function AiConfigurationPage() {
       <PageHeader
         title={isZh ? 'AI 模型配置' : 'AI Model Configuration'}
         subtitle={isZh
-          ? '配置用于证据抽取与代表性认知智能体的智谱 API。密钥只在本服务器内存中短时保存。'
-          : 'Configure Zhipu API access for evidence extraction and representative cognitive agents. The key remains only in short-lived server memory.'}
+          ? '配置用于证据抽取与代表性认知智能体的智谱 API。密钥仅绑定当前登录会话并短时驻留服务器内存，不写入账户或数据库。'
+          : 'Configure Zhipu API access for evidence extraction and representative cognitive agents. The key is bound only to this sign-in session, kept briefly in server memory, and never written to the account or database.'}
         actions={<StatusBadge status={config?.configured ? 'CONFIGURED' : 'RULE ONLY'} />}
       />
 
@@ -194,7 +194,7 @@ export function AiConfigurationPage() {
         <section className="ai-config-panel" aria-labelledby="provider-settings-heading">
           <div className="section-heading">
             <h2 id="provider-settings-heading">{isZh ? '供应商与凭据' : 'Provider and credential'}</h2>
-            <p>{isZh ? '浏览器只把密钥发送到同源后端，不直接请求智谱。' : 'The browser sends the key only to the same-origin backend and never calls Zhipu directly.'}</p>
+            <p>{isZh ? '浏览器只把密钥发送到同源后端，不直接请求智谱；退出、过期或服务重启后需要重新填写。' : 'The browser sends the key only to the same-origin backend and never calls Zhipu directly. Re-enter it after sign-out, expiry, or a service restart.'}</p>
           </div>
           <div className="config-form-grid">
             <TextInput
@@ -228,7 +228,7 @@ export function AiConfigurationPage() {
               labelText={isZh ? '智谱 API Key' : 'Zhipu API key'}
               helperText={config?.configured
                 ? `${isZh ? '当前配置' : 'Current credential'}: ${config.credentialHint ?? 'hidden'}`
-                : isZh ? '保存后输入框会立即清空。' : 'The field clears immediately after saving.'}
+                : isZh ? '仅为当前登录会话临时启用；保存后输入框立即清空。' : 'Used temporarily for this sign-in session only; the field clears immediately after saving.'}
               value={apiKey}
               autoComplete="off"
               onChange={(event) => setApiKey(event.target.value)}
@@ -261,7 +261,7 @@ export function AiConfigurationPage() {
               disabled={!apiKey.trim() || busyAction !== undefined || selectedModel?.pricingStatus !== 'VERIFIED_UPPER_BOUND'}
               onClick={() => void save()}
             >
-              {busyAction === 'save' ? isZh ? '保存中' : 'Saving' : isZh ? '保存到会话' : 'Save for session'}
+              {busyAction === 'save' ? isZh ? '保存中' : 'Saving' : isZh ? '临时用于本次登录' : 'Use for this sign-in'}
             </Button>
             <Button
               kind="tertiary"
@@ -322,7 +322,7 @@ export function AiConfigurationPage() {
             <div className="credential-state">
               <Key size={20} />
               <div>
-                <strong>{isZh ? '会话凭据已配置' : 'Session credential configured'}</strong>
+                <strong>{isZh ? '当前登录的临时凭据已配置' : 'Temporary credential configured for this sign-in'}</strong>
                 <span>{config.expiresAt ? new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(config.expiresAt)) : ''}</span>
               </div>
             </div>
@@ -388,7 +388,7 @@ export function AiConfigurationPage() {
             {evaluationBusy === 'LIVE_CONFIGURED_MODEL' ? isZh ? '评估模型中' : 'Evaluating model' : isZh ? '运行真实智谱模型评估' : 'Run live Zhipu evaluation'}
           </Button>
         </div>
-        {!config?.configured ? <Notice>{isZh ? '真实模型评估需要先保存当前会话的智谱 API Key。代码 grader 自检不需要密钥。' : 'Live-model evaluation requires a session-scoped Zhipu API key. The code-grader self-test does not require a key.'}</Notice> : null}
+        {!config?.configured ? <Notice>{isZh ? '真实模型评估需要先为当前登录临时填写智谱 API Key。Key 不写入账户或数据库；代码 grader 自检不需要密钥。' : 'Live-model evaluation requires a temporary Zhipu API key for this sign-in. The key is never written to the account or database; the code-grader self-test does not require it.'}</Notice> : null}
         {evaluationRun ? (
           <div className="ai-evaluation-result">
             <div className="ai-evaluation-result__summary">

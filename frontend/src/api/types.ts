@@ -27,6 +27,67 @@ export interface HealthStatus {
   version?: string;
 }
 
+export type UserRole = 'ADMIN' | 'USER';
+export type VerificationPurpose = 'REGISTER' | 'RESET_PASSWORD';
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  role: UserRole;
+  emailVerified: boolean;
+  createdAt: string;
+  lastLoginAt?: string;
+}
+
+export interface AuthSession {
+  authenticationRequired: boolean;
+  authenticated: boolean;
+  user?: AuthUser;
+  csrfToken?: string;
+}
+
+export interface VerificationCodeReceipt {
+  accepted: boolean;
+  retryAfterSeconds: number;
+  expiresInSeconds: number;
+}
+
+export interface AdminUserSummary extends AuthUser {
+  status: 'ACTIVE' | 'DISABLED';
+  lastActivityAt?: string;
+  experimentCount: number;
+  activityCount: number;
+}
+
+export interface AdminUserStatistics {
+  totalUsers: number;
+  verifiedUsers: number;
+  activeUsersLastSevenDays: number;
+  totalActivities: number;
+}
+
+export interface AdminUserPage {
+  items: AdminUserSummary[];
+  total: number;
+  summary: AdminUserStatistics;
+}
+
+export interface AdminActivity {
+  id: string;
+  userId?: string;
+  userEmail?: string;
+  action: string;
+  entityType?: string;
+  entityId?: string;
+  outcome: 'SUCCEEDED' | 'FAILED';
+  createdAt: string;
+}
+
+export interface AdminActivityPage {
+  items: AdminActivity[];
+  total: number;
+}
+
 export interface CaseSummary {
   id: string;
   name: string;

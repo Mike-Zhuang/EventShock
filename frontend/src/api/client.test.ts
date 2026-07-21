@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { api } from './client';
+import { api, AUTH_SESSION_EXPIRED_EVENT, setCsrfToken } from './client';
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  setCsrfToken(undefined);
   window.localStorage.clear();
 });
 
@@ -33,5 +34,38 @@ describe('API client event stream', () => {
       '/api/v1/experiments/exp-1/events',
       expect.objectContaining({ cache: 'no-store' }),
     );
+  });
+
+  it('uses same-origin cookies and keeps the CSRF token only in request memory', async () => {
+    window.localStorage.setItem('eventshockSessionId', 'test-session');
+    setCsrfToken('csrf-memory-only');
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.logout();
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/auth/logout', expect.objectContaining({
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: expect.objectContaining({
+        'X-CSRF-Token': 'csrf-memory-only',
+        'X-Session-ID': 'test-session',
+      }),
+    }));
+    expect(window.localStorage.getItem('eventshockCsrfToken')).toBeNull();
+  });
+
+  it('broadcasts session expiry when an authenticated business request returns 401', async () => {
+    const listener = vi.fn();
+    window.addEventListener(AUTH_SESSION_EXPIRED_EVENT, listener);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({ error: { code: 'AUTH_REQUIRED', message: 'Authentication required.' } }),
+      { status: 401, headers: { 'Content-Type': 'application/json' } },
+    )));
+
+    await expect(api.getCases()).rejects.toMatchObject({ status: 401 });
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    window.removeEventListener(AUTH_SESSION_EXPIRED_EVENT, listener);
   });
 });

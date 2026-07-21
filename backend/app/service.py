@@ -504,7 +504,12 @@ class EventPackService:
         )
         return self.getEventPack(eventPackId, sessionId)
 
-    def validateExperiment(self, requestData: ExperimentRequest, sessionId: str) -> dict[str, Any]:
+    def validateExperiment(
+        self,
+        requestData: ExperimentRequest,
+        sessionId: str,
+        credentialSessionId: str | None = None,
+    ) -> dict[str, Any]:
         errors: list[dict[str, str]] = []
         warnings: list[dict[str, str]] = []
         checks: list[dict[str, str]] = []
@@ -757,7 +762,11 @@ class EventPackService:
             )
 
         if requestData.llmPolicy.mode.value == "HYBRID_LLM":
-            configView = self.cognition.getConfig(sessionId) if self.cognition else None
+            configView = (
+                self.cognition.getConfig(credentialSessionId or sessionId)
+                if self.cognition
+                else None
+            )
             if configView is None or not configView.configured:
                 status = "WARN" if requestData.llmPolicy.fallbackToRules else "FAIL"
                 message = (
@@ -1028,6 +1037,7 @@ class ExperimentService:
         requestData: ExperimentRequest,
         sessionId: str,
         idempotencyKey: str | None,
+        credentialSessionId: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         if idempotencyKey:
             existingExperiment = self.database.getExperimentByIdempotencyKey(
@@ -1057,7 +1067,11 @@ class ExperimentService:
                 503,
                 "The public demo has reached its retained experiment quota.",
             )
-        validation = self.eventPacks.validateExperiment(requestData, sessionId)
+        validation = self.eventPacks.validateExperiment(
+            requestData,
+            sessionId,
+            credentialSessionId,
+        )
         if not validation["valid"]:
             raise ApiError(
                 validation["errors"][0]["code"],
@@ -1101,7 +1115,12 @@ class ExperimentService:
             raise ApiError("EXPERIMENT_NOT_FOUND", 404, "The experiment does not exist.")
         return experiment
 
-    def startExperiment(self, experimentId: str, sessionId: str) -> dict[str, Any]:
+    def startExperiment(
+        self,
+        experimentId: str,
+        sessionId: str,
+        credentialSessionId: str | None = None,
+    ) -> dict[str, Any]:
         with self.futureLock:
             experiment = self.getExperiment(experimentId, sessionId)
             if experiment["status"] in {"QUEUED", "RUNNING", "AGGREGATING", "COMPLETED"}:
@@ -1132,7 +1151,12 @@ class ExperimentService:
                 "RUN_QUEUED",
                 {"simulationConcurrency": 1},
             )
-            future = self.executor.submit(self._runExperiment, experimentId, sessionId)
+            future = self.executor.submit(
+                self._runExperiment,
+                experimentId,
+                sessionId,
+                credentialSessionId or sessionId,
+            )
             self.futures[experimentId] = future
             future.add_done_callback(lambda _future: self._removeFuture(experimentId))
         return self.publicExperiment(self.getExperiment(experimentId, sessionId))
@@ -1148,11 +1172,18 @@ class ExperimentService:
             return self.publicExperiment(experiment)
         if experiment["status"] == "READY":
             self.database.updateExperiment(
-                experimentId, status="CANCELLED", cancel_requested=1, completed_at=utcNow()
+                experimentId,
+                sessionId,
+                status="CANCELLED",
+                cancel_requested=1,
+                completed_at=utcNow(),
             )
         else:
             self.database.updateExperiment(
-                experimentId, status="CANCEL_REQUESTED", cancel_requested=1
+                experimentId,
+                sessionId,
+                status="CANCEL_REQUESTED",
+                cancel_requested=1,
             )
         self.database.appendAuditEvent(
             sessionId,
@@ -1319,7 +1350,12 @@ class ExperimentService:
             raise ApiError("RESULTS_NOT_READY", 409, "Experiment results are not ready.")
         return experiment
 
-    def _runExperiment(self, experimentId: str, sessionId: str) -> None:
+    def _runExperiment(
+        self,
+        experimentId: str,
+        sessionId: str,
+        credentialSessionId: str,
+    ) -> None:
         runtime: dict[str, Any] = {}
         try:
             experiment = self.getExperiment(experimentId, sessionId)
@@ -1359,6 +1395,7 @@ class ExperimentService:
                 )
                 self.database.updateExperiment(
                     experimentId,
+                    sessionId,
                     status="RUNNING",
                     progress=0.04 + completedPairs / requestData["seedCount"] * 0.86,
                     completed_pairs=completedPairs,
@@ -1403,6 +1440,7 @@ class ExperimentService:
                 )
                 self.database.updateExperiment(
                     experimentId,
+                    sessionId,
                     status="RUNNING",
                     progress=0.0,
                     completed_pairs=0,
@@ -1411,12 +1449,13 @@ class ExperimentService:
                 )
                 cognitionRun = self._prepareCognitiveSignals(
                     experimentId,
-                    sessionId,
+                    credentialSessionId,
                     requestData,
                     eventPack,
                 )
                 self.database.updateExperiment(
                     experimentId,
+                    sessionId,
                     progress=0.04,
                     checkpoint_blob=self._checkpointPayload(
                         requestHash=requestHash,
@@ -1446,14 +1485,14 @@ class ExperimentService:
                 cancelPollCount += 1
                 # SQLite 是控制面而非逐事件队列；每 8 个仿真步轮询一次即可保持响应性。
                 if cancelPollCount % 8 == 1:
-                    cancellationCached = self.database.cancelRequested(experimentId)
+                    cancellationCached = self.database.cancelRequested(experimentId, sessionId)
                 return cancellationCached
 
             startIndex = len(baselineRuns)
             runIndexes = () if stoppingDecision.get("triggered") else range(startIndex, len(seeds))
             for index in runIndexes:
                 seed = seeds[index]
-                if self.database.cancelRequested(experimentId):
+                if self.database.cancelRequested(experimentId, sessionId):
                     self._finishCancelledRun(
                         experimentId,
                         sessionId,
@@ -1477,7 +1516,7 @@ class ExperimentService:
                     f"Baseline path started for matched pair {index + 1}.",
                     seed=seed,
                 )
-                self.database.updateExperiment(experimentId, runtime_json=runtime)
+                self.database.updateExperiment(experimentId, sessionId, runtime_json=runtime)
                 commonArguments = {
                     "seed": seed,
                     "populationSize": requestData["populationSize"],
@@ -1493,6 +1532,7 @@ class ExperimentService:
                     value=requestData["intervention"]["baselineValue"],
                     onProgress=self._liveProgressCallback(
                         experimentId,
+                        sessionId,
                         runtime,
                         arm="baseline",
                         completedPairs=len(baselineRuns),
@@ -1515,12 +1555,13 @@ class ExperimentService:
                     f"Intervention path started for matched pair {index + 1}.",
                     seed=seed,
                 )
-                self.database.updateExperiment(experimentId, runtime_json=runtime)
+                self.database.updateExperiment(experimentId, sessionId, runtime_json=runtime)
                 interventionRun = runScenario(
                     **commonArguments,
                     value=requestData["intervention"]["interventionValue"],
                     onProgress=self._liveProgressCallback(
                         experimentId,
+                        sessionId,
                         runtime,
                         arm="intervention",
                         completedPairs=len(baselineRuns),
@@ -1553,6 +1594,7 @@ class ExperimentService:
                 )
                 self.database.updateExperiment(
                     experimentId,
+                    sessionId,
                     progress=0.04 + len(baselineRuns) / requestData["seedCount"] * 0.86,
                     completed_pairs=len(baselineRuns),
                     runtime_json=runtime,
@@ -1584,6 +1626,7 @@ class ExperimentService:
             )
             self.database.updateExperiment(
                 experimentId,
+                sessionId,
                 status="AGGREGATING",
                 progress=0.94,
                 runtime_json=runtime,
@@ -1608,6 +1651,7 @@ class ExperimentService:
             )
             self.database.updateExperiment(
                 experimentId,
+                sessionId,
                 status="COMPLETED",
                 result_json=result,
                 progress=1.0,
@@ -1640,6 +1684,7 @@ class ExperimentService:
             )
             self.database.updateExperiment(
                 experimentId,
+                sessionId,
                 status="FAILED_FINAL",
                 error_code="SIMULATION_FAILED",
                 completed_at=utcNow(),
@@ -1744,6 +1789,7 @@ class ExperimentService:
     def _liveProgressCallback(
         self,
         experimentId: str,
+        sessionId: str,
         runtime: dict[str, Any],
         *,
         arm: str,
@@ -1763,6 +1809,7 @@ class ExperimentService:
             pairedProgress = completedPairs + armOffset + withinArm * 0.5
             self.database.updateExperiment(
                 experimentId,
+                sessionId,
                 progress=min(0.9, 0.04 + pairedProgress / max(totalPairs, 1) * 0.86),
                 runtime_json=runtime,
             )
@@ -1787,6 +1834,7 @@ class ExperimentService:
         )
         self.database.updateExperiment(
             experimentId,
+            sessionId,
             status="CANCELLED",
             completed_pairs=completedPairs,
             completed_at=utcNow(),
@@ -1824,7 +1872,7 @@ class ExperimentService:
     def _prepareCognitiveSignals(
         self,
         experimentId: str,
-        sessionId: str,
+        credentialSessionId: str,
         requestData: dict[str, Any],
         eventPack: dict[str, Any],
     ) -> dict[str, Any]:
@@ -1858,7 +1906,7 @@ class ExperimentService:
         }
         if mode != "HYBRID_LLM":
             return baseMetadata
-        if self.cognition is None or not self.cognition.getConfig(sessionId).configured:
+        if self.cognition is None or not self.cognition.getConfig(credentialSessionId).configured:
             if not fallbackAllowed:
                 raise RuntimeError("hybrid LLM mode requires a configured session credential")
             return {
@@ -2095,7 +2143,7 @@ class ExperimentService:
                 try:
                     run = asyncio.run(
                         self.cognition.generateBeliefDecision(
-                            sessionId=sessionId,
+                            sessionId=credentialSessionId,
                             observation=observation,
                             costBudget=costBudget,
                             allowRuleFallback=fallbackAllowed,

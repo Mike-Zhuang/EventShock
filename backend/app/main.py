@@ -12,12 +12,37 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, Header, Request
+from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
+from backend.app.auth import (
+    AuthContext,
+    AuthenticationError,
+    AuthorizationError,
+    AuthRepository,
+    AuthService,
+    ChallengeCooldownError,
+    ChallengePurpose,
+    ChallengeVerificationError,
+    CsrfValidationError,
+    DuplicateUserError,
+    MailDeliveryError,
+    PasswordPolicyError,
+    PublicUser,
+    SmtpVerificationMailer,
+    UserRole,
+    normalizeEmail,
+)
+from backend.app.auth.api_models import (
+    AuthCredentialRequest,
+    AuthLoginRequest,
+    UserStatusRequest,
+    VerificationCodeRequest,
+)
 from backend.app.cognition import (
     CNY_PER_USD_BUDGET_FLOOR,
     FX_SOURCE_URL,
@@ -68,6 +93,17 @@ from backend.app.study.api_service import StudyApiService
 
 SESSION_PATTERN = re.compile(r"^[A-Za-z0-9._-]{12,128}$")
 IDEMPOTENCY_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
+AUTH_COOKIE_NAME = "eventshock_auth"
+SAFE_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+PUBLIC_AUTH_PATHS = frozenset(
+    {
+        "/api/v1/auth/session",
+        "/api/v1/auth/login",
+        "/api/v1/auth/verification-code",
+        "/api/v1/auth/register",
+        "/api/v1/auth/password-reset",
+    }
+)
 
 
 def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> FastAPI:
@@ -79,6 +115,47 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def lifespan(appInstance: FastAPI):
         database = Database(settings.databasePath)
         database.initialize()
+        authRepository: AuthRepository | None = None
+        authService: AuthService | None = None
+        if settings.authenticationRequired:
+            missingSettings = [
+                name
+                for name, value in (
+                    ("EVENTSHOCK_AUTH_SECRET(_FILE)", settings.authSecret),
+                    ("EVENTSHOCK_ADMIN_EMAIL", settings.adminEmail),
+                    ("EVENTSHOCK_SMTP_HOST", settings.smtpHost),
+                    ("EVENTSHOCK_SMTP_USERNAME", settings.smtpUsername),
+                    ("EVENTSHOCK_SMTP_PASSWORD(_FILE)", settings.smtpPassword),
+                    ("EVENTSHOCK_SMTP_SENDER", settings.smtpSender),
+                )
+                if not value
+            ]
+            if missingSettings:
+                raise RuntimeError(
+                    "authentication is enabled but required settings are missing: "
+                    + ", ".join(missingSettings)
+                )
+            authRepository = AuthRepository(database)
+            authRepository.initialize()
+            try:
+                configuredAdminEmail = normalizeEmail(settings.adminEmail or "")
+            except ValueError as error:
+                raise RuntimeError("EVENTSHOCK_ADMIN_EMAIL is invalid") from error
+            mailer = SmtpVerificationMailer(
+                host=settings.smtpHost or "",
+                port=settings.smtpPort,
+                username=settings.smtpUsername or "",
+                password=settings.smtpPassword or "",
+                sender=settings.smtpSender or "",
+            )
+            authService = AuthService(
+                repository=authRepository,
+                mailer=mailer,
+                authSecret=settings.authSecret or "",
+            )
+        # 部署时必须先由一次性管理员引导认领旧数据；认领前绝不执行保留期清理。
+        if not any(database.countUnownedRecords().values()):
+            database.enforceRetention()
         cognitionService = CognitionService()
         eventPackService = EventPackService(
             database,
@@ -89,6 +166,11 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         experimentService = ExperimentService(database, eventPackService, cognitionService)
         studyService = StudyApiService(database)
         appInstance.state.database = database
+        appInstance.state.authRepository = authRepository
+        appInstance.state.authService = authService
+        appInstance.state.configuredAdminEmail = (
+            configuredAdminEmail if settings.authenticationRequired else None
+        )
         appInstance.state.eventPackService = eventPackService
         appInstance.state.cognitionService = cognitionService
         appInstance.state.scenarioService = scenarioService
@@ -111,6 +193,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         requestStartedAt = time.perf_counter()
         traceId = request.headers.get("X-Trace-ID") or f"http-{uuid.uuid4().hex}"
         request.state.traceId = traceId[:128]
+        request.state.authContext = None
         try:
             rateLimitRules = _rateLimitRules(request)
             if rateLimitRules:
@@ -136,6 +219,61 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 statusCode=response.status_code,
             )
             return response
+        if settings.authenticationRequired and _authenticationProtected(request):
+            authService: AuthService = request.app.state.authService
+            rawToken = request.cookies.get(AUTH_COOKIE_NAME, "")
+            requireCsrf = request.method.upper() not in SAFE_HTTP_METHODS
+            try:
+                if requireCsrf:
+                    _validateSameOrigin(request)
+                request.state.authContext = authService.authenticate(
+                    token=rawToken,
+                    csrfToken=request.headers.get("X-CSRF-Token"),
+                    requireCsrf=requireCsrf,
+                )
+            except CsrfValidationError as error:
+                response = _authenticationErrorResponse(
+                    request,
+                    code="CSRF_VALIDATION_FAILED",
+                    message=str(error),
+                    statusCode=403,
+                )
+                runtimeMetrics.record(
+                    durationMs=(time.perf_counter() - requestStartedAt) * 1_000,
+                    statusCode=response.status_code,
+                )
+                return response
+            except AuthenticationError as error:
+                response = _authenticationErrorResponse(
+                    request,
+                    code="AUTHENTICATION_REQUIRED",
+                    message=str(error),
+                    statusCode=401,
+                )
+                response.delete_cookie(
+                    AUTH_COOKIE_NAME,
+                    path="/",
+                    secure=settings.authCookieSecure,
+                    httponly=True,
+                    samesite="lax",
+                )
+                runtimeMetrics.record(
+                    durationMs=(time.perf_counter() - requestStartedAt) * 1_000,
+                    statusCode=response.status_code,
+                )
+                return response
+            except AuthorizationError as error:
+                response = _authenticationErrorResponse(
+                    request,
+                    code="ORIGIN_VALIDATION_FAILED",
+                    message=str(error),
+                    statusCode=403,
+                )
+                runtimeMetrics.record(
+                    durationMs=(time.perf_counter() - requestStartedAt) * 1_000,
+                    statusCode=response.status_code,
+                )
+                return response
         response = await callNext(request)
         if request.url.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
@@ -145,6 +283,28 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             statusCode=response.status_code,
         )
         return response
+
+    def requireOwner(
+        request: Request,
+        legacySessionId: Annotated[str | None, Header(alias="X-Session-ID")] = None,
+    ) -> str:
+        if settings.authenticationRequired:
+            return _authContext(request).userId
+        if legacySessionId is None:
+            raise ApiError("SESSION_ID_REQUIRED", 422, "X-Session-ID is required.")
+        return _sessionId(legacySessionId)
+
+    def optionalOwner(
+        request: Request,
+        legacySessionId: Annotated[str | None, Header(alias="X-Session-ID")] = None,
+    ) -> str | None:
+        if settings.authenticationRequired:
+            return _authContext(request).userId
+        return _optionalSessionId(legacySessionId)
+
+    def credentialSessionId(request: Request, ownerUserId: str) -> str:
+        context = getattr(request.state, "authContext", None)
+        return context.authSessionId if isinstance(context, AuthContext) else ownerUserId
 
     @appInstance.exception_handler(ApiError)
     async def apiErrorHandler(request: Request, error: ApiError) -> JSONResponse:
@@ -195,6 +355,90 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             },
         )
 
+    @appInstance.exception_handler(AuthenticationError)
+    async def authenticationErrorHandler(
+        request: Request, error: AuthenticationError
+    ) -> JSONResponse:
+        return _authenticationErrorResponse(
+            request,
+            code="AUTHENTICATION_FAILED",
+            message=str(error),
+            statusCode=401,
+        )
+
+    @appInstance.exception_handler(CsrfValidationError)
+    async def csrfValidationErrorHandler(
+        request: Request, error: CsrfValidationError
+    ) -> JSONResponse:
+        return _authenticationErrorResponse(
+            request,
+            code="CSRF_VALIDATION_FAILED",
+            message=str(error),
+            statusCode=403,
+        )
+
+    @appInstance.exception_handler(AuthorizationError)
+    async def authorizationErrorHandler(
+        request: Request, error: AuthorizationError
+    ) -> JSONResponse:
+        return _authenticationErrorResponse(
+            request,
+            code="ADMIN_ACCESS_REQUIRED",
+            message=str(error),
+            statusCode=403,
+        )
+
+    @appInstance.exception_handler(ChallengeCooldownError)
+    async def challengeCooldownHandler(
+        request: Request, error: ChallengeCooldownError
+    ) -> JSONResponse:
+        response = _authenticationErrorResponse(
+            request,
+            code="VERIFICATION_CODE_COOLDOWN",
+            message="Wait before requesting another verification code.",
+            statusCode=429,
+        )
+        response.headers["Retry-After"] = str(error.retryAfterSeconds)
+        return response
+
+    @appInstance.exception_handler(ChallengeVerificationError)
+    async def challengeVerificationHandler(
+        request: Request, error: ChallengeVerificationError
+    ) -> JSONResponse:
+        return _authenticationErrorResponse(
+            request,
+            code="VERIFICATION_CODE_INVALID",
+            message=str(error),
+            statusCode=400,
+        )
+
+    @appInstance.exception_handler(DuplicateUserError)
+    async def duplicateUserHandler(request: Request, error: DuplicateUserError) -> JSONResponse:
+        return _authenticationErrorResponse(
+            request,
+            code="ACCOUNT_ALREADY_EXISTS",
+            message=str(error),
+            statusCode=409,
+        )
+
+    @appInstance.exception_handler(PasswordPolicyError)
+    async def passwordPolicyHandler(request: Request, error: PasswordPolicyError) -> JSONResponse:
+        return _authenticationErrorResponse(
+            request,
+            code="PASSWORD_POLICY_FAILED",
+            message=str(error),
+            statusCode=422,
+        )
+
+    @appInstance.exception_handler(MailDeliveryError)
+    async def mailDeliveryHandler(request: Request, _error: MailDeliveryError) -> JSONResponse:
+        return _authenticationErrorResponse(
+            request,
+            code="VERIFICATION_EMAIL_UNAVAILABLE",
+            message="The verification email could not be delivered. Try again later.",
+            statusCode=503,
+        )
+
     @appInstance.get("/api/health")
     async def getHealth(request: Request) -> dict[str, Any]:
         database: Database = request.app.state.database
@@ -209,6 +453,200 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             "database": "ok",
             "simulationConcurrency": 1,
         }
+
+    @appInstance.get("/api/v1/auth/session")
+    async def getAuthSession(request: Request) -> Response:
+        if not settings.authenticationRequired:
+            return JSONResponse(
+                {
+                    "authenticationRequired": False,
+                    "authenticated": True,
+                    "user": {
+                        "id": "development-user",
+                        "email": "development@local.invalid",
+                        "role": "ADMIN",
+                        "emailVerified": True,
+                        "createdAt": "",
+                        "lastLoginAt": None,
+                    },
+                }
+            )
+        rawToken = request.cookies.get(AUTH_COOKIE_NAME, "")
+        authService: AuthService = request.app.state.authService
+        authRepository: AuthRepository = request.app.state.authRepository
+        try:
+            context = authService.authenticate(token=rawToken)
+        except AuthenticationError:
+            response = JSONResponse({"authenticationRequired": True, "authenticated": False})
+            if rawToken:
+                response.delete_cookie(
+                    AUTH_COOKIE_NAME,
+                    path="/",
+                    secure=settings.authCookieSecure,
+                    httponly=True,
+                    samesite="lax",
+                )
+            return response
+        user = authRepository.getUserById(context.userId)
+        if user is None:
+            raise AuthenticationError("authenticated account no longer exists")
+        return JSONResponse(
+            _authSessionPayload(
+                user,
+                csrfToken=authService.csrfToken(rawToken),
+            )
+        )
+
+    @appInstance.post("/api/v1/auth/login")
+    async def loginAccount(login: AuthLoginRequest, request: Request) -> Response:
+        authService = _requiredAuthService(request)
+        try:
+            issued = authService.login(email=login.email, password=login.password)
+        except ValueError as error:
+            raise ApiError("INVALID_EMAIL", 422, str(error)) from error
+        response = JSONResponse(_authSessionPayload(issued.user, csrfToken=issued.csrfToken))
+        _setAuthCookie(response, issued.token, settings.authCookieSecure)
+        return response
+
+    @appInstance.post("/api/v1/auth/verification-code", status_code=202)
+    async def requestVerificationCode(
+        payload: VerificationCodeRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        authService = _requiredAuthService(request)
+        try:
+            if payload.purpose is ChallengePurpose.REGISTER:
+                dispatch = await authService.requestRegistrationCode(
+                    email=payload.email,
+                    locale=payload.language,
+                )
+            else:
+                dispatch = await authService.requestPasswordResetCode(
+                    email=payload.email,
+                    locale=payload.language,
+                )
+        except ValueError as error:
+            raise ApiError("INVALID_EMAIL", 422, str(error)) from error
+        now = datetime.now(UTC)
+        return {
+            "accepted": True,
+            "retryAfterSeconds": max(1, int((dispatch.resendAfter - now).total_seconds())),
+            "expiresInSeconds": max(1, int((dispatch.expiresAt - now).total_seconds())),
+        }
+
+    @appInstance.post("/api/v1/auth/register", status_code=201)
+    async def registerAccount(payload: AuthCredentialRequest, request: Request) -> Response:
+        authService = _requiredAuthService(request)
+        try:
+            await authService.registerWithLatestChallenge(
+                email=payload.email,
+                code=payload.verificationCode,
+                password=payload.password,
+            )
+            issued = authService.login(email=payload.email, password=payload.password)
+        except ValueError as error:
+            raise ApiError("INVALID_ACCOUNT_INPUT", 422, str(error)) from error
+        response = JSONResponse(
+            _authSessionPayload(issued.user, csrfToken=issued.csrfToken),
+            status_code=201,
+        )
+        _setAuthCookie(response, issued.token, settings.authCookieSecure)
+        return response
+
+    @appInstance.post("/api/v1/auth/password-reset")
+    async def resetAccountPassword(
+        payload: AuthCredentialRequest,
+        request: Request,
+    ) -> dict[str, bool]:
+        authService = _requiredAuthService(request)
+        try:
+            await authService.resetPasswordWithLatestChallenge(
+                email=payload.email,
+                code=payload.verificationCode,
+                newPassword=payload.password,
+            )
+        except ValueError as error:
+            raise ApiError("INVALID_ACCOUNT_INPUT", 422, str(error)) from error
+        return {"ok": True}
+
+    @appInstance.post("/api/v1/auth/logout")
+    async def logoutAccount(request: Request) -> Response:
+        authService = _requiredAuthService(request)
+        context = _authContext(request)
+        cognition: CognitionService = request.app.state.cognitionService
+        cognition.clearConfig(context.authSessionId)
+        authService.logout(token=request.cookies.get(AUTH_COOKIE_NAME, ""))
+        response = Response(status_code=204)
+        response.delete_cookie(
+            AUTH_COOKIE_NAME,
+            path="/",
+            secure=settings.authCookieSecure,
+            httponly=True,
+            samesite="lax",
+        )
+        return response
+
+    @appInstance.get("/api/v1/admin/users")
+    async def listAdminUsers(
+        request: Request,
+        limit: Annotated[int, Query(ge=1, le=100)] = 25,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> dict[str, Any]:
+        authService = _requiredAuthService(request)
+        context = _authContext(request)
+        items = authService.listUsers(context, limit=limit, offset=offset)
+        summary = authService.userStatistics(context)
+        return {
+            "items": [_adminUserPayload(item) for item in items],
+            "total": summary["totalUsers"],
+            "summary": summary,
+        }
+
+    @appInstance.get("/api/v1/admin/activity")
+    async def listAdminActivity(
+        request: Request,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+        offset: Annotated[int, Query(ge=0)] = 0,
+        userId: Annotated[str | None, Query(min_length=6, max_length=128)] = None,
+    ) -> dict[str, Any]:
+        authService = _requiredAuthService(request)
+        context = _authContext(request)
+        items = authService.listActivity(
+            context,
+            userId=userId,
+            limit=limit,
+            offset=offset,
+        )
+        return {
+            "items": [
+                {
+                    "id": item.id,
+                    "userId": item.userId or "system",
+                    "userEmail": item.userEmail,
+                    "action": item.action,
+                    "entityType": item.entityType,
+                    "entityId": item.entityId,
+                    "outcome": "FAILED" if item.status == "FAILED" else "SUCCEEDED",
+                    "createdAt": item.createdAt.isoformat(),
+                }
+                for item in items
+            ],
+            "total": authService.countActivity(context, userId=userId),
+        }
+
+    @appInstance.patch("/api/v1/admin/users/{userId}")
+    async def updateAdminUserStatus(
+        userId: str,
+        payload: UserStatusRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        authService = _requiredAuthService(request)
+        context = _authContext(request)
+        try:
+            user = authService.setUserStatus(context, userId=userId, status=payload.status)
+        except LookupError as error:
+            raise ApiError("ACCOUNT_NOT_FOUND", 404, str(error)) from error
+        return _publicUserPayload(user)
 
     @appInstance.get("/api/v1/system/metrics")
     async def getSystemMetrics(request: Request) -> dict[str, Any]:
@@ -237,7 +675,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     @appInstance.get("/api/v1/cases")
     async def getCases(
         request: Request,
-        sessionId: Annotated[str | None, Header(alias="X-Session-ID")] = None,
+        sessionId: str | None = Depends(optionalOwner),
     ) -> dict[str, Any]:
         service: EventPackService = request.app.state.eventPackService
         return {"items": service.listCases(_optionalSessionId(sessionId))}
@@ -246,9 +684,10 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def createEventPack(
         eventPack: EventPackCreateRequest,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         validatedSessionId = _sessionId(sessionId)
+        credentialId = credentialSessionId(request, validatedSessionId)
         service: EventPackService = request.app.state.eventPackService
         cognition: CognitionService = request.app.state.cognitionService
         contentSecurity = _scanEventPackSources(
@@ -265,10 +704,10 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         eventPack = _sanitizeAcknowledgedEventPack(eventPack, contentSecurity)
         claims = None
         extractionMode = "RULE_FALLBACK_NO_LLM_CONFIG"
-        if cognition.getConfig(validatedSessionId).configured:
+        if cognition.getConfig(credentialId).configured:
             try:
                 extraction = await cognition.extractEventClaims(
-                    sessionId=validatedSessionId,
+                    sessionId=credentialId,
                     sources=_cognitionSources(eventPack.sources),
                     maximumClaims=16,
                 )
@@ -353,23 +792,27 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     @appInstance.get("/api/v1/llm/config")
     async def getLlmConfig(
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         cognition: CognitionService = request.app.state.cognitionService
-        return cognition.getConfig(_sessionId(sessionId)).model_dump(mode="json")
+        ownerUserId = _sessionId(sessionId)
+        return cognition.getConfig(credentialSessionId(request, ownerUserId)).model_dump(
+            mode="json"
+        )
 
     @appInstance.put("/api/v1/llm/config")
     async def saveLlmConfig(
         config: LlmConfigRequest,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
-        validatedSessionId = _sessionId(sessionId)
+        ownerUserId = _sessionId(sessionId)
+        credentialId = credentialSessionId(request, ownerUserId)
         cognition: CognitionService = request.app.state.cognitionService
         database: Database = request.app.state.database
         try:
             view = cognition.setConfig(
-                sessionId=validatedSessionId,
+                sessionId=credentialId,
                 apiKey=config.apiKey,
                 model=config.model,
                 thinkingEnabled=config.thinkingEnabled,
@@ -378,7 +821,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         except ValueError as error:
             raise ApiError("INVALID_LLM_CONFIG", 422, str(error)) from error
         database.appendAuditEvent(
-            validatedSessionId,
+            ownerUserId,
             "MODEL_CONFIG",
             "zhipu-session-config",
             "CONFIGURED",
@@ -394,30 +837,32 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     @appInstance.delete("/api/v1/llm/config")
     async def clearLlmConfig(
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
-        validatedSessionId = _sessionId(sessionId)
+        ownerUserId = _sessionId(sessionId)
+        credentialId = credentialSessionId(request, ownerUserId)
         cognition: CognitionService = request.app.state.cognitionService
         database: Database = request.app.state.database
-        cleared = cognition.clearConfig(validatedSessionId)
+        cleared = cognition.clearConfig(credentialId)
         database.appendAuditEvent(
-            validatedSessionId,
+            ownerUserId,
             "MODEL_CONFIG",
             "zhipu-session-config",
             "CLEARED",
             {"credentialWasPresent": cleared},
         )
-        return cognition.getConfig(validatedSessionId).model_dump(mode="json")
+        return cognition.getConfig(credentialId).model_dump(mode="json")
 
     @appInstance.post("/api/v1/llm/test")
     async def testLlmConfig(
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
-        validatedSessionId = _sessionId(sessionId)
+        ownerUserId = _sessionId(sessionId)
+        credentialId = credentialSessionId(request, ownerUserId)
         cognition: CognitionService = request.app.state.cognitionService
         try:
-            result = await cognition.testConnection(validatedSessionId)
+            result = await cognition.testConnection(credentialId)
         except CredentialNotConfiguredError as error:
             raise ApiError(
                 "LLM_CREDENTIAL_NOT_CONFIGURED",
@@ -450,9 +895,10 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def runCognitionEvaluation(
         evaluation: EvalRunRequest,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
-        validatedSessionId = _sessionId(sessionId)
+        ownerUserId = _sessionId(sessionId)
+        credentialId = credentialSessionId(request, ownerUserId)
         cognition: CognitionService = request.app.state.cognitionService
         cases = builtInEvalCases()[: evaluation.maximumCases]
         modelRuns: list[dict[str, Any]] = []
@@ -460,7 +906,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             samples = codeGraderSelfTestSamples(cases)
             evaluatedSystem = "DETERMINISTIC_CODE_GRADER"
         else:
-            if not cognition.getConfig(validatedSessionId).configured:
+            if not cognition.getConfig(credentialId).configured:
                 raise ApiError(
                     "LLM_CREDENTIAL_NOT_CONFIGURED",
                     409,
@@ -470,7 +916,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             for case in cases:
                 try:
                     modelRun = await cognition.generateBeliefDecision(
-                        sessionId=validatedSessionId,
+                        sessionId=credentialId,
                         observation=case.observation,
                     )
                 except CredentialNotConfiguredError as error:
@@ -499,7 +945,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         result = cognition.runEvaluation(samples)
         database: Database = request.app.state.database
         database.appendAuditEvent(
-            validatedSessionId,
+            ownerUserId,
             "COGNITION_EVALUATION",
             f"eval-{uuid.uuid4().hex[:16]}",
             "EVALUATION_COMPLETED",
@@ -660,7 +1106,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def runStudy(
         study: StudyRunApiRequest,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         validatedSessionId = _sessionId(sessionId)
         eventPacks: EventPackService = request.app.state.eventPackService
@@ -676,7 +1122,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     @appInstance.get("/api/v1/studies")
     async def listStudies(
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         service: StudyApiService = request.app.state.studyService
         return {"items": service.listRuns(_sessionId(sessionId))}
@@ -685,7 +1131,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def getStudyRun(
         runId: str,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         service: StudyApiService = request.app.state.studyService
         return service.getRun(runId, _sessionId(sessionId))
@@ -694,7 +1140,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def getEventPack(
         eventPackId: str,
         request: Request,
-        sessionId: Annotated[str | None, Header(alias="X-Session-ID")] = None,
+        sessionId: str | None = Depends(optionalOwner),
     ) -> dict[str, Any]:
         validatedSessionId = _optionalSessionId(sessionId)
         service: EventPackService = request.app.state.eventPackService
@@ -706,7 +1152,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         claimId: str,
         review: ClaimReviewRequest,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         service: EventPackService = request.app.state.eventPackService
         return service.reviewClaim(eventPackId, claimId, _sessionId(sessionId), review)
@@ -715,7 +1161,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def freezeEventPack(
         eventPackId: str,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         service: EventPackService = request.app.state.eventPackService
         return service.freezeEventPack(eventPackId, _sessionId(sessionId))
@@ -725,9 +1171,10 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         eventPackId: str,
         extraction: EventPackExtractRequest,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         validatedSessionId = _sessionId(sessionId)
+        credentialId = credentialSessionId(request, validatedSessionId)
         service: EventPackService = request.app.state.eventPackService
         currentPack = service.getEventPack(eventPackId, validatedSessionId)
         if not extraction.sources:
@@ -767,10 +1214,10 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         cognition: CognitionService = request.app.state.cognitionService
         claims = None
         extractionMode = "RULE_ONLY"
-        if extraction.useLlm and cognition.getConfig(validatedSessionId).configured:
+        if extraction.useLlm and cognition.getConfig(credentialId).configured:
             try:
                 llmExtraction = await cognition.extractEventClaims(
-                    sessionId=validatedSessionId,
+                    sessionId=credentialId,
                     sources=_cognitionSources(extraction.sources),
                     maximumClaims=extraction.maximumClaims,
                 )
@@ -806,7 +1253,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     @appInstance.get("/api/v1/scenarios")
     async def listScenarios(
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         service: ScenarioService = request.app.state.scenarioService
         return {"items": service.listScenarios(_sessionId(sessionId))}
@@ -815,16 +1262,21 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def createScenario(
         scenario: ScenarioSaveRequest,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         service: ScenarioService = request.app.state.scenarioService
-        return service.createScenario(scenario, _sessionId(sessionId))
+        ownerUserId = _sessionId(sessionId)
+        return service.createScenario(
+            scenario,
+            ownerUserId,
+            credentialSessionId=credentialSessionId(request, ownerUserId),
+        )
 
     @appInstance.get("/api/v1/scenarios/{scenarioId}")
     async def getScenario(
         scenarioId: str,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         service: ScenarioService = request.app.state.scenarioService
         return service.getScenario(scenarioId, _sessionId(sessionId))
@@ -834,7 +1286,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         scenarioId: str,
         scenario: ScenarioUpdateRequest,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         service: ScenarioService = request.app.state.scenarioService
         return service.updateScenario(scenarioId, scenario, _sessionId(sessionId))
@@ -843,7 +1295,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def deleteScenario(
         scenarioId: str,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> Response:
         service: ScenarioService = request.app.state.scenarioService
         service.deleteScenario(scenarioId, _sessionId(sessionId))
@@ -853,7 +1305,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def cloneScenario(
         scenarioId: str,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         service: ScenarioService = request.app.state.scenarioService
         return service.cloneScenario(scenarioId, _sessionId(sessionId))
@@ -862,10 +1314,15 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def freezeScenario(
         scenarioId: str,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         service: ScenarioService = request.app.state.scenarioService
-        return service.freezeScenario(scenarioId, _sessionId(sessionId))
+        ownerUserId = _sessionId(sessionId)
+        return service.freezeScenario(
+            scenarioId,
+            ownerUserId,
+            credentialSessionId=credentialSessionId(request, ownerUserId),
+        )
 
     @appInstance.post("/api/v1/scenarios/diff")
     async def diffScenarios(scenarios: ScenarioDiffRequest) -> dict[str, Any]:
@@ -875,15 +1332,20 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def validateScenario(
         scenario: ScenarioValidateRequest,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         service: EventPackService = request.app.state.eventPackService
-        return service.validateExperiment(scenario, _sessionId(sessionId))
+        ownerUserId = _sessionId(sessionId)
+        return service.validateExperiment(
+            scenario,
+            ownerUserId,
+            credentialSessionId=credentialSessionId(request, ownerUserId),
+        )
 
     @appInstance.get("/api/v1/experiments")
     async def listExperiments(
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         service: ExperimentService = request.app.state.experimentService
         return {"items": service.listExperiments(_sessionId(sessionId))}
@@ -891,7 +1353,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     @appInstance.get("/api/v1/audit-events")
     async def listAuditEvents(
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         database: Database = request.app.state.database
         return {"items": database.listAuditEvents(_sessionId(sessionId))}
@@ -899,7 +1361,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     @appInstance.get("/api/v1/audit-events/verify")
     async def verifyAuditEvents(
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         database: Database = request.app.state.database
         return database.verifyAuditChain(_sessionId(sessionId))
@@ -908,14 +1370,16 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def createExperiment(
         experiment: ExperimentRequest,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
         idempotencyKey: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
     ) -> Response:
         service: ExperimentService = request.app.state.experimentService
+        ownerUserId = _sessionId(sessionId)
         createdExperiment, created = service.createExperiment(
             experiment,
-            _sessionId(sessionId),
+            ownerUserId,
             _idempotencyKey(idempotencyKey),
+            credentialSessionId=credentialSessionId(request, ownerUserId),
         )
         return JSONResponse(status_code=201 if created else 200, content=createdExperiment)
 
@@ -923,7 +1387,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def getExperiment(
         experimentId: str,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         service: ExperimentService = request.app.state.experimentService
         return service.publicExperiment(service.getExperiment(experimentId, _sessionId(sessionId)))
@@ -932,7 +1396,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def streamExperimentEvents(
         experimentId: str,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> StreamingResponse:
         validatedSessionId = _sessionId(sessionId)
         service: ExperimentService = request.app.state.experimentService
@@ -993,16 +1457,21 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def startExperiment(
         experimentId: str,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         service: ExperimentService = request.app.state.experimentService
-        return service.startExperiment(experimentId, _sessionId(sessionId))
+        ownerUserId = _sessionId(sessionId)
+        return service.startExperiment(
+            experimentId,
+            ownerUserId,
+            credentialSessionId=credentialSessionId(request, ownerUserId),
+        )
 
     @appInstance.post("/api/v1/experiments/{experimentId}/cancel")
     async def cancelExperiment(
         experimentId: str,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         service: ExperimentService = request.app.state.experimentService
         return service.cancelExperiment(experimentId, _sessionId(sessionId))
@@ -1012,7 +1481,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         experimentId: str,
         invalidation: ExperimentInvalidateRequest,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         service: ExperimentService = request.app.state.experimentService
         return service.invalidateExperiment(
@@ -1026,7 +1495,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def getExperimentResults(
         experimentId: str,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         service: ExperimentService = request.app.state.experimentService
         return service.getResults(experimentId, _sessionId(sessionId))
@@ -1035,7 +1504,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def getExperimentRuns(
         experimentId: str,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         service: ExperimentService = request.app.state.experimentService
         return service.getRuns(experimentId, _sessionId(sessionId))
@@ -1044,7 +1513,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def getExperimentMetrics(
         experimentId: str,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         service: ExperimentService = request.app.state.experimentService
         return service.getMetrics(experimentId, _sessionId(sessionId))
@@ -1053,7 +1522,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def getExperimentTraces(
         experimentId: str,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         service: ExperimentService = request.app.state.experimentService
         return service.getTraces(experimentId, _sessionId(sessionId))
@@ -1073,7 +1542,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def exportExperimentGet(
         experimentId: str,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> Response:
         return await exportResponse(experimentId, request, sessionId)
 
@@ -1081,7 +1550,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def exportExperimentPost(
         experimentId: str,
         request: Request,
-        sessionId: Annotated[str, Header(alias="X-Session-ID")],
+        sessionId: str = Depends(requireOwner),
     ) -> Response:
         return await exportResponse(experimentId, request, sessionId)
 
@@ -1100,6 +1569,124 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
 
     _registerFrontendFallback(appInstance, frontendDist or settings.frontendDist)
     return appInstance
+
+
+def _authenticationProtected(request: Request) -> bool:
+    path = request.url.path.rstrip("/") or "/"
+    return path.startswith("/api/v1/") and path not in PUBLIC_AUTH_PATHS
+
+
+def _validateSameOrigin(request: Request) -> None:
+    """CSRF token 是主防线；若浏览器提供 Origin，再严格校验同源。"""
+
+    origin = request.headers.get("Origin")
+    if not origin:
+        return
+    parsed = urlsplit(origin)
+    expectedHost = request.headers.get("Host", "").lower()
+    if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() != expectedHost:
+        raise AuthorizationError("cross-origin write requests are not allowed")
+
+
+def _authContext(request: Request) -> AuthContext:
+    context = getattr(request.state, "authContext", None)
+    if not isinstance(context, AuthContext):
+        raise AuthenticationError("authentication is required")
+    return context
+
+
+def _requiredAuthService(request: Request) -> AuthService:
+    service = getattr(request.app.state, "authService", None)
+    if not isinstance(service, AuthService):
+        raise ApiError(
+            "AUTHENTICATION_DISABLED",
+            409,
+            "Account authentication is disabled in this development environment.",
+        )
+    repository = getattr(request.app.state, "authRepository", None)
+    adminEmail = getattr(request.app.state, "configuredAdminEmail", None)
+    adminRow = (
+        repository.getUserByEmail(adminEmail)
+        if isinstance(repository, AuthRepository) and isinstance(adminEmail, str)
+        else None
+    )
+    if adminRow is None or adminRow.get("role") != UserRole.ADMIN.value:
+        # 首次部署会先让容器通过内部健康检查，再经受限 stdin 创建管理员。
+        # 在这几秒内拒绝注册/登录等写入，避免匿名用户抢在遗留数据认领前建号。
+        raise ApiError(
+            "AUTHENTICATION_INITIALIZING",
+            503,
+            "Account authentication is being initialized. Retry shortly.",
+        )
+    return service
+
+
+def _publicUserPayload(user: PublicUser) -> dict[str, Any]:
+    return {
+        "id": user.id,
+        "email": user.email,
+        "role": user.role.value,
+        "status": user.status.value,
+        "emailVerified": True,
+        "emailVerifiedAt": user.emailVerifiedAt.isoformat(),
+        "createdAt": user.createdAt.isoformat(),
+        "lastLoginAt": user.lastLoginAt.isoformat() if user.lastLoginAt else None,
+    }
+
+
+def _adminUserPayload(user: Any) -> dict[str, Any]:
+    payload = _publicUserPayload(user)
+    payload.update(
+        {
+            "experimentCount": user.experimentCount,
+            "activityCount": user.activityCount,
+            "lastActivityAt": (user.lastActivityAt.isoformat() if user.lastActivityAt else None),
+        }
+    )
+    return payload
+
+
+def _authSessionPayload(user: PublicUser, *, csrfToken: str) -> dict[str, Any]:
+    return {
+        "authenticationRequired": True,
+        "authenticated": True,
+        "user": _publicUserPayload(user),
+        "csrfToken": csrfToken,
+    }
+
+
+def _setAuthCookie(response: Response, token: str, secure: bool) -> None:
+    response.set_cookie(
+        AUTH_COOKIE_NAME,
+        token,
+        max_age=7 * 24 * 60 * 60,
+        path="/",
+        secure=secure,
+        httponly=True,
+        samesite="lax",
+    )
+
+
+def _authenticationErrorResponse(
+    request: Request,
+    *,
+    code: str,
+    message: str,
+    statusCode: int,
+) -> JSONResponse:
+    response = JSONResponse(
+        status_code=statusCode,
+        content={
+            "error": {
+                "code": code,
+                "message": message,
+                "traceId": getattr(request.state, "traceId", None),
+            }
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+    _addSecurityHeaders(response, getattr(request.state, "traceId", "unknown"))
+    return response
 
 
 def _sessionId(sessionId: str) -> str:
@@ -1295,9 +1882,23 @@ def _sanitizeAcknowledgedEventPack(
 
 
 def _rateLimitRules(request: Request) -> list[RateLimitRule]:
-    if request.method not in {"POST", "PUT", "DELETE"}:
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
         return []
     path = request.url.path.rstrip("/")
+    clientIp = _clientIp(request)
+    if path.startswith("/api/v1/auth/"):
+        # 课堂演示时多个学生通常共用学校出口 IP，因此 IP 配额只承担异常流量
+        # 兜底；单邮箱仍受 60 秒发送冷却，单验证码仍只有 5 次尝试机会。
+        rules = [RateLimitRule(key=f"auth-write:ip:{clientIp}", limit=120, windowSeconds=300)]
+        if path == "/api/v1/auth/login":
+            rules.append(
+                RateLimitRule(key=f"auth-login:ip:{clientIp}", limit=30, windowSeconds=300)
+            )
+        if path == "/api/v1/auth/verification-code":
+            rules.append(
+                RateLimitRule(key=f"auth-code:ip:{clientIp}", limit=60, windowSeconds=3600)
+            )
+        return rules
     isExperimentCreate = path == "/api/v1/experiments"
     isStudyRun = path == "/api/v1/studies/run"
     isLimitedWrite = (
@@ -1320,8 +1921,10 @@ def _rateLimitRules(request: Request) -> list[RateLimitRule]:
     if not isLimitedWrite:
         return []
 
-    clientIp = _clientIp(request)
-    rawSessionId = request.headers.get("X-Session-ID", "missing-session")[:128]
+    rawSessionId = (
+        request.cookies.get(AUTH_COOKIE_NAME)
+        or request.headers.get("X-Session-ID", "missing-session")
+    )[:128]
     sessionDigest = hashlib.blake2s(rawSessionId.encode(), digest_size=8).hexdigest()
     rules = [
         RateLimitRule(key=f"write:ip:{clientIp}", limit=30),
@@ -1367,6 +1970,7 @@ def _addSecurityHeaders(response: Response, traceId: str) -> None:
 
 def _registerFrontendFallback(appInstance: FastAPI, frontendDist: Path) -> None:
     indexPath = frontendDist / "index.html"
+    faviconPath = frontendDist / "favicon.svg"
     if not indexPath.is_file():
         return
     resolvedRoot = frontendDist.resolve()
@@ -1376,6 +1980,8 @@ def _registerFrontendFallback(appInstance: FastAPI, frontendDist: Path) -> None:
         requestedPath = (resolvedRoot / frontendPath).resolve()
         if requestedPath.is_relative_to(resolvedRoot) and requestedPath.is_file():
             return FileResponse(requestedPath)
+        if frontendPath == "favicon.ico" and faviconPath.is_file():
+            return FileResponse(faviconPath, media_type="image/svg+xml")
         if frontendPath == "":
             return FileResponse(indexPath)
         return Response(status_code=404)

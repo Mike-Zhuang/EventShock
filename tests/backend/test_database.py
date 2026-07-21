@@ -1,3 +1,6 @@
+import hashlib
+import json
+import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -20,7 +23,12 @@ def test_initialize_marks_interrupted_experiment_retryable(tmp_path: Path) -> No
         requestData,
         None,
     )
-    database.updateExperiment("exp-recovery-test", status="RUNNING", started_at="now")
+    database.updateExperiment(
+        "exp-recovery-test",
+        "test-session-recovery",
+        status="RUNNING",
+        started_at="now",
+    )
 
     restartedDatabase = Database(databasePath)
     restartedDatabase.initialize()
@@ -69,6 +77,7 @@ def test_retention_removes_expired_terminal_results(tmp_path: Path) -> None:
     )
     database.updateExperiment(
         "exp-expired",
+        "test-session-retention",
         status="COMPLETED",
         result_json={"large": "result"},
         completed_at="2000-01-01T00:00:00+00:00",
@@ -93,6 +102,7 @@ def test_default_terminal_result_retention_is_ninety_days(tmp_path: Path) -> Non
         )
         database.updateExperiment(
             experimentId,
+            "test-session-default-retention",
             status="COMPLETED",
             result_json={"large": "result"},
             completed_at=(now - timedelta(days=ageDays)).isoformat(),
@@ -124,6 +134,34 @@ def test_retention_removes_stale_ready_and_rolls_session_history(tmp_path: Path)
 
     database.pruneSessionExperiments("test-session-ready-retention", maxRetained=1)
     assert database.countExperiments("test-session-ready-retention") == 1
+
+
+def test_retention_never_deletes_unowned_legacy_records(tmp_path: Path) -> None:
+    database = Database(tmp_path / "eventshock.db")
+    database.initialize()
+    database.saveScenario(
+        "scn-unowned-legacy",
+        "legacy-browser-session",
+        "Legacy scenario",
+        {"eventPackId": "spacex-synthetic-v1"},
+        False,
+    )
+    with database.connection() as connection:
+        connection.execute(
+            """
+            UPDATE scenarios
+            SET owner_user_id='', updated_at='2000-01-01T00:00:00+00:00'
+            WHERE id='scn-unowned-legacy'
+            """
+        )
+
+    database.enforceRetention(retentionDays=7)
+
+    with database.connection() as connection:
+        remaining = connection.execute(
+            "SELECT COUNT(*) FROM scenarios WHERE id='scn-unowned-legacy'"
+        ).fetchone()[0]
+    assert remaining == 1
 
 
 def test_audit_hash_chain_detects_history_tampering(tmp_path: Path) -> None:
@@ -226,6 +264,7 @@ def test_experiment_runtime_and_compressed_checkpoint_round_trip(tmp_path: Path)
 
     database.updateExperiment(
         "exp-checkpoint-roundtrip",
+        "checkpoint-session",
         runtime_json=runtime,
         checkpoint_blob=checkpoint,
         completed_pairs=1,
@@ -253,6 +292,7 @@ def test_retryable_claim_preserves_checkpoint_but_ready_claim_starts_clean(tmp_p
     database.createExperiment("exp-ready-clean", "checkpoint-session", request, None)
     database.updateExperiment(
         "exp-ready-clean",
+        "checkpoint-session",
         checkpoint_blob=checkpoint,
         completed_pairs=1,
     )
@@ -265,6 +305,7 @@ def test_retryable_claim_preserves_checkpoint_but_ready_claim_starts_clean(tmp_p
     database.createExperiment("exp-retry-resume", "checkpoint-session", request, None)
     database.updateExperiment(
         "exp-retry-resume",
+        "checkpoint-session",
         status="RUNNING",
         checkpoint_blob=checkpoint,
         completed_pairs=1,
@@ -318,6 +359,7 @@ def test_completed_experiment_invalidation_is_atomic_session_scoped_and_preserve
     result = {"manifest": {"engineVersion": "test-v1"}, "pairedRuns": [{"seed": 101}]}
     database.updateExperiment(
         "exp-invalidation",
+        "owner-session",
         status="COMPLETED",
         result_json=result,
         completed_at="2026-07-15T00:00:00+00:00",
@@ -363,3 +405,86 @@ def test_completed_experiment_invalidation_is_atomic_session_scoped_and_preserve
         invalidated["invalidationReason"]
         == "The model version failed a post-release validation check."
     )
+
+
+def test_legacy_anonymous_records_are_claimed_without_collisions_or_audit_rewrite(
+    tmp_path: Path,
+) -> None:
+    databasePath = tmp_path / "legacy.db"
+    with sqlite3.connect(databasePath) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE custom_event_packs (
+                session_id TEXT NOT NULL,
+                event_pack_id TEXT NOT NULL,
+                manifest_json TEXT NOT NULL,
+                claims_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (session_id, event_pack_id)
+            );
+            CREATE TABLE audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                previous_hash TEXT,
+                event_hash TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        for sessionId, title, createdAt in (
+            ("legacy-session-one", "Older pack", "2026-07-01T00:00:00+00:00"),
+            ("legacy-session-two", "Latest pack", "2026-07-02T00:00:00+00:00"),
+        ):
+            connection.execute(
+                """
+                INSERT INTO custom_event_packs(
+                    session_id, event_pack_id, manifest_json, claims_json,
+                    created_at, updated_at
+                ) VALUES (?, 'duplicate-pack', ?, '[]', ?, ?)
+                """,
+                (sessionId, json.dumps({"title": title}), createdAt, createdAt),
+            )
+            payloadJson = "{}"
+            material = "|".join(
+                (sessionId, "EVENT_PACK", "duplicate-pack", "CREATED", payloadJson, "", createdAt)
+            )
+            connection.execute(
+                """
+                INSERT INTO audit_events(
+                    session_id, entity_type, entity_id, action, payload_json,
+                    previous_hash, event_hash, created_at
+                ) VALUES (?, 'EVENT_PACK', 'duplicate-pack', 'CREATED', ?, NULL, ?, ?)
+                """,
+                (sessionId, payloadJson, hashlib.sha256(material.encode()).hexdigest(), createdAt),
+            )
+
+    database = Database(databasePath)
+    database.initialize()
+    before = database.countUnownedRecords()
+    assert before["custom_event_packs"] == 2
+    assert before["audit_events"] == 2
+
+    claimed = database.claimLegacyRecords("usr-admin-owner")
+
+    assert claimed["custom_event_packs"] == 2
+    assert claimed["audit_events"] == 2
+    assert all(count == 0 for count in database.countUnownedRecords().values())
+    assert all(count == 0 for count in database.claimLegacyRecords("usr-admin-owner").values())
+    packs = database.listCustomEventPacks("usr-admin-owner")
+    assert len(packs) == 1
+    assert packs[0]["title"] == "Latest pack"
+    verification = database.verifyAuditChain("usr-admin-owner")
+    assert verification["valid"] is True
+    assert verification["eventCount"] == 2
+    assert verification["chainCount"] == 2
+    with database.connection() as connection:
+        sessions = {
+            row["session_id"]
+            for row in connection.execute("SELECT session_id FROM audit_events").fetchall()
+        }
+    assert sessions == {"legacy-session-one", "legacy-session-two"}

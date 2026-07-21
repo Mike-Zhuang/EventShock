@@ -1,4 +1,7 @@
 import {
+  normalizeAdminActivityPage,
+  normalizeAdminUserPage,
+  normalizeAuthSession,
   normalizeCases,
   normalizeCognitionEvalSummary,
   normalizeCognitionEvaluationRun,
@@ -24,8 +27,12 @@ import {
   normalizeSystemMetrics,
   normalizeValidationLadder,
   normalizeValidation,
+  normalizeVerificationCodeReceipt,
 } from './normalize';
 import type {
+  AdminActivityPage,
+  AdminUserPage,
+  AuthSession,
   CaseSummary,
   ClaimReviewInput,
   EventPack,
@@ -57,10 +64,19 @@ import type {
   StudyRunRecord,
   SystemMetrics,
   ValidationLadderView,
+  VerificationCodeReceipt,
+  VerificationPurpose,
 } from './types';
 
 const API_BASE = '/api';
 const SESSION_STORAGE_KEY = 'eventshockSessionId';
+export const AUTH_SESSION_EXPIRED_EVENT = 'eventshock:auth-session-expired';
+
+let csrfToken: string | undefined;
+
+export function setCsrfToken(nextToken?: string): void {
+  csrfToken = nextToken;
+}
 
 function getSessionId(): string {
   const existing = window.localStorage.getItem(SESSION_STORAGE_KEY);
@@ -88,25 +104,38 @@ export class ApiError extends Error {
 
 interface RequestOptions extends RequestInit {
   timeoutMs?: number;
+  broadcastUnauthorized?: boolean;
 }
 
 async function requestJson(path: string, options: RequestOptions = {}): Promise<unknown> {
+  const {
+    timeoutMs = 12_000,
+    broadcastUnauthorized = true,
+    ...requestOptions
+  } = options;
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), options.timeoutMs ?? 12_000);
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
+    const method = (requestOptions.method ?? 'GET').toUpperCase();
+    const isWrite = !['GET', 'HEAD', 'OPTIONS'].includes(method);
     const response = await fetch(`${API_BASE}${path}`, {
-      ...options,
+      ...requestOptions,
+      credentials: requestOptions.credentials ?? 'same-origin',
       headers: {
         Accept: 'application/json',
         'X-Session-ID': getSessionId(),
-        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
-        ...options.headers,
+        ...(requestOptions.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(isWrite && csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+        ...requestOptions.headers,
       },
       signal: controller.signal,
     });
     const contentType = response.headers.get('content-type') ?? '';
     const payload = contentType.includes('application/json') ? await response.json() as unknown : await response.text();
     if (!response.ok) {
+      if (response.status === 401 && broadcastUnauthorized) {
+        window.dispatchEvent(new Event(AUTH_SESSION_EXPIRED_EVENT));
+      }
       const payloadRecord = typeof payload === 'object' && payload !== null ? payload as Record<string, unknown> : undefined;
       const nestedError = payloadRecord && typeof payloadRecord.error === 'object' && payloadRecord.error !== null
         ? payloadRecord.error as Record<string, unknown>
@@ -143,6 +172,74 @@ export const api = {
       service: typeof record.service === 'string' ? record.service : undefined,
       version: typeof record.version === 'string' ? record.version : undefined,
     };
+  },
+
+  async getAuthSession(): Promise<AuthSession> {
+    return normalizeAuthSession(await requestJson('/v1/auth/session', {
+      timeoutMs: 8_000,
+      broadcastUnauthorized: false,
+    }));
+  },
+
+  async login(input: { email: string; password: string; language: 'en' | 'zh-CN' }): Promise<AuthSession> {
+    return normalizeAuthSession(await requestJson('/v1/auth/login', {
+      method: 'POST',
+      body: JSON.stringify(input),
+      broadcastUnauthorized: false,
+    }));
+  },
+
+  async logout(): Promise<void> {
+    await requestJson('/v1/auth/logout', { method: 'POST' });
+  },
+
+  async requestVerificationCode(input: {
+    email: string;
+    purpose: VerificationPurpose;
+    language: 'en' | 'zh-CN';
+  }): Promise<VerificationCodeReceipt> {
+    return normalizeVerificationCodeReceipt(await requestJson('/v1/auth/verification-code', {
+      method: 'POST',
+      body: JSON.stringify(input),
+      broadcastUnauthorized: false,
+    }));
+  },
+
+  async register(input: {
+    email: string;
+    password: string;
+    verificationCode: string;
+    language: 'en' | 'zh-CN';
+  }): Promise<AuthSession> {
+    return normalizeAuthSession(await requestJson('/v1/auth/register', {
+      method: 'POST',
+      body: JSON.stringify(input),
+      broadcastUnauthorized: false,
+    }));
+  },
+
+  async resetPassword(input: {
+    email: string;
+    password: string;
+    verificationCode: string;
+    language: 'en' | 'zh-CN';
+  }): Promise<void> {
+    await requestJson('/v1/auth/password-reset', {
+      method: 'POST',
+      body: JSON.stringify(input),
+      broadcastUnauthorized: false,
+    });
+  },
+
+  async getAdminUsers(limit = 25, offset = 0): Promise<AdminUserPage> {
+    const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    return normalizeAdminUserPage(await requestJson(`/v1/admin/users?${query.toString()}`));
+  },
+
+  async getAdminActivity(limit = 50, offset = 0, userId?: string): Promise<AdminActivityPage> {
+    const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    if (userId) query.set('userId', userId);
+    return normalizeAdminActivityPage(await requestJson(`/v1/admin/activity?${query.toString()}`));
   },
 
   async getCases(): Promise<CaseSummary[]> {
@@ -362,6 +459,7 @@ export const api = {
     const response = await fetch(
       `${API_BASE}/v1/experiments/${encodeURIComponent(experimentId)}/events`,
       {
+        credentials: 'same-origin',
         headers: {
           Accept: 'text/event-stream',
           'X-Session-ID': getSessionId(),
@@ -371,6 +469,7 @@ export const api = {
       },
     );
     if (!response.ok) {
+      if (response.status === 401) window.dispatchEvent(new Event(AUTH_SESSION_EXPIRED_EVENT));
       const detail = await response.text();
       throw new ApiError(detail || 'Experiment event stream could not be opened.', response.status, detail);
     }
@@ -445,9 +544,15 @@ export const api = {
   async exportExperiment(experimentId: string): Promise<Blob> {
     const response = await fetch(
       `${API_BASE}/v1/experiments/${encodeURIComponent(experimentId)}/export`,
-      { headers: { Accept: 'application/zip, application/json', 'X-Session-ID': getSessionId() } },
+      {
+        credentials: 'same-origin',
+        headers: { Accept: 'application/zip, application/json', 'X-Session-ID': getSessionId() },
+      },
     );
-    if (!response.ok) throw new ApiError('Export request failed.', response.status);
+    if (!response.ok) {
+      if (response.status === 401) window.dispatchEvent(new Event(AUTH_SESSION_EXPIRED_EVENT));
+      throw new ApiError('Export request failed.', response.status);
+    }
     return await response.blob();
   },
 };

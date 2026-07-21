@@ -88,6 +88,7 @@ def test_experiment_sse_emits_terminal_public_state_and_closes(tmp_path: Path) -
         )
         database.updateExperiment(
             "exp-sse-terminal",
+            SESSION_A,
             status="COMPLETED",
             progress=1.0,
             completed_pairs=10,
@@ -114,13 +115,17 @@ def test_spa_root_supports_head_without_capturing_api_paths(tmp_path: Path) -> N
     frontendDist = tmp_path / "frontend-dist"
     frontendDist.mkdir()
     (frontendDist / "index.html").write_text("<html>EventShock</html>", encoding="utf-8")
+    (frontendDist / "favicon.svg").write_text("<svg></svg>", encoding="utf-8")
     with TestClient(createApp(tmp_path / "data", frontendDist=frontendDist)) as client:
         rootResponse = client.head("/")
+        legacyFaviconResponse = client.get("/favicon.ico")
         apiResponse = client.head("/api/v1/unknown-route")
         scannerResponse = client.get("/.git/HEAD")
 
     assert rootResponse.status_code == 200
     assert rootResponse.content == b""
+    assert legacyFaviconResponse.status_code == 200
+    assert legacyFaviconResponse.headers["content-type"].startswith("image/svg+xml")
     assert apiResponse.status_code == 404
     assert apiResponse.headers["X-Trace-ID"].startswith("http-")
     assert scannerResponse.status_code == 404
@@ -381,6 +386,7 @@ def test_experiment_subresources_and_invalidation_contract(tmp_path: Path) -> No
         )
         client.app.state.database.updateExperiment(
             experimentId,
+            SESSION_A,
             status="COMPLETED",
             result_json=persistedResult,
             progress=1.0,
@@ -619,6 +625,7 @@ def test_retryable_experiment_resumes_verified_matched_pair_checkpoint(tmp_path:
         )
         database.updateExperiment(
             experimentId,
+            SESSION_A,
             status="FAILED_RETRYABLE",
             error_code="SERVER_RESTARTED",
             completed_pairs=1,

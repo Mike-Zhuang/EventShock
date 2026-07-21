@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildHistogram,
+  normalizeAdminActivityPage,
+  normalizeAdminUserPage,
+  normalizeAuthSession,
   normalizeCases,
   normalizeCognitionEvalSummary,
   normalizeCognitionEvaluationRun,
@@ -19,9 +22,47 @@ import {
   normalizeSystemMetrics,
   normalizeValidation,
   normalizeValidationLadder,
+  normalizeVerificationCodeReceipt,
 } from './normalize';
 
 describe('API normalizers', () => {
+  it('normalizes authenticated accounts, verification receipts, and privacy-minimized admin records', () => {
+    expect(normalizeAuthSession({
+      authentication_required: true,
+      authenticated: true,
+      csrf_token: 'csrf-test',
+      user: {
+        id: 'user-1',
+        email: 'analyst@example.com',
+        role: 'ADMIN',
+        email_verified_at: '2026-07-20T00:00:00Z',
+        created_at: '2026-07-20T00:00:00Z',
+      },
+    })).toMatchObject({ authenticated: true, csrfToken: 'csrf-test', user: { role: 'ADMIN', emailVerified: true } });
+    expect(normalizeVerificationCodeReceipt({ retry_after_seconds: 45, expires_in_seconds: 600 }))
+      .toEqual({ accepted: true, retryAfterSeconds: 45, expiresInSeconds: 600 });
+    expect(normalizeAdminUserPage({
+      total: 1,
+      summary: { total_users: 1, verified_users: 1, active_users_7d: 1, total_activities: 4 },
+      items: [{
+        id: 'user-1', email: 'analyst@example.com', role: 'ADMIN', email_verified: true,
+        created_at: '2026-07-20T00:00:00Z', status: 'ACTIVE', activity_count: 4,
+      }],
+    })).toMatchObject({
+      total: 1,
+      summary: { totalActivities: 4 },
+      items: [{ activityCount: 4, experimentCount: 0 }],
+    });
+    expect(normalizeAdminActivityPage({
+      total: 1,
+      items: [{
+        id: 'activity-1', user_id: null, action: 'EXPERIMENT_START',
+        entity_type: 'EXPERIMENT', entity_id: 'exp-1', status: 'FAILED',
+        created_at: '2026-07-20T01:00:00Z',
+      }],
+    })).toMatchObject({ total: 1, items: [{ entityId: 'exp-1', outcome: 'FAILED' }] });
+  });
+
   it('preserves Study validity boundaries, resource limits, and immutable run metadata', () => {
     const catalog = normalizeStudyPresetCatalog({
       schemaVersion: '1.0.0',

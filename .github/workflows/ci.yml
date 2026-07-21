@@ -117,6 +117,11 @@ jobs:
       - name: Smoke test production image
         run: |
           set -Eeuo pipefail
+          install -d -m 0755 .eventshock-secrets
+          printf '%s\n' 'ci-auth-secret-with-at-least-thirty-two-bytes' > .eventshock-secrets/auth-secret
+          printf '%s\n' 'ci-smtp-password' > .eventshock-secrets/smtp-password
+          chmod 0444 .eventshock-secrets/auth-secret .eventshock-secrets/smtp-password
+          chmod 0555 .eventshock-secrets
           container_id="$(docker run --detach \
             --read-only \
             --tmpfs /tmp:size=64m,mode=1777 \
@@ -125,10 +130,20 @@ jobs:
             --security-opt no-new-privileges:true \
             --pids-limit 256 \
             --publish 127.0.0.1:18000:8000 \
+            --volume "$PWD/.eventshock-secrets:/run/secrets/eventshock:ro" \
+            --env APP_ENV=production \
             --env EVENTSHOCK_RELEASE_COMMIT=${{ github.sha }} \
+            --env EVENTSHOCK_ADMIN_EMAIL=admin@example.com \
+            --env EVENTSHOCK_AUTH_SECRET_FILE=/run/secrets/eventshock/auth-secret \
+            --env EVENTSHOCK_SMTP_HOST=smtp.example.com \
+            --env EVENTSHOCK_SMTP_PORT=465 \
+            --env EVENTSHOCK_SMTP_USERNAME=sender@example.com \
+            --env EVENTSHOCK_SMTP_PASSWORD_FILE=/run/secrets/eventshock/smtp-password \
+            --env EVENTSHOCK_SMTP_SENDER=sender@example.com \
             eventshock-ci:${{ github.sha }})"
           cleanup() {
             docker rm --force "${container_id}" >/dev/null 2>&1 || true
+            rm -rf .eventshock-secrets
           }
           trap cleanup EXIT
           for _attempt in $(seq 1 40); do
@@ -143,5 +158,8 @@ jobs:
           done
           test "$(docker inspect --format '{{.State.Health.Status}}' "${container_id}")" = "healthy"
           curl --fail --silent --show-error http://127.0.0.1:18000/ | grep --fixed-strings '<title>EventShock Lab</title>'
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:18000/api/v1/cases)" = "401"
+          curl --fail --silent --show-error http://127.0.0.1:18000/api/v1/auth/session \
+            | grep --fixed-strings '"authenticated":false'
           docker exec "${container_id}" python -c \
             "import json, urllib.request; value=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/health')); assert value['status']=='ok'; assert value['releaseCommit']=='${{ github.sha }}'"
