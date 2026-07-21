@@ -109,6 +109,7 @@ describe('移动主导航', () => {
     expect(window.location.hash).toBe(`#/results?experimentId=${experimentId}`);
   });
 
+  // 该集成用例会懒加载完整 Results 页；GitHub 共享 runner 上首次模块转换可超过 Vitest 默认 5 秒。
   it('从结果页切换历史实验时不会被旧深链重新选回', async () => {
     const user = userEvent.setup();
     const experiments = ['exp-history-a', 'exp-history-b'].map((id) => ({
@@ -165,7 +166,7 @@ describe('移动主导航', () => {
     await waitFor(() => expect(window.location.hash).toBe(buildAppHash('results', experiments[1].id)));
     expect(api.getResults).toHaveBeenCalledWith(experiments[1].id);
     expect(vi.mocked(api.getExperiment).mock.calls.at(-1)?.[0]).toBe(experiments[1].id);
-  });
+  }, 15_000);
 
   it('replaceState 导航离开结果深链后不会被迟到的初始恢复覆盖', async () => {
     const user = userEvent.setup();
