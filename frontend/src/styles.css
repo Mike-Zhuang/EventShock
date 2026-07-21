@@ -298,12 +298,20 @@ code {
 .sidebar nav,
 .mobile-navigation nav {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   padding: 18px 10px;
+}
+
+.navigation-section {
+  display: grid;
+  width: 100%;
+  min-width: 0;
 }
 
 .sidebar nav button,
 .mobile-navigation nav button {
   display: grid;
+  width: 100%;
   min-height: 46px;
   grid-template-columns: 26px minmax(0, 1fr);
   align-items: center;
@@ -2799,9 +2807,12 @@ code {
   accent-color: var(--accent);
 }
 
-.native-check-row strong {
+.native-check-row__label {
+  min-width: 0;
   font-size: 12px;
   font-weight: 500;
+  line-height: 1.45;
+  overflow-wrap: break-word;
 }
 
 .check-row--warning > div:first-child {

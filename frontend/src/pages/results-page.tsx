@@ -593,7 +593,7 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
                   lowContrast
                   hideCloseButton
                   title={language === 'zh-CN' ? '可审计费用边界' : 'Auditable cost boundary'}
-                  subtitle={`${results.cognition.costBudget.semantics} Snapshot: ${results.cognition.costBudget.pricingSnapshotVersion}; ¥${results.cognition.costBudget.cnyPerUsdBudgetFloor.toFixed(2)}/$.`}
+                  subtitle={`${results.cognition.costBudget.semantics} Snapshot: ${results.cognition.costBudget.pricingSnapshotVersion}${results.cognition.costBudget.fxConversionApplied ? `; ¥${results.cognition.costBudget.cnyPerUsdBudgetFloor.toFixed(2)}/$.` : '.'}`}
                 />
               ) : null}
               {results.cognition.decisions.length > 0 ? (

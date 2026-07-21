@@ -261,6 +261,27 @@ describe('移动主导航', () => {
     expect(menuButton).toHaveAttribute('aria-expanded', 'true');
   });
 
+  it('桌面与移动导航项共享占满分组宽度的结构契约', async () => {
+    render(<App />);
+
+    await screen.findByRole('heading', { name: 'Case Library' });
+    const navigationContainers = [
+      document.querySelector<HTMLElement>('.sidebar nav'),
+      document.querySelector<HTMLElement>('.mobile-navigation nav'),
+    ];
+
+    navigationContainers.forEach((navigation) => {
+      expect(navigation).not.toBeNull();
+      if (!navigation) return;
+      const items = Array.from(navigation.querySelectorAll<HTMLButtonElement>('button.navigation-item'));
+      expect(items.length).toBeGreaterThan(0);
+      items.forEach((item) => {
+        expect(item).toHaveClass('navigation-item');
+        expect(item.parentElement).toHaveClass('navigation-section');
+      });
+    });
+  });
+
   it('默认英文首屏明确展示主要目标用户及其工作场景', async () => {
     render(<App />);
 

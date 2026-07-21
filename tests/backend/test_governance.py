@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from backend.app.cognition.catalog import ZHIPU_CHAT_MODELS
+from backend.app.cognition.catalog import listModels
 from backend.app.cognition.prompts import PROMPT_REGISTRY
 from backend.app.governance.redteam import (
     RED_TEAM_CASES,
@@ -59,12 +59,21 @@ def test_component_inventory_is_strict_complete_and_runtime_aligned() -> None:
     }
     assert requiredKinds.issubset({record.kind for record in COMPONENT_INVENTORY})
 
-    providerModelIds = {
-        record.modelDetails.modelId
+    providerModelRoutes = {
+        (record.modelDetails.provider, record.modelDetails.modelId)
         for record in listComponents(kind=ComponentKind.PROVIDER_MODEL)
         if record.modelDetails is not None
     }
-    assert providerModelIds == {model.model_id for model in ZHIPU_CHAT_MODELS}
+    assert providerModelRoutes == {(model.provider, model.model_id) for model in listModels()}
+    assert {provider for provider, _model in providerModelRoutes} == {
+        "zhipu",
+        "openai",
+        "anthropic",
+        "google",
+        "deepseek",
+        "alibaba",
+        "moonshot",
+    }
     assert all(
         record.approvalStatus is ApprovalStatus.PENDING_HUMAN_EVIDENCE
         for record in listComponents(kind=ComponentKind.PROVIDER_MODEL)
@@ -104,6 +113,11 @@ def test_red_team_registry_covers_every_required_attack_category() -> None:
     assert validateRedTeamCases() == ()
     assert {case.category for case in RED_TEAM_CASES} == REQUIRED_RED_TEAM_CATEGORIES
     assert len(RED_TEAM_CASES) >= 10
+    componentIds = {record.componentId for record in COMPONENT_INVENTORY}
+    assert all(set(case.targetComponentIds) <= componentIds for case in RED_TEAM_CASES)
+    assert all(
+        "cognition.zhipu-rest-gateway" not in case.targetComponentIds for case in RED_TEAM_CASES
+    )
     assert {category.value for category in RedTeamCategory} == {
         "PROMPT_INJECTION",
         "FUTURE_LEAKAGE",
@@ -116,6 +130,18 @@ def test_red_team_registry_covers_every_required_attack_category() -> None:
         "EXPORT_TRAVERSAL",
         "SECRET_DISCLOSURE",
     }
+
+
+def test_red_team_validation_rejects_a_stale_component_target() -> None:
+    staleCase = RED_TEAM_CASES[0].model_copy(
+        update={"targetComponentIds": ("cognition.retired-provider-gateway",)}
+    )
+    errors = validateRedTeamCases((staleCase, *RED_TEAM_CASES[1:]))
+
+    assert errors == (
+        "red-team case rt-prompt-injection-001 targets unknown components: "
+        "cognition.retired-provider-gateway",
+    )
 
 
 def test_red_team_case_scoring_is_deterministic_and_critical_failure_blocks() -> None:

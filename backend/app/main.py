@@ -53,12 +53,19 @@ from backend.app.cognition import (
     EvalSample,
     ExternalEvidenceSource,
     ModelGatewayError,
-    getZhipuTokenPrice,
+)
+from backend.app.cognition.catalog import (
+    DEFAULT_PROVIDER,
+    listProviders,
+)
+from backend.app.cognition.catalog import (
+    listModels as listCognitionModels,
 )
 from backend.app.cognition.golden_suite import (
     builtInEvalCases,
     codeGraderSelfTestSamples,
 )
+from backend.app.cognition.pricing import getTokenPrice
 from backend.app.config import loadSettings
 from backend.app.database import Database
 from backend.app.errors import ApiError
@@ -714,13 +721,16 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 )
                 if extraction.event_pack_claims:
                     claims = list(extraction.event_pack_claims)
+                    providerLabel = extraction.provider.upper()
                     extractionMode = (
-                        f"ZHIPU_{extraction.model}_FALLBACK"
+                        f"{providerLabel}_{extraction.model}_FALLBACK"
                         if extraction.fallback_used
-                        else f"ZHIPU_{extraction.model}"
+                        else f"{providerLabel}_{extraction.model}"
                     )
                 else:
-                    extractionMode = f"ZHIPU_{extraction.model}_ABSTAINED_RULE_FALLBACK"
+                    extractionMode = (
+                        f"{extraction.provider.upper()}_{extraction.model}_ABSTAINED_RULE_FALLBACK"
+                    )
             except CredentialNotConfiguredError:
                 extractionMode = "RULE_FALLBACK_LLM_CONFIG_EXPIRED"
             except ModelGatewayError as error:
@@ -735,52 +745,108 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
 
     @appInstance.get("/api/v1/models")
     async def listModels(request: Request) -> dict[str, Any]:
-        cognition: CognitionService = request.app.state.cognitionService
-        models: list[dict[str, Any]] = []
-        for model in cognition.getModelCatalog():
-            price = getZhipuTokenPrice(model.model_id)
-            models.append(
+        del request
+
+        def modelPayload(model: Any) -> dict[str, Any]:
+            price = getTokenPrice(model.provider, model.model_id)
+            return {
+                "provider": model.provider,
+                "id": model.model_id,
+                "name": model.display_name,
+                "contextTokens": model.context_tokens,
+                "maxOutputTokens": model.max_output_tokens,
+                "officialMaxOutputTokens": model.official_max_output_tokens,
+                "applicationMaxOutputTokens": model.max_output_tokens,
+                "supportsJsonObject": model.supports_json_object,
+                "supportsJsonSchema": model.supports_json_schema,
+                "supportsFunctionCalling": model.supports_function_calling,
+                "supportsThinking": model.supports_thinking,
+                "thinkingAlwaysOn": model.thinking_behavior == "always",
+                "structuredOutputMode": model.structured_output_mode,
+                "qualityTier": model.quality_tier,
+                "recommended": model.recommended,
+                "freeTier": model.free_tier,
+                "legacy": model.legacy,
+                "deprecationNote": model.deprecation_note,
+                "capabilityNote": model.capability_note,
+                "region": model.region,
+                "officialModelUrl": model.official_model_url,
+                "catalogVerifiedAt": model.verified_at,
+                "pricingStatus": (
+                    "VERIFIED_UPPER_BOUND" if price is not None else "UNAVAILABLE_FAIL_CLOSED"
+                ),
+                "billingCurrency": price.currency if price is not None else None,
+                "inputRateUpperPerMillion": (
+                    float(price.listInputPerMillion) if price is not None else None
+                ),
+                "cachedInputRatePerMillion": (
+                    float(price.listCachedInputPerMillion)
+                    if price is not None and price.listCachedInputPerMillion is not None
+                    else None
+                ),
+                "outputRateUpperPerMillion": (
+                    float(price.listOutputPerMillion) if price is not None else None
+                ),
+                "budgetInputRateUpperPerMillion": (
+                    float(price.budgetInputUpperBoundPerMillion) if price is not None else None
+                ),
+                "budgetOutputRateUpperPerMillion": (
+                    float(price.budgetOutputUpperBoundPerMillion) if price is not None else None
+                ),
+                "pricingVerifiedAt": price.verifiedAt if price is not None else None,
+                "pricingNote": price.pricingNote if price is not None else None,
+            }
+
+        providerPayloads: list[dict[str, Any]] = []
+        for provider in listProviders():
+            providerModels = [
+                modelPayload(model) for model in listCognitionModels(provider.provider)
+            ]
+            structuredModes = sorted({item["structuredOutputMode"] for item in providerModels})
+            providerPayloads.append(
                 {
-                    "id": model.model_id,
-                    "name": model.display_name,
-                    "contextTokens": model.context_tokens,
-                    "maxOutputTokens": model.max_output_tokens,
-                    "supportsJsonObject": model.supports_json_object,
-                    "supportsFunctionCalling": model.supports_function_calling,
-                    "supportsThinking": model.supports_thinking,
-                    "recommended": model.recommended,
-                    "freeTier": model.free_tier,
-                    "legacy": model.legacy,
-                    "deprecationNote": model.deprecation_note,
-                    "pricingStatus": (
-                        "VERIFIED_UPPER_BOUND" if price is not None else "UNAVAILABLE_FAIL_CLOSED"
+                    "id": provider.provider,
+                    "name": provider.display_name,
+                    "baseUrl": provider.api_endpoint,
+                    "apiStyle": provider.api_style,
+                    "authMode": provider.auth_mode,
+                    "documentationUrl": provider.official_docs_url,
+                    "pricingUrl": provider.official_pricing_url,
+                    "region": provider.region,
+                    "defaultModel": provider.default_model_id,
+                    "catalogVerifiedAt": provider.verified_at,
+                    "structuredOutputMode": "/".join(structuredModes),
+                    "structuredOutputNote": (
+                        "Native JSON Schema is requested and every response is still "
+                        "validated locally against the application schema."
+                        if structuredModes == ["json_schema"]
+                        else "JSON-object mode is requested and every response is then "
+                        "validated locally against the application schema."
                     ),
-                    "billingCurrency": "CNY" if price is not None else None,
-                    "inputRateUpperCnyPerMillion": (
-                        float(price.inputCnyPerMillion) if price is not None else None
-                    ),
-                    "outputRateUpperCnyPerMillion": (
-                        float(price.outputCnyPerMillion) if price is not None else None
-                    ),
-                    "pricingVerifiedAt": price.verifiedAt if price is not None else None,
-                    "pricingNote": price.pricingNote if price is not None else None,
+                    "models": providerModels,
                 }
             )
+
+        defaultProvider = next(item for item in providerPayloads if item["id"] == DEFAULT_PROVIDER)
         return {
-            "provider": "zhipu",
-            "providerName": "Zhipu AI",
-            "baseUrl": "https://open.bigmodel.cn/api/paas/v4/",
-            "documentationUrl": "https://docs.bigmodel.cn/cn/guide/start/model-overview",
-            "pricingUrl": "https://bigmodel.cn/pricing",
+            "defaultProvider": DEFAULT_PROVIDER,
+            "providers": providerPayloads,
+            # 保留旧的单供应商字段，便于已部署前端平滑升级。
+            "provider": defaultProvider["id"],
+            "providerName": defaultProvider["name"],
+            "baseUrl": defaultProvider["baseUrl"],
+            "documentationUrl": defaultProvider["documentationUrl"],
+            "pricingUrl": defaultProvider["pricingUrl"],
             "pricingSnapshotVersion": PRICING_SNAPSHOT_VERSION,
             "fxSourceUrl": FX_SOURCE_URL,
             "officialFxSnapshotCnyPerUsd": float(OFFICIAL_FX_SNAPSHOT_CNY_PER_USD),
             "cnyPerUsdBudgetFloor": float(CNY_PER_USD_BUDGET_FLOOR),
             "costCapSemantics": (
-                "Verified public CNY list-price upper bounds converted with a conservative "
-                "frozen FX floor; unknown prices fail closed before dispatch."
+                "Verified public list-price upper bounds retain their source currency; CNY "
+                "rates use a conservative frozen FX floor for the USD hard cap, while USD "
+                "rates need no conversion. Unknown prices fail closed before dispatch."
             ),
-            "models": models,
+            "models": defaultProvider["models"],
         }
 
     @appInstance.get("/api/v1/prompts")
@@ -816,6 +882,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 sessionId=credentialId,
                 apiKey=config.apiKey,
                 model=config.model,
+                provider=config.provider,
                 thinkingEnabled=config.thinkingEnabled,
                 maxTokens=config.maxTokens,
             )
@@ -824,7 +891,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         database.appendAuditEvent(
             ownerUserId,
             "MODEL_CONFIG",
-            "zhipu-session-config",
+            f"{config.provider}-session-config",
             "CONFIGURED",
             {
                 "provider": config.provider,
@@ -848,7 +915,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         database.appendAuditEvent(
             ownerUserId,
             "MODEL_CONFIG",
-            "zhipu-session-config",
+            "provider-session-config",
             "CLEARED",
             {"credentialWasPresent": cleared},
         )
@@ -907,11 +974,12 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             samples = codeGraderSelfTestSamples(cases)
             evaluatedSystem = "DETERMINISTIC_CODE_GRADER"
         else:
-            if not cognition.getConfig(credentialId).configured:
+            liveConfig = cognition.getConfig(credentialId)
+            if not liveConfig.configured:
                 raise ApiError(
                     "LLM_CREDENTIAL_NOT_CONFIGURED",
                     409,
-                    "Configure a session-scoped Zhipu API key before running the live suite.",
+                    "Configure a session-scoped provider API key before running the live suite.",
                 )
             liveSamples: list[EvalSample] = []
             for case in cases:
@@ -932,6 +1000,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 modelRuns.append(
                     {
                         "caseId": case.case_id,
+                        "provider": modelRun.provider,
                         "model": modelRun.model,
                         "requestId": modelRun.request_id,
                         "cacheHit": modelRun.cache_hit,
@@ -942,7 +1011,8 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                     }
                 )
             samples = tuple(liveSamples)
-            evaluatedSystem = "LIVE_CONFIGURED_ZHIPU_MODEL"
+            configuredProvider = liveConfig.provider or DEFAULT_PROVIDER
+            evaluatedSystem = f"LIVE_CONFIGURED_{configuredProvider.upper()}_MODEL"
         result = cognition.runEvaluation(samples)
         database: Database = request.app.state.database
         database.appendAuditEvent(
@@ -1238,13 +1308,17 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 )
                 if llmExtraction.event_pack_claims:
                     claims = list(llmExtraction.event_pack_claims)
+                    providerLabel = llmExtraction.provider.upper()
                     extractionMode = (
-                        f"ZHIPU_{llmExtraction.model}_FALLBACK"
+                        f"{providerLabel}_{llmExtraction.model}_FALLBACK"
                         if llmExtraction.fallback_used
-                        else f"ZHIPU_{llmExtraction.model}"
+                        else f"{providerLabel}_{llmExtraction.model}"
                     )
                 else:
-                    extractionMode = f"ZHIPU_{llmExtraction.model}_ABSTAINED_RULE_FALLBACK"
+                    extractionMode = (
+                        f"{llmExtraction.provider.upper()}_{llmExtraction.model}_"
+                        "ABSTAINED_RULE_FALLBACK"
+                    )
             except CredentialNotConfiguredError:
                 extractionMode = "RULE_FALLBACK_LLM_CONFIG_EXPIRED"
             except ModelGatewayError as error:

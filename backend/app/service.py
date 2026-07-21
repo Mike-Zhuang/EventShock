@@ -40,8 +40,8 @@ from backend.app.cognition import (
     TrustProfile,
     VolatilityRegime,
     estimateReservation,
-    getZhipuTokenPrice,
 )
+from backend.app.cognition.pricing import getTokenPrice
 from backend.app.database import Database, utcNow
 from backend.app.errors import ApiError
 from backend.app.export import buildParquetArtifacts
@@ -849,19 +849,22 @@ class EventPackService:
                 target = warnings if requestData.llmPolicy.fallbackToRules else errors
                 target.append({"code": "LLM_CREDENTIAL_NOT_CONFIGURED", "message": message})
                 addCheck("LLM_RUNTIME_CONFIG", status, message)
-            elif configView.model != requestData.llmPolicy.modelId:
+            elif (
+                configView.provider != requestData.llmPolicy.provider
+                or configView.model != requestData.llmPolicy.modelId
+            ):
                 errors.append(
                     {
-                        "code": "LLM_MODEL_CONFIG_MISMATCH",
+                        "code": "LLM_PROVIDER_MODEL_CONFIG_MISMATCH",
                         "message": (
-                            "The scenario model does not match the session model configuration."
+                            "The scenario provider/model does not match the session configuration."
                         ),
                     }
                 )
                 addCheck(
                     "LLM_RUNTIME_CONFIG",
                     "FAIL",
-                    "The scenario model and configured session model differ.",
+                    "The scenario provider/model and configured session route differ.",
                 )
             else:
                 addCheck(
@@ -891,7 +894,10 @@ class EventPackService:
                 )
 
             try:
-                tokenPrice = getZhipuTokenPrice(requestData.llmPolicy.modelId)
+                tokenPrice = getTokenPrice(
+                    requestData.llmPolicy.provider,
+                    requestData.llmPolicy.modelId,
+                )
             except ValueError:
                 tokenPrice = None
             if tokenPrice is None:
@@ -910,42 +916,64 @@ class EventPackService:
                     configView.max_tokens
                     if configView is not None
                     and configView.configured
+                    and configView.provider == requestData.llmPolicy.provider
                     and configView.model == requestData.llmPolicy.modelId
                     and configView.max_tokens is not None
                     else 2_048
                 )
-                reservation = estimateReservation(
-                    modelId=requestData.llmPolicy.modelId,
-                    maxOutputTokens=configuredMaxTokens,
-                    policy=ModelPolicy(),
-                )
-                minimumReservationUsd = float(reservation.maximumUsd)
-                if reservation.maximumUsd > requestData.llmPolicy.maxCostUsd:
+                try:
+                    reservation = estimateReservation(
+                        modelId=requestData.llmPolicy.modelId,
+                        maxOutputTokens=configuredMaxTokens,
+                        policy=ModelPolicy(),
+                        provider=requestData.llmPolicy.provider,
+                    )
+                except (ModelGatewayError, ValueError) as error:
                     status = "WARN" if requestData.llmPolicy.fallbackToRules else "FAIL"
                     message = (
-                        "The configured cap is below the worst-case reservation for one "
-                        "response plus one repair; the runtime will not dispatch the model."
+                        "The model has no verified executable output limit; the runtime will "
+                        "fail closed to deterministic rules without sending a model request."
+                        if requestData.llmPolicy.fallbackToRules
+                        else "Hybrid mode requires a verified executable model output limit."
                     )
                     target = warnings if requestData.llmPolicy.fallbackToRules else errors
-                    target.append({"code": "LLM_COST_CAP_INSUFFICIENT", "message": message})
+                    target.append(
+                        {
+                            "code": "LLM_OUTPUT_LIMIT_UNAVAILABLE",
+                            "message": message,
+                            "detail": str(error),
+                        }
+                    )
                     addCheck("LLM_COST_CONTROL", status, message)
                 else:
-                    addCheck(
-                        "LLM_COST_CONTROL",
-                        "PASS",
-                        (
-                            "The USD cap can reserve every allowed full-context transport "
-                            "attempt for the initial response and one repair; each call settles "
-                            "against provider-reported input/output tokens."
-                        ),
-                    )
+                    minimumReservationUsd = float(reservation.maximumUsd)
+                    if reservation.maximumUsd > requestData.llmPolicy.maxCostUsd:
+                        status = "WARN" if requestData.llmPolicy.fallbackToRules else "FAIL"
+                        message = (
+                            "The configured cap is below the worst-case reservation for one "
+                            "response plus one repair; the runtime will not dispatch the model."
+                        )
+                        target = warnings if requestData.llmPolicy.fallbackToRules else errors
+                        target.append({"code": "LLM_COST_CAP_INSUFFICIENT", "message": message})
+                        addCheck("LLM_COST_CONTROL", status, message)
+                    else:
+                        addCheck(
+                            "LLM_COST_CONTROL",
+                            "PASS",
+                            (
+                                "The USD cap can reserve every allowed full-context transport "
+                                "attempt for the initial response and one repair; each call "
+                                "settles against provider-reported input/output tokens."
+                            ),
+                        )
                 warnings.append(
                     {
                         "code": "LLM_PRICE_SNAPSHOT_UPPER_BOUND",
                         "message": (
-                            "Cost control uses verified public CNY list-price maxima and a "
-                            "conservative frozen USD conversion, not discounts, bundles, taxes, "
-                            "or a provider invoice quote."
+                            "Cost control uses verified public list-price maxima in each "
+                            "provider's source currency. CNY uses a conservative frozen USD "
+                            "conversion; discounts, bundles, taxes, and invoice-specific terms "
+                            "are excluded."
                         ),
                     }
                 )
@@ -1977,13 +2005,30 @@ class ExperimentService:
         }
         if mode != "HYBRID_LLM":
             return baseMetadata
-        if self.cognition is None or not self.cognition.getConfig(credentialSessionId).configured:
+        runtimeConfig = (
+            self.cognition.getConfig(credentialSessionId) if self.cognition is not None else None
+        )
+        if runtimeConfig is None or not runtimeConfig.configured:
             if not fallbackAllowed:
                 raise RuntimeError("hybrid LLM mode requires a configured session credential")
             return {
                 **baseMetadata,
                 "resolvedMode": "RULE_FALLBACK",
                 "failureCode": "LLM_CREDENTIAL_NOT_CONFIGURED",
+            }
+        requestedProvider = str(llmPolicy.get("provider", "zhipu"))
+        requestedModel = str(llmPolicy.get("modelId", "glm-5.2"))
+        configuredProvider = str(getattr(runtimeConfig, "provider", "zhipu"))
+        configuredModel = str(getattr(runtimeConfig, "model", requestedModel))
+        if configuredProvider != requestedProvider or configuredModel != requestedModel:
+            if not fallbackAllowed:
+                raise RuntimeError(
+                    "hybrid LLM scenario provider/model does not match the session credential"
+                )
+            return {
+                **baseMetadata,
+                "resolvedMode": "RULE_FALLBACK",
+                "failureCode": "LLM_PROVIDER_MODEL_CONFIG_MISMATCH",
             }
 
         asOf = _parseUtc(eventPack.get("asOf"))
@@ -1999,7 +2044,7 @@ class ExperimentService:
         requestedCount = int(llmPolicy.get("representativeAgentCount", 8))
         callBudget = int(llmPolicy.get("callBudget", 24))
         try:
-            tokenPrice = getZhipuTokenPrice(str(llmPolicy.get("modelId", "glm-5.2")))
+            tokenPrice = getTokenPrice(requestedProvider, requestedModel)
         except ValueError:
             tokenPrice = None
         if tokenPrice is None:

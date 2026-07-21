@@ -75,8 +75,12 @@ const PARAMETER_HELP: Record<string, BilingualHelp> = {
     zh: '仅规则模式完全确定；混合 LLM 先冻结有限认知信号，但订单、风控和价格仍由确定性机制负责。',
   },
   model: {
-    en: 'Zhipu model used only for approved evidence extraction or representative cognition. Unpriced models are blocked by the cost gate.',
-    zh: '仅用于已批准证据抽取或代表性认知的智谱模型；无法核验价格的模型会被费用闸门阻止。',
+    en: 'Provider model used only for approved evidence extraction or representative cognition. Models without verified pricing and output limits are blocked by the cost gate.',
+    zh: '仅用于已批准证据抽取或代表性认知的供应商模型；无法核验价格或输出上限的模型会被费用闸门阻止。',
+  },
+  provider: {
+    en: 'API provider used for this sign-in session. Changing it selects that provider’s recommended priced model and clears any key still in the form.',
+    zh: '本次登录会话使用的 API 供应商；切换后自动选择该供应商已定价的推荐模型，并清空表单中尚未提交的密钥。',
   },
   decisionInterval: {
     en: 'Number of simulation steps between cognition updates for each representative. A larger interval produces fewer model calls.',

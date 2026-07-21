@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import ROUND_UP, Decimal
 
 import pytest
 from pydantic import BaseModel
@@ -50,6 +50,7 @@ def _result(
     *,
     cacheHit: bool = False,
     transportAttempts: int = 1,
+    uncertainBillableAttempts: int = 0,
 ) -> ModelResult[_ResultPayload]:
     return ModelResult(
         data=_ResultPayload(value="ok"),
@@ -65,6 +66,7 @@ def _result(
         repairUsed=False,
         fallbackUsed=False,
         cacheHit=cacheHit,
+        uncertainBillableAttempts=uncertainBillableAttempts,
     )
 
 
@@ -169,3 +171,57 @@ def test_cache_hit_releases_reservation_without_token_charge() -> None:
     )
     assert settlement.chargedUsdUpperBound == 0
     assert budget.snapshot()["remainingUsd"] == 10
+
+
+def test_uncertain_transport_attempt_keeps_its_worst_case_budget_charge() -> None:
+    reservationAmount = estimateReservation(
+        modelId="glm-5.2",
+        maxOutputTokens=2_048,
+        policy=ModelPolicy(),
+    ).maximumUsd
+    budget = ModelCostBudget(reservationAmount)
+    reservation = budget.reserve(_request(), ModelPolicy())
+    usage = ModelUsage(promptTokens=1_000, completionTokens=500, cachedTokens=100)
+
+    settlement = budget.settle(
+        reservation,
+        _result(
+            usage,
+            transportAttempts=2,
+            uncertainBillableAttempts=1,
+        ),
+    )
+    expectedUnknownCharge = (reservationAmount / Decimal(6)).quantize(
+        Decimal("0.000000001"),
+        rounding=ROUND_UP,
+    )
+    expectedCharge = usageCostUpperBoundUsd("glm-5.2", usage) + expectedUnknownCharge
+    snapshot = budget.snapshot()
+
+    assert settlement.chargedUsdUpperBound == expectedCharge
+    assert snapshot["chargedUsdUpperBound"] == float(expectedCharge)
+    assert snapshot["unknownUsageCalls"] == 1
+    assert snapshot["remainingUsd"] == float(reservationAmount - expectedCharge)
+
+
+def test_invalid_uncertain_attempt_metadata_consumes_the_full_reservation() -> None:
+    reservationAmount = estimateReservation(
+        modelId="glm-5.2",
+        maxOutputTokens=2_048,
+        policy=ModelPolicy(),
+    ).maximumUsd
+    budget = ModelCostBudget(reservationAmount)
+    reservation = budget.reserve(_request(), ModelPolicy())
+
+    with pytest.raises(ModelGatewayError) as invalid:
+        budget.settle(
+            reservation,
+            _result(
+                ModelUsage(promptTokens=1_000, completionTokens=500),
+                transportAttempts=1,
+                uncertainBillableAttempts=2,
+            ),
+        )
+
+    assert invalid.value.code == FailureCode.MODEL_USAGE_MISSING
+    assert budget.snapshot()["chargedUsdUpperBound"] == float(reservationAmount)

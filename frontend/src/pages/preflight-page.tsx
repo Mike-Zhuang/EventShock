@@ -114,7 +114,7 @@ export function PreflightPage({ navigate }: { navigate: (view: ViewId) => void }
             <div><dt>{language === 'zh-CN' ? '次要指标' : 'Secondary outcomes'}</dt><dd>{scenario.secondaryOutcomes?.map(outcomeLabel).join(', ') || t('common.unavailable')}</dd></div>
             <div><dt>{explained('minimumPairs', t('preflight.stopRule'))}</dt><dd>{language === 'zh-CN' ? `至少 ${scenario.stoppingRule?.minimumPairs ?? scenario.seedCount} 对，最多 ${scenario.stoppingRule?.maximumPairs ?? scenario.seedCount} 对${scenario.stoppingRule?.targetCiHalfWidth ? `，目标区间半宽 ${scenario.stoppingRule.targetCiHalfWidth}` : ''}` : `Minimum ${scenario.stoppingRule?.minimumPairs ?? scenario.seedCount} pairs, maximum ${scenario.stoppingRule?.maximumPairs ?? scenario.seedCount} pairs${scenario.stoppingRule?.targetCiHalfWidth ? `, target interval half-width ${scenario.stoppingRule.targetCiHalfWidth}` : ''}`}</dd></div>
             <div><dt>{language === 'zh-CN' ? '认知模式' : 'Cognition mode'}</dt><dd>{scenario.llmPolicy?.mode ?? 'RULE_ONLY'}</dd></div>
-            <div><dt>{language === 'zh-CN' ? 'LLM 路由' : 'LLM route'}</dt><dd>{scenario.llmPolicy?.mode === 'HYBRID_LLM' ? `zhipu / ${scenario.llmPolicy.modelId}` : language === 'zh-CN' ? '不调用外部模型' : 'No external model call'}</dd></div>
+            <div><dt>{language === 'zh-CN' ? 'LLM 路由' : 'LLM route'}</dt><dd>{scenario.llmPolicy?.mode === 'HYBRID_LLM' ? `${scenario.llmPolicy.provider} / ${scenario.llmPolicy.modelId}` : language === 'zh-CN' ? '不调用外部模型' : 'No external model call'}</dd></div>
             <div><dt>{explained('callBudget', language === 'zh-CN' ? '预计 LLM 调用' : 'Estimated LLM calls')}</dt><dd>{validation.estimatedLlmCalls ?? 0}</dd></div>
             <div><dt>{explained('costCap', language === 'zh-CN' ? '最大费用责任上限（非预计账单）' : 'Maximum cost liability (not forecast spend)')}</dt><dd>${(validation.llmCostCapUsd ?? scenario.llmPolicy?.maxCostUsd ?? 0).toFixed(2)} USD</dd></div>
             <div><dt>{language === 'zh-CN' ? '价格核验状态' : 'Pricing verification'}</dt><dd><code>{validation.llmPricingStatus ?? (scenario.llmPolicy?.mode === 'RULE_ONLY' ? 'NOT_APPLICABLE' : 'UNAVAILABLE')}</code></dd></div>
@@ -130,7 +130,7 @@ export function PreflightPage({ navigate }: { navigate: (view: ViewId) => void }
               </dd>
             </div>
           </dl>
-          {scenario.llmPolicy?.mode === 'HYBRID_LLM' ? <Notice>{language === 'zh-CN' ? '费用闸门在每次请求前按完整上下文、最大输出、一次修复及所有允许的传输重试预留上界；响应后按智谱 usage 中的输入/输出 token 实耗结算。价格未知、预留不足或 usage 缺失都会在继续调用前关闭。该数值不含税费、支付手续费、账户折扣或资源包。' : 'Before every request, the cost gate reserves full context, maximum output, one repair, and every allowed transport retry. After the response, it settles provider-reported input/output tokens. Unknown pricing, insufficient reservation, or missing usage fails closed before another call. Taxes, payment fees, account discounts, and bundles are excluded.'}</Notice> : null}
+          {scenario.llmPolicy?.mode === 'HYBRID_LLM' ? <Notice>{language === 'zh-CN' ? '费用闸门在每次请求前按完整上下文、最大输出、一次修复及所有允许的传输重试预留上界；响应后按供应商 usage 中的输入/输出 token 实耗结算。价格未知、预留不足或 usage 缺失都会在继续调用前关闭。该数值不含税费、支付手续费、账户折扣或资源包。' : 'Before every request, the cost gate reserves full context, maximum output, one repair, and every allowed transport retry. After the response, it settles provider-reported input/output tokens. Unknown pricing, insufficient reservation, or missing usage fails closed before another call. Taxes, payment fees, account discounts, and bundles are excluded.'}</Notice> : null}
           <Notice>{t('results.disclaimer')}</Notice>
         </section>
 
