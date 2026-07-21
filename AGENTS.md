@@ -99,7 +99,7 @@ python -m pip install <package-name>
 
 - 禁止直接向 `main` 分支提交或推送代码。
 - 所有修改必须在个人功能分支中完成，并通过 Pull Request 合并。
-- 未经用户明确要求，不得执行提交、推送、合并、变基或创建 Pull Request。
+- 用户已明确授权：完成其要求的代码或文档修改并验证后，默认执行提交、推送、创建 Pull Request 和部署，不需要在每次任务中重复询问。合并与部署仍必须满足 Review Approve、CI 和发布门禁；破坏性操作、变基以及任务范围外的外部写操作仍需单独取得授权。
 - 禁止使用 `git reset --hard`、`git clean -fd`、`git checkout --` 等可能丢失用户修改的命令。
 - 提交前只包含当前任务相关文件，不得顺手修改或提交无关内容。
 - 具体协作流程参见 `usage_documents/git_use.md`。

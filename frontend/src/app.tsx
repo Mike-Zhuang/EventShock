@@ -29,7 +29,7 @@ import {
 import { ApiConnectionBanner, LoadingPanel, ServiceStatus } from './components/common';
 import { I18nProvider, useI18n } from './i18n';
 import { CaseLibraryPage } from './pages/case-library-page';
-import { WorkflowProvider } from './state/workflow-context';
+import { useWorkflow, WorkflowProvider } from './state/workflow-context';
 
 const EventPackPage = lazy(async () => ({ default: (await import('./pages/event-pack-page')).EventPackPage }));
 const AiConfigurationPage = lazy(async () => ({ default: (await import('./pages/ai-configuration-page')).AiConfigurationPage }));
@@ -43,6 +43,7 @@ const StudyWorkbenchPage = lazy(async () => ({ default: (await import('./pages/s
 const TraceExplorerPage = lazy(async () => ({ default: (await import('./pages/trace-explorer-page')).TraceExplorerPage }));
 
 export type ViewId = 'cases' | 'pack' | 'ai' | 'scenario' | 'preflight' | 'runs' | 'results' | 'study' | 'trace' | 'governance' | 'export';
+export type Navigate = (view: ViewId, experimentId?: string) => void;
 
 const VIEW_IDS: ViewId[] = ['cases', 'pack', 'ai', 'scenario', 'preflight', 'runs', 'results', 'study', 'trace', 'governance', 'export'];
 const MOBILE_NAVIGATION_ID = 'mobile-primary-navigation';
@@ -53,9 +54,16 @@ interface NavigationItem {
   icon: ComponentType<{ size?: number; weight?: 'regular' | 'fill' }>;
 }
 
-function getInitialView(): ViewId {
-  const hash = window.location.hash.replace('#/', '') as ViewId;
-  return VIEW_IDS.includes(hash) ? hash : 'cases';
+export function parseAppRoute(hash: string): { view: ViewId; experimentId?: string } {
+  const [rawView, rawQuery = ''] = hash.replace(/^#\/?/, '').split('?', 2);
+  const view = VIEW_IDS.includes(rawView as ViewId) ? rawView as ViewId : 'cases';
+  const experimentId = new URLSearchParams(rawQuery).get('experimentId') || undefined;
+  return { view, experimentId };
+}
+
+export function buildAppHash(view: ViewId, experimentId?: string): string {
+  if (view !== 'results' || !experimentId) return `#/${view}`;
+  return `#/${view}?${new URLSearchParams({ experimentId }).toString()}`;
 }
 
 function NavigationItems({
@@ -90,16 +98,54 @@ function NavigationItems({
 
 function AppShell() {
   const { language, setLanguage, t } = useI18n();
-  const [view, setView] = useState<ViewId>(getInitialView);
+  const { cancelPendingExperimentRequests, loadResults, selectExperiment } = useWorkflow();
+  const loadResultsRef = useRef(loadResults);
+  const routeGenerationRef = useRef(0);
+  const [view, setView] = useState<ViewId>(() => parseAppRoute(window.location.hash).view);
   const [isDark, setIsDark] = useState(() => window.localStorage.getItem('eventshock-theme') === 'dark');
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const mobileMenuButtonRef = useRef<HTMLButtonElement>(null);
   const mobileNavigationRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
+    loadResultsRef.current = loadResults;
+  }, [loadResults]);
+
+  useEffect(() => {
     window.localStorage.setItem('eventshock-theme', isDark ? 'dark' : 'light');
     document.documentElement.dataset.theme = isDark ? 'dark' : 'light';
   }, [isDark]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const restoreRoute = async () => {
+      const currentGeneration = ++routeGenerationRef.current;
+      cancelPendingExperimentRequests();
+      const route = parseAppRoute(window.location.hash);
+      if (!cancelled) setView(route.view);
+      if (route.view !== 'results' || !route.experimentId) return;
+      try {
+        const experiment = await selectExperiment(route.experimentId);
+        if (
+          experiment
+          && !cancelled
+          && currentGeneration === routeGenerationRef.current
+          && experiment.status === 'COMPLETED'
+        ) {
+          await loadResultsRef.current(experiment.id);
+        }
+      } catch {
+        // 工作流上下文已经记录可展示的错误；路由仍保留，便于刷新或审计链接。
+      }
+    };
+    const handleHashChange = () => void restoreRoute();
+    void restoreRoute();
+    window.addEventListener('hashchange', handleHashChange);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('hashchange', handleHashChange);
+    };
+  }, [cancelPendingExperimentRequests, selectExperiment]);
 
   useEffect(() => {
     const mobileQuery = window.matchMedia('(max-width: 920px)');
@@ -159,10 +205,12 @@ function AppShell() {
     if (restoreFocus) mobileMenuButtonRef.current?.focus();
   };
 
-  const navigate = (nextView: ViewId) => {
+  const navigate: Navigate = (nextView, experimentId) => {
+    routeGenerationRef.current += 1;
+    cancelPendingExperimentRequests();
     setView(nextView);
     setMobileNavOpen(false);
-    window.history.replaceState(null, '', `#/${nextView}`);
+    window.history.replaceState(null, '', buildAppHash(nextView, experimentId));
     document.getElementById('main-content')?.focus({ preventScroll: true });
     window.scrollTo({ top: 0, behavior: 'auto' });
   };

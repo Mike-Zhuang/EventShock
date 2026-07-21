@@ -1,3 +1,4 @@
+import type { MetricDisplayUnit } from '../api/types';
 import type { Language } from '../i18n';
 
 export function formatNumber(value: number | undefined, language: Language, maximumFractionDigits = 3): string {
@@ -5,12 +6,11 @@ export function formatNumber(value: number | undefined, language: Language, maxi
   return new Intl.NumberFormat(language, { maximumFractionDigits }).format(value);
 }
 
-export function formatMetricValue(value: number | undefined, unit: string | undefined, language: Language): string {
+export function formatMetricValue(value: number | undefined, unit: MetricDisplayUnit | undefined, language: Language): string {
   if (value === undefined || !Number.isFinite(value)) return language === 'zh-CN' ? '暂无数据' : 'Not available';
-  if (unit === '%' || unit === 'percent' || unit === 'ratio') {
-    const normalized = Math.abs(value) <= 1 ? value * 100 : value;
-    return `${formatNumber(normalized, language, 2)}%`;
-  }
+  // `ratio` 是 0–1 比例；`%`/`percent` 是后端已经换算好的百分点，不能根据数值大小猜测单位。
+  if (unit === 'ratio') return `${formatNumber(value * 100, language, 2)}%`;
+  if (unit === '%' || unit === 'percent') return `${formatNumber(value, language, 2)}%`;
   if (unit === 'bps') return `${formatNumber(value, language, 2)} bps`;
   if (unit === 'steps') return `${formatNumber(value, language, 0)} ${language === 'zh-CN' ? '步' : 'steps'}`;
   if (unit === 'seconds' || unit === 's') return `${formatNumber(value, language, 1)}s`;
@@ -19,7 +19,7 @@ export function formatMetricValue(value: number | undefined, unit: string | unde
   return `${formatNumber(value, language)}${unit ? ` ${unit}` : ''}`;
 }
 
-export function formatInterval(low: number | undefined, high: number | undefined, unit: string | undefined, language: Language): string {
+export function formatInterval(low: number | undefined, high: number | undefined, unit: MetricDisplayUnit | undefined, language: Language): string {
   if (low === undefined || high === undefined) return language === 'zh-CN' ? '暂无数据' : 'Not available';
   return `[${formatMetricValue(low, unit, language)}, ${formatMetricValue(high, unit, language)}]`;
 }

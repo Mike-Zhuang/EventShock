@@ -25,6 +25,7 @@ import type {
   LlmConfigView,
   LlmConnectionTest,
   MarketPathPoint,
+  MetricDisplayUnit,
   MetricResult,
   NetworkTopology,
   PairedSeedPoint,
@@ -84,7 +85,7 @@ const NETWORK_TOPOLOGIES: NetworkTopology[] = [
   'CORE_PERIPHERY',
 ];
 
-const METRIC_UNITS: Record<string, string> = {
+const METRIC_UNITS: Record<string, MetricDisplayUnit> = {
   maxDrawdownPct: '%',
   realizedVolatilityPct: '%',
   maxSpreadBps: 'bps',
@@ -101,9 +102,6 @@ const METRIC_UNITS: Record<string, string> = {
   effectiveSpreadBps: 'bps',
   depth10Bps: 'shares',
   depth25Bps: 'shares',
-  amihudIlliquidity: 'ratio',
-  kyleImpactProxy: 'ratio',
-  orderToTradeRatio: 'ratio',
   cancellationRate: 'ratio',
   fillRate: 'ratio',
   rejectionRate: 'ratio',
@@ -122,6 +120,11 @@ const METRIC_UNITS: Record<string, string> = {
   forcedLiquidationVolume: 'shares',
   ledgerRejectedOrders: 'count',
   cognitiveOrderCount: 'count',
+  benchmarkReturnPct: '%',
+  abnormalReturnPct: '%',
+  haltCount: 'count',
+  haltedSteps: 'steps',
+  totalFeesPaidCents: 'cents',
 };
 
 export function isRecord(value: unknown): value is JsonRecord {
@@ -911,6 +914,10 @@ function normalizeCognitionDecision(value: unknown): CognitionDecisionSummary | 
     evidenceIds: evidence,
     decisionSummary: asOptionalString(read(decision, 'decision_summary', 'decisionSummary')),
     fallbackUsed: asBoolean(read(value, 'fallbackUsed', 'fallback_used')),
+    repairUsed: asBoolean(read(value, 'repairUsed', 'repair_used')),
+    failureReason: asOptionalString(read(value, 'failureReason', 'failure_reason')),
+    failureCodes: asStringArray(read(value, 'failureCodes', 'failure_codes')),
+    transportAttempts: asNumber(read(value, 'transportAttempts', 'transport_attempts')),
     requestId: asOptionalString(read(value, 'requestId', 'request_id')),
     decisionRound: asNumber(read(value, 'decisionRound', 'decision_round')),
     observationAt: asOptionalString(read(value, 'observationAt', 'observation_at')),
@@ -970,6 +977,7 @@ function normalizeCognition(value: unknown): CognitionRunMetadata | undefined {
     completionTokens: asNumber(read(value, 'completionTokens', 'completion_tokens')) ?? 0,
     cachedTokens: asNumber(read(value, 'cachedTokens', 'cached_tokens')) ?? 0,
     fallbackCount: asNumber(read(value, 'fallbackCount', 'fallback_count')) ?? 0,
+    fallbackReasons: asStringArray(read(value, 'fallbackReasons', 'fallback_reasons')),
     cacheHits: asNumber(read(value, 'cacheHits', 'cache_hits'))
       ?? decisions.filter((decision) => decision.requestId && unwrapItems(read(value, 'decisions')).some((item) => isRecord(item) && asString(read(item, 'requestId', 'request_id')) === decision.requestId && asBoolean(read(item, 'cacheHit', 'cache_hit')))).length,
     plannedCalls: asNumber(read(value, 'plannedCalls', 'planned_calls')) ?? 0,

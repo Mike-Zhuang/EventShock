@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 MAX_CHECKPOINT_UNCOMPRESSED_BYTES = 32 * 1024 * 1024
+DEFAULT_EXPERIMENT_RETENTION_DAYS = 90
 
 
 def utcNow() -> str:
@@ -536,7 +537,7 @@ class Database:
 
     def enforceRetention(
         self,
-        retentionDays: int = 7,
+        retentionDays: int = DEFAULT_EXPERIMENT_RETENTION_DAYS,
         readyRetentionHours: int = 24,
         maxStoredExperiments: int = 500,
     ) -> None:

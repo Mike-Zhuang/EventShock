@@ -465,6 +465,7 @@ describe('API normalizers', () => {
         totalTokens: 520,
         cacheHits: 1,
         fallbackCount: 0,
+        fallbackReasons: ['SCHEMA_INVALID'],
         plannedCalls: 4,
         attemptedCalls: 2,
         decisionScheduleMode: 'POINT_IN_TIME_ROUNDS',
@@ -475,6 +476,11 @@ describe('API normalizers', () => {
           role: 'INSTITUTIONAL',
           requestId: 'request-1',
           cacheHit: true,
+          fallbackUsed: true,
+          repairUsed: true,
+          failureReason: 'SCHEMA_INVALID',
+          failureCodes: ['SCHEMA_INVALID', 'RULE_FALLBACK_USED'],
+          transportAttempts: 2,
           representativeIndex: 0,
           decisionRound: 1,
           observationAt: '2026-07-07T13:15:00Z',
@@ -565,6 +571,7 @@ describe('API normalizers', () => {
       calls: 2,
       cacheHits: 1,
       fallbackCount: 0,
+      fallbackReasons: ['SCHEMA_INVALID'],
       plannedCalls: 4,
       attemptedCalls: 2,
     });
@@ -575,6 +582,11 @@ describe('API normalizers', () => {
       decisionRound: 1,
       activeFromStep: 30,
       memoryCount: 3,
+      fallbackUsed: true,
+      repairUsed: true,
+      failureReason: 'SCHEMA_INVALID',
+      failureCodes: ['SCHEMA_INVALID', 'RULE_FALLBACK_USED'],
+      transportAttempts: 2,
     });
     expect(results.robustness).toMatchObject({
       sensitivityStatus: 'PASSED',
@@ -586,6 +598,37 @@ describe('API normalizers', () => {
       preregisteredPrimaryOutcome: 'maxSpreadBps',
       negativeControl: { passed: true },
       localSensitivity: { status: 'PASS' },
+    });
+  });
+
+  it('assigns percentage-point and ratio units explicitly', () => {
+    const summary = {
+      baseline: { median: 0.5 },
+      intervention: { median: 0.4 },
+      delta: { median: -0.1, validN: 2 },
+    };
+    const results = normalizeResults({
+      experimentId: 'exp-units',
+      metricSummaries: {
+        maxDrawdownPct: summary,
+        tailLossProbability: summary,
+        benchmarkReturnPct: summary,
+        abnormalReturnPct: summary,
+        haltCount: summary,
+        haltedSteps: summary,
+        totalFeesPaidCents: summary,
+      },
+    });
+    const units = Object.fromEntries(results.metrics.map((metric) => [metric.id, metric.unit]));
+
+    expect(units).toMatchObject({
+      maxDrawdownPct: '%',
+      tailLossProbability: 'ratio',
+      benchmarkReturnPct: '%',
+      abnormalReturnPct: '%',
+      haltCount: 'count',
+      haltedSteps: 'steps',
+      totalFeesPaidCents: 'cents',
     });
   });
 

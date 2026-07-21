@@ -553,6 +553,50 @@ def test_scheduled_cognitive_decisions_are_consumed_at_their_point_in_time_steps
     assert cognitiveBeliefs[1]["step"] >= 24
 
 
+def test_rule_fallback_cognitive_trace_preserves_provenance() -> None:
+    signal = {
+        "decisionId": "decision-rule-fallback",
+        "representativeIndex": 0,
+        "role": "event_risk_analyst",
+        "direction": "NEUTRAL",
+        "actionPreference": "ABSTAIN",
+        "targetPositionFraction": 0.0,
+        "urgency": 0.0,
+        "uncertainty": 1.0,
+        "tailRisk": 1.0,
+        "confidence": 0.0,
+        "decisionSummary": "A deterministic safe fallback abstained.",
+        "evidenceIds": [],
+        "fallbackUsed": True,
+        "repairUsed": True,
+        "failureReason": "SCHEMA_INVALID",
+        "failureCodes": ["SCHEMA_INVALID", "RULE_FALLBACK_USED"],
+        "transportAttempts": 2,
+    }
+
+    run = runScenario(
+        seed=316,
+        populationSize=28,
+        steps=60,
+        parameter="marketMakerCapacity",
+        value=1.0,
+        cognitiveSignals=[signal],
+    )
+
+    belief = next(
+        trace
+        for trace in run["traces"]
+        if trace["eventType"] == "BELIEF_UPDATED"
+        and trace["payload"].get("decisionId") == "decision-rule-fallback"
+    )
+    assert belief["payload"]["source"] == "RULE_FALLBACK_BELIEF_SIGNAL"
+    assert belief["payload"]["fallbackUsed"] is True
+    assert belief["payload"]["repairUsed"] is True
+    assert belief["payload"]["failureReason"] == "SCHEMA_INVALID"
+    assert belief["payload"]["failureCodes"] == ["SCHEMA_INVALID", "RULE_FALLBACK_USED"]
+    assert "transportAttempts" not in belief["payload"]
+
+
 def test_event_pack_clock_enforces_point_in_time_claim_boundaries() -> None:
     futurePack = {
         "id": "future-pack",

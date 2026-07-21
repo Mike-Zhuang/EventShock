@@ -1830,6 +1830,7 @@ class ExperimentService:
     ) -> dict[str, Any]:
         llmPolicy = requestData.get("llmPolicy", {})
         mode = llmPolicy.get("mode", "RULE_ONLY")
+        fallbackAllowed = bool(llmPolicy.get("fallbackToRules", True))
         costBudget = ModelCostBudget(float(llmPolicy.get("maxCostUsd", 10.0)))
         baseMetadata = {
             "requestedMode": mode,
@@ -1842,6 +1843,7 @@ class ExperimentService:
             "calls": 0,
             "totalTokens": 0,
             "fallbackCount": 0,
+            "fallbackReasons": [],
             "signals": [],
             "failureCode": None,
             "promptTokens": 0,
@@ -1857,7 +1859,7 @@ class ExperimentService:
         if mode != "HYBRID_LLM":
             return baseMetadata
         if self.cognition is None or not self.cognition.getConfig(sessionId).configured:
-            if not llmPolicy.get("fallbackToRules", True):
+            if not fallbackAllowed:
                 raise RuntimeError("hybrid LLM mode requires a configured session credential")
             return {
                 **baseMetadata,
@@ -1867,7 +1869,7 @@ class ExperimentService:
 
         asOf = _parseUtc(eventPack.get("asOf"))
         if not self._approvedEvidence(eventPack, asOf):
-            if not llmPolicy.get("fallbackToRules", True):
+            if not fallbackAllowed:
                 raise RuntimeError("hybrid LLM mode requires at least one approved evidence item")
             return {
                 **baseMetadata,
@@ -1882,7 +1884,7 @@ class ExperimentService:
         except ValueError:
             tokenPrice = None
         if tokenPrice is None:
-            if not llmPolicy.get("fallbackToRules", True):
+            if not fallbackAllowed:
                 raise RuntimeError("hybrid LLM mode has no verified provider price")
             return {
                 **baseMetadata,
@@ -1956,6 +1958,7 @@ class ExperimentService:
         completionTokens = 0
         cachedTokens = 0
         fallbackCount = 0
+        fallbackReasons: list[str] = []
         resolvedModel: str | None = None
         failureCode: str | None = None
         attemptedCalls = 0
@@ -1974,9 +1977,13 @@ class ExperimentService:
                     signalCount=0,
                 )
             ]
-        except Exception:
+        except Exception as error:
             # pilot 是模型与正式配对实验之间的安全边界；无法验证时绝不让模型信号进入市场。
             LOGGER.exception("Closed-loop cognition pilot initialization failed")
+            if not fallbackAllowed:
+                raise RuntimeError(
+                    "closed-loop cognition pilot initialization failed while fallback was disabled"
+                ) from error
             return {
                 **baseMetadata,
                 "resolvedMode": "RULE_FALLBACK",
@@ -2091,10 +2098,11 @@ class ExperimentService:
                             sessionId=sessionId,
                             observation=observation,
                             costBudget=costBudget,
+                            allowRuleFallback=fallbackAllowed,
                         )
                     )
                 except (CredentialNotConfiguredError, ModelGatewayError) as error:
-                    if not llmPolicy.get("fallbackToRules", True):
+                    if not fallbackAllowed:
                         raise RuntimeError("the configured cognitive model failed") from error
                     failureCode = (
                         error.code.value
@@ -2102,12 +2110,20 @@ class ExperimentService:
                         else "LLM_CREDENTIAL_EXPIRED"
                     )
                     break
+                # 注入式网关或测试替身也必须服从用户策略；不能只依赖供应商网关正确实现。
+                if run.fallback_used and not fallbackAllowed:
+                    raise RuntimeError(
+                        "the configured cognitive model used a rule fallback while "
+                        "fallback was disabled"
+                    )
                 resolvedModel = run.model
                 totalTokens += run.total_tokens
                 promptTokens += run.prompt_tokens
                 completionTokens += run.completion_tokens
                 cachedTokens += run.cached_tokens
                 fallbackCount += int(run.fallback_used)
+                if run.fallback_used:
+                    fallbackReasons.append(run.fallback_reason or "RULE_FALLBACK_USED")
                 decision = run.decision
                 evidenceIds = sorted(decision.evidenceIds())
                 publicMessage = (
@@ -2165,6 +2181,9 @@ class ExperimentService:
                         "cacheHit": run.cache_hit,
                         "fallbackUsed": run.fallback_used,
                         "repairUsed": run.repair_used,
+                        "failureReason": run.fallback_reason,
+                        "failureCodes": list(run.failure_codes),
+                        "transportAttempts": run.transport_attempts,
                         "latencyMs": run.latency_ms,
                         "totalTokens": run.total_tokens,
                         "promptTokens": run.prompt_tokens,
@@ -2191,12 +2210,17 @@ class ExperimentService:
                             signalCount=len(signals),
                         )
                     )
-                except Exception:
+                except Exception as error:
                     # 已产生的偏好也必须全部丢弃，避免未验证 pilot 的部分信号进入正式实验。
                     LOGGER.exception(
                         "Closed-loop cognition pilot feedback failed after round %s",
                         decisionRound,
                     )
+                    if not fallbackAllowed:
+                        raise RuntimeError(
+                            "closed-loop cognition pilot feedback failed while "
+                            "fallback was disabled"
+                        ) from error
                     pilotFailed = True
                     failureCode = "CLOSED_LOOP_PILOT_FAILED"
                     break
@@ -2219,6 +2243,7 @@ class ExperimentService:
                 "completionTokens": completionTokens,
                 "cachedTokens": cachedTokens,
                 "fallbackCount": fallbackCount,
+                "fallbackReasons": fallbackReasons,
                 "failureCode": failureCode,
                 "costBudget": costBudget.snapshot(),
                 "decisionScheduleMode": COGNITION_PILOT_SCHEDULE_MODE,
@@ -2249,16 +2274,18 @@ class ExperimentService:
             "boundary": pilotBoundary,
             "frozenSignalsHash": frozenSignalsHash,
         }
+        if signals and fallbackCount == len(signals):
+            resolvedMode = "RULE_FALLBACK"
+        elif fallbackCount > 0 or (failureCode is not None and signals):
+            resolvedMode = "HYBRID_LLM_PARTIAL_RULE_FALLBACK"
+        elif failureCode is not None:
+            resolvedMode = "RULE_FALLBACK"
+        else:
+            resolvedMode = "HYBRID_LLM"
 
         return {
             **baseMetadata,
-            "resolvedMode": (
-                "HYBRID_LLM_PARTIAL_RULE_FALLBACK"
-                if failureCode and signals
-                else "RULE_FALLBACK"
-                if failureCode
-                else "HYBRID_LLM"
-            ),
+            "resolvedMode": resolvedMode,
             "resolvedModel": resolvedModel,
             "calls": len(signals),
             "attemptedCalls": attemptedCalls,
@@ -2268,6 +2295,7 @@ class ExperimentService:
             "completionTokens": completionTokens,
             "cachedTokens": cachedTokens,
             "fallbackCount": fallbackCount,
+            "fallbackReasons": fallbackReasons,
             "failureCode": failureCode,
             "costBudget": costBudget.snapshot(),
             "decisionScheduleMode": COGNITION_PILOT_SCHEDULE_MODE,
@@ -2589,16 +2617,34 @@ class ExperimentService:
                 "textZh": "引擎只模拟一个简化现货订单簿，不包含期权或特定交易所制度。",
             },
         ]
-        if cognitionRun["failureCode"]:
+        fallbackReasons = [
+            str(reason) for reason in cognitionRun.get("fallbackReasons", []) if reason
+        ]
+        if cognitionRun["failureCode"] and cognitionRun["failureCode"] not in fallbackReasons:
+            fallbackReasons.append(str(cognitionRun["failureCode"]))
+        if cognitionRun["fallbackCount"] > 0 or cognitionRun["failureCode"]:
+            reasonsText = ", ".join(fallbackReasons) if fallbackReasons else "not reported"
+            reasonsTextZh = "、".join(fallbackReasons) if fallbackReasons else "未报告"
+            partialFallback = str(cognitionRun["resolvedMode"]).startswith("HYBRID_LLM")
             limitations.append(
                 {
-                    "code": "LLM_RULE_FALLBACK",
+                    "code": (
+                        "LLM_PARTIAL_RULE_FALLBACK" if partialFallback else "LLM_RULE_FALLBACK"
+                    ),
                     "text": (
-                        "The requested hybrid mode fell back to deterministic rules; "
-                        f"reason: {cognitionRun['failureCode']}."
+                        "The hybrid run included a partial deterministic-rule fallback or "
+                        f"model-routing failure. Recorded rule-fallback decisions: "
+                        f"{cognitionRun['fallbackCount']}; reasons: {reasonsText}."
+                        if partialFallback
+                        else "The requested hybrid mode fell back to deterministic rules; "
+                        f"reasons: {reasonsText}."
                     ),
                     "textZh": (
-                        f"请求的混合模式已回退为确定性规则；原因：{cognitionRun['failureCode']}。"
+                        "本次混合运行包含部分确定性规则回退或模型路由失败。"
+                        f"记录到的规则回退决策数：{cognitionRun['fallbackCount']}；"
+                        f"原因：{reasonsTextZh}。"
+                        if partialFallback
+                        else f"请求的混合模式已回退为确定性规则；原因：{reasonsTextZh}。"
                     ),
                 }
             )
@@ -2630,6 +2676,7 @@ class ExperimentService:
             "llmCachedTokens": cognitionRun["cachedTokens"],
             "llmCostBudget": cognitionRun["costBudget"],
             "llmFallbackCount": cognitionRun["fallbackCount"],
+            "llmFallbackReasons": fallbackReasons,
             "llmDecisionScheduleMode": cognitionRun["decisionScheduleMode"],
             "llmFrozenSignalSequenceHash": cognitionRun.get("frozenSignalsHash"),
             "llmPilotSeed": cognitionRun.get("pilot", {}).get("seed"),
@@ -3060,6 +3107,10 @@ def _buildExport(experiment: dict[str, Any]) -> bytes:
             },
         )
         cognition = result.get("cognition", {})
+        fallbackReasons = [str(reason) for reason in cognition.get("fallbackReasons", []) if reason]
+        failureCode = cognition.get("failureCode")
+        if failureCode and str(failureCode) not in fallbackReasons:
+            fallbackReasons.append(str(failureCode))
         _writeJson(
             archive,
             "model_and_prompt_versions.json",
@@ -3084,6 +3135,7 @@ def _buildExport(experiment: dict[str, Any]) -> bytes:
                 "costControl": cognition.get("costControl"),
                 "costBudget": cognition.get("costBudget", {}),
                 "fallbackCount": cognition.get("fallbackCount", 0),
+                "fallbackReasons": fallbackReasons,
                 "decisionScheduleMode": cognition.get("decisionScheduleMode"),
                 "frozenSignalsHash": cognition.get("frozenSignalsHash"),
                 "pilotSeed": cognition.get("pilot", {}).get("seed"),

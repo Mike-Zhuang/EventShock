@@ -40,10 +40,11 @@ EventShock Lab 是一个可复现的事件驱动市场反事实实验室。它�
 - Study Workbench 提供 7 个预注册模板、全因子与有界 Latin hypercube 设计、common seeds、2–4 个主指标、8 类负对照、10 类消融、family-level Holm 校正、探索性 rank-correlation 敏感性和不可变运行历史。Study 只执行受限规模的合成模型内部研究；认知臂使用冻结证据绑定 tape，若干消融是明确标注的最近可执行代理，所有结果都固定返回 `historicalValidityEstablished=false`。
 - Executive Risk Cards、Market Dynamics、Trace Explorer、验证梯度、模型清单、红队定义、发布门与哈希链审计。
 - 已完成实验可在当前匿名会话内按原因码和说明标记为 `INVALIDATED`；底层结果与审计哈希保留，但结果、runs、metrics、traces 与导出接口会拒绝把它继续作为有效研究使用。按模型、版本或时间窗口批量失效仍未实现。
+- 实验历史按匿名浏览器会话隔离：每个会话最多保留 30 条，终态实验最多保留 90 天，全站最多保留 500 条并滚动淘汰；需要长期保存的研究工件必须在到期或淘汰前导出。
 - 可复现 ZIP 含 Manifest、事件包、场景、结果、认知决策、Trace、双语报告、CSV，以及六张固定 Schema Parquet 表。
 - 参数上限、单仿真 worker、有限队列、请求体限制、稳定错误码和生产环境 API 文档关闭。
 
-默认运行仍是无需密钥、可确定性重放的 `RULE_ONLY`。用户可在当前匿名会话中临时填写智谱 API Key 并选择 `HYBRID_LLM`；Key 只保存在服务器内存中、按 TTL 过期且不写入 SQLite、日志或导出。LLM 只能提出候选事实或有限的信念与行动偏好，不能设置价格、绕过风险控制或直接提交订单，最终订单必须经过固定策略、账本风控与确定性撮合层。
+默认运行仍是无需密钥、可确定性重放的 `RULE_ONLY`。用户可在当前匿名会话中临时填写智谱 API Key 并选择 `HYBRID_LLM`；Key 只保存在服务器内存中、按 TTL 过期且不写入 SQLite、日志或导出。LLM 只能提出候选事实或有限的信念与行动偏好，不能设置价格、绕过风险控制或直接提交订单，最终订单必须经过固定策略、账本风控与确定性撮合层。若部分结构化输出失败并按用户策略安全回退，结果会明确标记为 `HYBRID_LLM_PARTIAL_RULE_FALLBACK`，逐条保留修复、回退与失败原因；关闭 `fallbackToRules` 后任何规则回退都会使实验失败关闭。
 
 混合模式按 `decisionIntervalSteps` 和 `callBudget` 生成时点安全的认知决策序列，并将同一冻结序列复用于基准/干预及 matched seeds。模型能看到届时已知的证据、受限社交摘要和自身上轮记忆；确定性策略会响应当前模拟订单簿，但模型不会在每个随机种子中重新观察内生价格。AI 页面同时提供不计费的 code-grader 自检和显式触发的真实 GLM golden/攻击集，两者在结果中严格区分。
 

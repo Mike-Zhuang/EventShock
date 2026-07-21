@@ -1,6 +1,6 @@
 import { Button, InlineNotification, Modal, Select, SelectItem, Tag, TextArea } from '@carbon/react';
 import { ArrowRight, Brain, ChartLineUp, Trash, Warning } from '@phosphor-icons/react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bar,
   BarChart,
@@ -14,10 +14,11 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import type { ViewId } from '../app';
+import type { Navigate } from '../app';
 import type { InvalidationReasonCode, MetricResult } from '../api/types';
 import { buildHistogram } from '../api/normalize';
 import { EmptyState, LoadingPanel, Notice, PageHeader, StatusBadge } from '../components/common';
+import { ExperimentHistoryDisclosure, experimentHistoryLabel } from '../components/experiment-history';
 import { translateAgentType, translateParameter, translateStatus, useI18n } from '../i18n';
 import { useWorkflow } from '../state/workflow-context';
 import { formatInterval, formatMetricValue } from '../utils/format';
@@ -63,6 +64,11 @@ const EXTENDED_METRIC_LABELS: Record<string, { en: string; zh: string }> = {
   forcedLiquidationVolume: { en: 'Forced-liquidation volume', zh: '强制平仓量' },
   ledgerRejectedOrders: { en: 'Ledger-rejected orders', zh: '账本拒绝订单数' },
   cognitiveOrderCount: { en: 'Cognition-influenced orders', zh: '认知信号影响订单数' },
+  benchmarkReturnPct: { en: 'Benchmark return', zh: '基准收益率' },
+  abnormalReturnPct: { en: 'Abnormal return', zh: '异常收益率' },
+  haltCount: { en: 'Trading halts', zh: '停牌次数' },
+  haltedSteps: { en: 'Halted steps', zh: '停牌步数' },
+  totalFeesPaidCents: { en: 'Total fees paid', zh: '总支付费用' },
 };
 
 function formatCents(value: number | undefined, language: 'en' | 'zh-CN'): string {
@@ -97,14 +103,16 @@ function ChartEmpty() {
   return <div className="chart-empty"><ChartLineUp size={28} weight="duotone" /><p>{t('results.noChart')}</p></div>;
 }
 
-export function ResultsPage({ navigate }: { navigate: (view: ViewId) => void }) {
+export function ResultsPage({ navigate }: { navigate: Navigate }) {
   const { language, t } = useI18n();
   const {
     activeExperiment,
+    experiments,
     results,
     resultsState,
     resultsError,
     loadResults,
+    selectExperiment,
     invalidateActiveExperiment,
   } = useWorkflow();
   const [pathMetric, setPathMetric] = useState<'price' | 'spread' | 'depth'>('price');
@@ -114,7 +122,61 @@ export function ResultsPage({ navigate }: { navigate: (view: ViewId) => void }) 
   const [invalidationReason, setInvalidationReason] = useState('');
   const [invalidationError, setInvalidationError] = useState<string>();
   const [invalidationBusy, setInvalidationBusy] = useState(false);
+  const [historyError, setHistoryError] = useState<string>();
+  const historyRequestGeneration = useRef(0);
   const metrics = useMemo(() => metricRows(results?.metrics ?? []), [results?.metrics]);
+  const primaryMetricId = results?.stoppingRule?.primaryOutcome
+    ?? results?.analysisDiagnostics?.preregisteredPrimaryOutcome
+    ?? results?.primaryMetricId;
+  const primaryMetricUnit = results?.metrics.find((metric) => metric.id === primaryMetricId)?.unit;
+
+  const openHistoricalExperiment = async (experimentId: string) => {
+    const requestGeneration = ++historyRequestGeneration.current;
+    setHistoryError(undefined);
+    try {
+      const experiment = await selectExperiment(experimentId);
+      if (!experiment || requestGeneration !== historyRequestGeneration.current) return;
+      if (experiment.status === 'COMPLETED') {
+        const nextResults = await loadResults(experiment.id);
+        if (nextResults && requestGeneration === historyRequestGeneration.current) {
+          navigate('results', experiment.id);
+        }
+        return;
+      }
+      if (experiment.status === 'INVALIDATED') {
+        navigate('results', experiment.id);
+        return;
+      }
+      navigate('runs');
+    } catch (error) {
+      if (requestGeneration === historyRequestGeneration.current) {
+        setHistoryError(error instanceof Error ? error.message : String(error));
+      }
+    }
+  };
+  const historySelector = experiments.length > 0 ? (
+    <section className="history-selector" aria-label={language === 'zh-CN' ? '切换历史实验' : 'Switch historical experiment'}>
+      <Select
+        id="results-history-experiment"
+        labelText={language === 'zh-CN' ? '查看历史实验结果' : 'View historical experiment result'}
+        value={activeExperiment?.id ?? ''}
+        onChange={(event) => void openHistoricalExperiment(event.target.value)}
+      >
+        <SelectItem value="" text={language === 'zh-CN' ? '请选择实验' : 'Select an experiment'} disabled />
+        {experiments.map((experiment) => (
+          <SelectItem
+            key={experiment.id}
+            value={experiment.id}
+            text={experimentHistoryLabel(experiment, language)}
+          />
+        ))}
+      </Select>
+      {historyError ? (
+        <InlineNotification kind="error" lowContrast hideCloseButton title={t('common.errorTitle')} subtitle={historyError} />
+      ) : null}
+      <ExperimentHistoryDisclosure />
+    </section>
+  ) : null;
 
   useEffect(() => {
     const preferred = activeExperiment?.scenario?.primaryOutcome ?? results?.primaryMetricId;
@@ -125,6 +187,7 @@ export function ResultsPage({ navigate }: { navigate: (view: ViewId) => void }) 
     return (
       <div className="page">
         <PageHeader title={t('results.title')} subtitle={t('results.subtitle')} />
+        {historySelector}
         <EmptyState
           title={t('results.selectTitle')}
           body={t('results.selectBody')}
@@ -138,6 +201,7 @@ export function ResultsPage({ navigate }: { navigate: (view: ViewId) => void }) 
     return (
       <div className="page">
         <PageHeader title={t('results.title')} subtitle={t('results.subtitle')} actions={<StatusBadge status={activeExperiment.status} />} />
+        {historySelector}
         <InlineNotification
           kind="error"
           lowContrast
@@ -154,12 +218,13 @@ export function ResultsPage({ navigate }: { navigate: (view: ViewId) => void }) 
     );
   }
 
-  if (resultsState === 'loading') return <div className="page"><PageHeader title={t('results.title')} subtitle={t('results.subtitle')} /><LoadingPanel /></div>;
+  if (resultsState === 'loading') return <div className="page"><PageHeader title={t('results.title')} subtitle={t('results.subtitle')} />{historySelector}<LoadingPanel /></div>;
 
   if (!results) {
     return (
       <div className="page">
         <PageHeader title={t('results.title')} subtitle={t('results.subtitle')} />
+        {historySelector}
         {resultsError ? <InlineNotification kind="error" lowContrast hideCloseButton title={t('common.errorTitle')} subtitle={t('common.errorFallback')} /> : null}
         <EmptyState
           title={t('results.pendingTitle')}
@@ -235,6 +300,7 @@ export function ResultsPage({ navigate }: { navigate: (view: ViewId) => void }) 
           </div>
         )}
       />
+      {historySelector}
       <Notice>{t('results.disclaimer')}</Notice>
       <Modal
         open={invalidationOpen}
@@ -455,8 +521,8 @@ export function ResultsPage({ navigate }: { navigate: (view: ViewId) => void }) 
             <div><dt>{language === 'zh-CN' ? '停止模式' : 'Stopping mode'}</dt><dd>{results.stoppingRule?.mode?.replaceAll('_', ' ') ?? t('common.unavailable')}</dd></div>
             <div><dt>{language === 'zh-CN' ? '停止原因' : 'Stopping reason'}</dt><dd>{results.stoppingRule?.reason.replaceAll('_', ' ') ?? t('common.unavailable')}</dd></div>
             <div><dt>{language === 'zh-CN' ? '完成配对' : 'Completed pairs'}</dt><dd>{results.stoppingRule?.completedPairs ?? results.validSeedCount ?? t('common.unavailable')}</dd></div>
-            <div><dt>{language === 'zh-CN' ? '观察区间半宽' : 'Observed interval half-width'}</dt><dd>{formatMetricValue(results.stoppingRule?.observedCiHalfWidth, undefined, language)}</dd></div>
-            <div><dt>{language === 'zh-CN' ? '目标区间半宽' : 'Target interval half-width'}</dt><dd>{formatMetricValue(results.stoppingRule?.targetCiHalfWidth, undefined, language)}</dd></div>
+            <div><dt>{language === 'zh-CN' ? '观察区间半宽' : 'Observed interval half-width'}</dt><dd>{formatMetricValue(results.stoppingRule?.observedCiHalfWidth, primaryMetricUnit, language)}</dd></div>
+            <div><dt>{language === 'zh-CN' ? '目标区间半宽' : 'Target interval half-width'}</dt><dd>{formatMetricValue(results.stoppingRule?.targetCiHalfWidth, primaryMetricUnit, language)}</dd></div>
           </dl>
           <Button kind="tertiary" renderIcon={ArrowRight} onClick={() => navigate('trace')}>{t('nav.trace')}</Button>
         </section>
@@ -502,13 +568,17 @@ export function ResultsPage({ navigate }: { navigate: (view: ViewId) => void }) 
                 <div><dt>{language === 'zh-CN' ? '提示词版本' : 'Prompt version'}</dt><dd><code>{results.cognition.promptVersion ?? t('common.unavailable')}</code></dd></div>
                 <div><dt>{language === 'zh-CN' ? '输出契约' : 'Output contract'}</dt><dd><code>{results.cognition.promptSchemaVersion ?? t('common.unavailable')}</code></dd></div>
               </dl>
-              {results.cognition.failureCode ? (
+              {results.cognition.failureCode || results.cognition.fallbackCount > 0 ? (
                 <InlineNotification
                   kind="warning"
                   lowContrast
                   hideCloseButton
-                  title={language === 'zh-CN' ? '混合模式已显式降级' : 'Hybrid mode used an explicit fallback'}
-                  subtitle={results.cognition.failureCode}
+                  title={results.cognition.resolvedMode === 'HYBRID_LLM_PARTIAL_RULE_FALLBACK'
+                    ? language === 'zh-CN' ? '混合模式包含部分规则回退' : 'Hybrid mode includes partial rule fallback'
+                    : language === 'zh-CN' ? '混合模式已显式降级' : 'Hybrid mode used an explicit fallback'}
+                  subtitle={results.cognition.fallbackReasons.length > 0
+                    ? results.cognition.fallbackReasons.join(', ')
+                    : results.cognition.failureCode ?? (language === 'zh-CN' ? '未返回具体原因' : 'No specific reason returned')}
                 />
               ) : null}
               {results.cognition.costBudget ? (
@@ -537,6 +607,10 @@ export function ResultsPage({ navigate }: { navigate: (view: ViewId) => void }) 
                         <div><dt>{language === 'zh-CN' ? '观察时间' : 'Observation time'}</dt><dd>{decision.observationAt ? new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'medium' }).format(new Date(decision.observationAt)) : t('common.unavailable')}</dd></div>
                         <div><dt>{language === 'zh-CN' ? '生效步 / 间隔' : 'Active step / interval'}</dt><dd>{decision.activeFromStep ?? t('common.unavailable')} / {decision.decisionIntervalSteps ?? t('common.unavailable')}</dd></div>
                         <div><dt>{language === 'zh-CN' ? '证据 / 社交 / 记忆条数' : 'Evidence / social / memory counts'}</dt><dd>{decision.evidenceCount ?? 0} / {decision.socialPostCount ?? 0} / {decision.memoryCount ?? 0}</dd></div>
+                        <div><dt>{language === 'zh-CN' ? '修复 / 规则回退' : 'Repair / rule fallback'}</dt><dd>{decision.repairUsed ? language === 'zh-CN' ? '是' : 'Yes' : language === 'zh-CN' ? '否' : 'No'} / {decision.fallbackUsed ? language === 'zh-CN' ? '是' : 'Yes' : language === 'zh-CN' ? '否' : 'No'}</dd></div>
+                        <div><dt>{language === 'zh-CN' ? '失败原因' : 'Failure reason'}</dt><dd>{decision.failureReason ?? t('common.unavailable')}</dd></div>
+                        <div><dt>{language === 'zh-CN' ? '失败代码' : 'Failure codes'}</dt><dd>{decision.failureCodes.length > 0 ? decision.failureCodes.join(', ') : t('common.unavailable')}</dd></div>
+                        <div><dt>{language === 'zh-CN' ? '传输尝试次数' : 'Transport attempts'}</dt><dd>{decision.transportAttempts ?? t('common.unavailable')}</dd></div>
                         <div><dt>{language === 'zh-CN' ? '输入 / 输出 token' : 'Input / output tokens'}</dt><dd>{(decision.promptTokens ?? 0).toLocaleString(language)} / {(decision.completionTokens ?? 0).toLocaleString(language)}</dd></div>
                         <div><dt>{language === 'zh-CN' ? '本次费用上界' : 'Call cost upper bound'}</dt><dd>${(decision.costUpperBoundUsd ?? 0).toFixed(6)} USD</dd></div>
                       </dl>
@@ -591,7 +665,7 @@ export function ResultsPage({ navigate }: { navigate: (view: ViewId) => void }) 
               <div><h3>{language === 'zh-CN' ? '负对照' : 'Negative control'}</h3><StatusBadge status={results.analysisDiagnostics.negativeControl.status} /></div>
               <dl className="definition-list definition-list--compact">
                 <div><dt>{language === 'zh-CN' ? '对照类型' : 'Control type'}</dt><dd>{results.analysisDiagnostics.negativeControl.controlType?.replaceAll('_', ' ') ?? t('common.unavailable')}</dd></div>
-                <div><dt>{language === 'zh-CN' ? '容差' : 'Tolerance'}</dt><dd>{formatMetricValue(results.analysisDiagnostics.negativeControl.tolerance, undefined, language)}</dd></div>
+                <div><dt>{language === 'zh-CN' ? '容差' : 'Tolerance'}</dt><dd>{formatMetricValue(results.analysisDiagnostics.negativeControl.tolerance, primaryMetricUnit, language)}</dd></div>
                 <div><dt>{language === 'zh-CN' ? '通过' : 'Passed'}</dt><dd>{results.analysisDiagnostics.negativeControl.passed === undefined ? t('common.unavailable') : results.analysisDiagnostics.negativeControl.passed ? language === 'zh-CN' ? '是' : 'Yes' : language === 'zh-CN' ? '否' : 'No'}</dd></div>
               </dl>
               <p>{results.analysisDiagnostics.negativeControl.reason ?? results.analysisDiagnostics.negativeControl.interpretation}</p>
@@ -599,8 +673,8 @@ export function ResultsPage({ navigate }: { navigate: (view: ViewId) => void }) 
             <article>
               <div><h3>{language === 'zh-CN' ? '参数恢复 knockout' : 'Parameter-restoration knockout'}</h3><StatusBadge status={results.analysisDiagnostics.parameterRestorationKnockout.status} /></div>
               <dl className="definition-list definition-list--compact">
-                <div><dt>{language === 'zh-CN' ? '完整效应' : 'Full effect'}</dt><dd>{formatMetricValue(results.analysisDiagnostics.parameterRestorationKnockout.fullEffect, undefined, language)}</dd></div>
-                <div><dt>{language === 'zh-CN' ? '恢复后效应' : 'Restored effect'}</dt><dd>{formatMetricValue(results.analysisDiagnostics.parameterRestorationKnockout.knockoutEffect, undefined, language)}</dd></div>
+                <div><dt>{language === 'zh-CN' ? '完整效应' : 'Full effect'}</dt><dd>{formatMetricValue(results.analysisDiagnostics.parameterRestorationKnockout.fullEffect, primaryMetricUnit, language)}</dd></div>
+                <div><dt>{language === 'zh-CN' ? '恢复后效应' : 'Restored effect'}</dt><dd>{formatMetricValue(results.analysisDiagnostics.parameterRestorationKnockout.knockoutEffect, primaryMetricUnit, language)}</dd></div>
                 <div><dt>{language === 'zh-CN' ? '衰减比例' : 'Attenuation'}</dt><dd>{formatMetricValue(results.analysisDiagnostics.parameterRestorationKnockout.attenuationFraction, 'ratio', language)}</dd></div>
                 <div><dt>{language === 'zh-CN' ? '内部机制支持' : 'Internal mechanism supported'}</dt><dd>{results.analysisDiagnostics.parameterRestorationKnockout.mechanismSupported === undefined ? t('common.unavailable') : results.analysisDiagnostics.parameterRestorationKnockout.mechanismSupported ? language === 'zh-CN' ? '是' : 'Yes' : language === 'zh-CN' ? '否' : 'No'}</dd></div>
               </dl>

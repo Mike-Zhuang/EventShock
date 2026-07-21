@@ -132,11 +132,12 @@ interface WorkflowContextValue {
   setScenario: (scenario: ScenarioDraft) => void;
   validateScenario: () => Promise<ScenarioValidation>;
   refreshExperiments: () => Promise<void>;
-  selectExperiment: (experimentId: string) => Promise<void>;
+  selectExperiment: (experimentId: string) => Promise<Experiment | undefined>;
+  cancelPendingExperimentRequests: () => void;
   createAndStartExperiment: () => Promise<Experiment>;
   cancelActiveExperiment: () => Promise<void>;
   invalidateActiveExperiment: (reasonCode: InvalidationReasonCode, reason: string) => Promise<void>;
-  loadResults: (experimentId?: string) => Promise<ExperimentResults>;
+  loadResults: (experimentId?: string) => Promise<ExperimentResults | undefined>;
   exportExperiment: (experimentId: string) => Promise<void>;
 }
 
@@ -174,6 +175,9 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   const [results, setResults] = useState<ExperimentResults>();
   const [resultsState, setResultsState] = useState<RequestState>('idle');
   const [resultsError, setResultsError] = useState<string>();
+  const resultsRequestGeneration = useRef(0);
+  const experimentSelectionGeneration = useRef(0);
+  const activeExperimentIdRef = useRef<string | undefined>(undefined);
   const pollTimer = useRef<number | undefined>(undefined);
   const streamAbortController = useRef<AbortController | null>(null);
 
@@ -275,10 +279,15 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   }, [activeExperiment?.id, activeExperiment?.status]);
 
   const selectCase = useCallback(async (caseItem: CaseSummary) => {
+    // 切换业务上下文时让仍在途的实验选择与结果请求失效，避免迟到响应重新污染界面。
+    experimentSelectionGeneration.current += 1;
+    resultsRequestGeneration.current += 1;
     setSelectedCase(caseItem);
     setEventPack(undefined);
     setValidation(undefined);
     setResults(undefined);
+    setResultsState('idle');
+    setResultsError(undefined);
     if (!caseItem.eventPackId) {
       setEventPackState('error');
       setEventPackError('The selected case does not include an Event Pack identifier.');
@@ -408,17 +417,30 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   }, [scenario]);
 
   const selectExperiment = useCallback(async (experimentId: string) => {
+    const selectionGeneration = ++experimentSelectionGeneration.current;
+    resultsRequestGeneration.current += 1;
     setExperimentsError(undefined);
     try {
       const nextExperiment = await api.getExperiment(experimentId);
+      if (selectionGeneration !== experimentSelectionGeneration.current) return undefined;
+      activeExperimentIdRef.current = nextExperiment.id;
       setActiveExperiment(nextExperiment);
       setExperiments((current) => upsertExperiment(current, nextExperiment));
       setResults(undefined);
+      setResultsState('idle');
       setResultsError(undefined);
+      return nextExperiment;
     } catch (error) {
+      if (selectionGeneration !== experimentSelectionGeneration.current) return undefined;
       setExperimentsError(errorMessage(error));
       throw error;
     }
+  }, []);
+
+  const cancelPendingExperimentRequests = useCallback(() => {
+    experimentSelectionGeneration.current += 1;
+    resultsRequestGeneration.current += 1;
+    setResultsState((current) => current === 'loading' ? 'idle' : current);
   }, []);
 
   const createAndStartExperiment = useCallback(async () => {
@@ -427,8 +449,16 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     try {
       const created = await api.createExperiment(scenario);
       const started = await api.startExperiment(created.id);
+      // 新实验成为活动实验时，必须同时让旧选择与旧结果请求失效，避免把上一场实验的
+      // 结果短暂或永久显示在新实验上下文中。
+      experimentSelectionGeneration.current += 1;
+      resultsRequestGeneration.current += 1;
+      activeExperimentIdRef.current = started.id;
       setActiveExperiment(started);
       setExperiments((current) => upsertExperiment(current, started));
+      setResults(undefined);
+      setResultsState('idle');
+      setResultsError(undefined);
       setExperimentsState('success');
       return started;
     } catch (error) {
@@ -466,21 +496,37 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   }, [activeExperiment]);
 
   const loadResults = useCallback(async (experimentId?: string) => {
-    const targetId = experimentId ?? activeExperiment?.id;
+    const targetId = experimentId ?? activeExperimentIdRef.current;
     if (!targetId) throw new Error('Select an experiment before loading results.');
+    const selectionGeneration = experimentSelectionGeneration.current;
+    if (activeExperimentIdRef.current !== targetId) return undefined;
+    const requestGeneration = ++resultsRequestGeneration.current;
     setResultsState('loading');
     setResultsError(undefined);
     try {
       const nextResults = await api.getResults(targetId);
+      if (
+        requestGeneration !== resultsRequestGeneration.current
+        || selectionGeneration !== experimentSelectionGeneration.current
+        || activeExperimentIdRef.current !== targetId
+      ) return undefined;
+      if (nextResults.experimentId !== targetId) {
+        throw new Error('The results response does not match the selected experiment.');
+      }
       setResults(nextResults);
       setResultsState('success');
       return nextResults;
     } catch (error) {
+      if (
+        requestGeneration !== resultsRequestGeneration.current
+        || selectionGeneration !== experimentSelectionGeneration.current
+        || activeExperimentIdRef.current !== targetId
+      ) return undefined;
       setResultsState('error');
       setResultsError(errorMessage(error));
       throw error;
     }
-  }, [activeExperiment?.id]);
+  }, []);
 
   const exportExperiment = useCallback(async (experimentId: string) => {
     const blob = await api.exportExperiment(experimentId);
@@ -527,6 +573,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     validateScenario,
     refreshExperiments,
     selectExperiment,
+    cancelPendingExperimentRequests,
     createAndStartExperiment,
     cancelActiveExperiment,
     invalidateActiveExperiment,
@@ -568,6 +615,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     experimentsError,
     experimentsState,
     cancelActiveExperiment,
+    cancelPendingExperimentRequests,
     invalidateActiveExperiment,
   ]);
 
