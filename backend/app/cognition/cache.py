@@ -39,6 +39,7 @@ def canonicalModelBytes(value: BaseModel) -> bytes:
 
 def buildDecisionCacheKey(
     *,
+    tenantHash: str,
     provider: str,
     model: str,
     promptHash: str,
@@ -48,6 +49,8 @@ def buildDecisionCacheKey(
     samplingConfig: Mapping[str, Any],
 ) -> str:
     material = {
+        # 认知缓存按登录会话隔离；这里只写不可逆摘要，避免把用户标识带入缓存元数据。
+        "tenantHash": tenantHash,
         "provider": provider,
         "model": model,
         "promptHash": promptHash,

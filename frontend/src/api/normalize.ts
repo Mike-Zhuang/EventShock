@@ -1,7 +1,14 @@
 import type {
+  AdminActivity,
+  AdminActivityPage,
+  AdminUserPage,
+  AdminUserStatistics,
+  AdminUserSummary,
   AgentFlowPoint,
   AgentPnlPoint,
   AnalysisDiagnostics,
+  AuthSession,
+  AuthUser,
   CaseSummary,
   CognitionDecisionSummary,
   CognitionEvalSummary,
@@ -62,6 +69,7 @@ import type {
   ValidationLadderLevel,
   ValidationLadderView,
   ValidationCheck,
+  VerificationCodeReceipt,
 } from './types';
 
 type JsonRecord = Record<string, unknown>;
@@ -168,6 +176,130 @@ function unwrapItems(value: unknown): unknown[] {
   if (isRecord(value) && Array.isArray(value.items)) return value.items;
   if (isRecord(value) && Array.isArray(value.data)) return value.data;
   return [];
+}
+
+function normalizeAuthUser(value: unknown): AuthUser {
+  if (!isRecord(value)) throw new TypeError('Authenticated user is not an object.');
+  const id = asString(read(value, 'id', 'userId', 'user_id'));
+  const email = asString(read(value, 'email'));
+  const rawRole = asString(read(value, 'role')).toUpperCase();
+  if (!id || !email || !['ADMIN', 'USER'].includes(rawRole)) {
+    throw new TypeError('Authenticated user is missing required account fields.');
+  }
+  return {
+    id,
+    email,
+    role: rawRole as AuthUser['role'],
+    emailVerified: asBoolean(read(value, 'emailVerified', 'email_verified'))
+      ?? Boolean(asOptionalString(read(value, 'emailVerifiedAt', 'email_verified_at'))),
+    createdAt: asString(read(value, 'createdAt', 'created_at')),
+    lastLoginAt: asOptionalString(read(value, 'lastLoginAt', 'last_login_at')),
+  };
+}
+
+export function normalizeAuthSession(value: unknown): AuthSession {
+  if (!isRecord(value)) throw new TypeError('Authentication session response is not an object.');
+  const authenticated = asBoolean(read(value, 'authenticated')) ?? false;
+  const userValue = read(value, 'user');
+  const user = userValue === undefined || userValue === null ? undefined : normalizeAuthUser(userValue);
+  if (authenticated && !user) throw new TypeError('Authenticated session is missing its user.');
+  return {
+    authenticationRequired: asBoolean(
+      read(value, 'authenticationRequired', 'authentication_required'),
+    ) ?? true,
+    authenticated,
+    user,
+    csrfToken: asOptionalString(read(value, 'csrfToken', 'csrf_token')),
+  };
+}
+
+export function normalizeVerificationCodeReceipt(value: unknown): VerificationCodeReceipt {
+  if (!isRecord(value)) throw new TypeError('Verification-code response is not an object.');
+  const now = Date.now();
+  const secondsUntil = (rawValue: unknown, fallback: number) => {
+    const timestamp = Date.parse(asString(rawValue));
+    return Number.isFinite(timestamp) ? Math.max(0, Math.ceil((timestamp - now) / 1_000)) : fallback;
+  };
+  return {
+    accepted: asBoolean(read(value, 'accepted')) ?? true,
+    retryAfterSeconds: asNumber(
+      read(value, 'retryAfterSeconds', 'retry_after_seconds', 'cooldownSeconds', 'cooldown_seconds'),
+    ) ?? secondsUntil(read(value, 'resendAfter', 'resend_after'), 60),
+    expiresInSeconds: asNumber(read(value, 'expiresInSeconds', 'expires_in_seconds'))
+      ?? secondsUntil(read(value, 'expiresAt', 'expires_at'), 600),
+  };
+}
+
+function normalizeAdminUser(value: unknown): AdminUserSummary {
+  const user = normalizeAuthUser(value);
+  if (!isRecord(value)) throw new TypeError('Admin user summary is not an object.');
+  const rawStatus = asString(read(value, 'status'), 'ACTIVE').toUpperCase();
+  return {
+    ...user,
+    status: rawStatus === 'DISABLED' ? 'DISABLED' : 'ACTIVE',
+    lastActivityAt: asOptionalString(read(value, 'lastActivityAt', 'last_activity_at')),
+    experimentCount: asNumber(read(value, 'experimentCount', 'experiment_count')) ?? 0,
+    activityCount: asNumber(read(value, 'activityCount', 'activity_count')) ?? 0,
+  };
+}
+
+function normalizeAdminStatistics(value: unknown, total: number): AdminUserStatistics {
+  const summary = isRecord(value) ? value : {};
+  return {
+    totalUsers: asNumber(read(summary, 'totalUsers', 'total_users')) ?? total,
+    verifiedUsers: asNumber(read(summary, 'verifiedUsers', 'verified_users')) ?? 0,
+    activeUsersLastSevenDays: asNumber(read(
+      summary,
+      'activeUsersLastSevenDays',
+      'active_users_last_seven_days',
+      'activeUsers7d',
+      'active_users_7d',
+    )) ?? 0,
+    totalActivities: asNumber(read(summary, 'totalActivities', 'total_activities')) ?? 0,
+  };
+}
+
+export function normalizeAdminUserPage(value: unknown): AdminUserPage {
+  if (!isRecord(value)) throw new TypeError('Admin users response is not an object.');
+  const items = unwrapItems(value).map(normalizeAdminUser);
+  const total = asNumber(read(value, 'total')) ?? items.length;
+  return {
+    items,
+    total,
+    summary: normalizeAdminStatistics(read(value, 'summary'), total),
+  };
+}
+
+function normalizeAdminActivity(value: unknown): AdminActivity {
+  if (!isRecord(value)) throw new TypeError('Admin activity is not an object.');
+  const id = asString(read(value, 'id', 'activityId', 'activity_id'));
+  const userId = asOptionalString(read(value, 'userId', 'user_id'));
+  const action = asString(read(value, 'action'));
+  const createdAt = asString(read(value, 'createdAt', 'created_at'));
+  if (!id || !action || !createdAt) {
+    throw new TypeError('Admin activity is missing required fields.');
+  }
+  return {
+    id,
+    userId,
+    userEmail: asOptionalString(read(value, 'userEmail', 'user_email')),
+    action,
+    entityType: asOptionalString(read(value, 'entityType', 'entity_type')),
+    entityId: asOptionalString(read(value, 'entityId', 'entity_id')),
+    outcome: asString(read(value, 'outcome', 'status')).toUpperCase() === 'FAILED'
+      ? 'FAILED'
+      : 'SUCCEEDED',
+    createdAt,
+  };
+}
+
+export function normalizeAdminActivityPage(value: unknown): AdminActivityPage {
+  if (!isRecord(value)) throw new TypeError('Admin activity response is not an object.');
+  const items = unwrapItems(value).map(normalizeAdminActivity);
+  return {
+    items,
+    total: asNumber(read(value, 'total')) ?? items.length,
+  };
 }
 
 function asParameter(value: unknown): InterventionParameter | undefined {
@@ -384,7 +516,8 @@ function normalizeClaim(value: unknown): EventClaim | null {
     sourceId: sourceIds[0] ?? asOptionalString(read(value, 'sourceId', 'source_id')),
     sourceIds,
     sourceTier: asOptionalString(read(value, 'sourceTier', 'source_tier')),
-    publishedAt: asOptionalString(read(value, 'knownAt', 'known_at', 'publishedAt', 'published_at')),
+    publishedAt: asOptionalString(read(value, 'publishedAt', 'published_at')),
+    knownAt: asOptionalString(read(value, 'knownAt', 'known_at')),
     confidence: asNumber(read(value, 'confidence')),
     impactChannels: asStringArray(read(value, 'impactChannels', 'impact_channels')),
     editedText: asOptionalString(read(value, 'editedText', 'edited_text')),

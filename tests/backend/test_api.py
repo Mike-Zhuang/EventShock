@@ -17,6 +17,7 @@ from backend.app.simulation.engine import runScenario
 SESSION_A = "test-session-a-12345"
 SESSION_B = "test-session-b-12345"
 PACK_ID = "spacex-synthetic-v1"
+BULK_REVIEW_PACK_ID = "gamestop-meme-2021-v1"
 
 
 def experimentPayload() -> dict:
@@ -88,6 +89,7 @@ def test_experiment_sse_emits_terminal_public_state_and_closes(tmp_path: Path) -
         )
         database.updateExperiment(
             "exp-sse-terminal",
+            SESSION_A,
             status="COMPLETED",
             progress=1.0,
             completed_pairs=10,
@@ -114,13 +116,17 @@ def test_spa_root_supports_head_without_capturing_api_paths(tmp_path: Path) -> N
     frontendDist = tmp_path / "frontend-dist"
     frontendDist.mkdir()
     (frontendDist / "index.html").write_text("<html>EventShock</html>", encoding="utf-8")
+    (frontendDist / "favicon.svg").write_text("<svg></svg>", encoding="utf-8")
     with TestClient(createApp(tmp_path / "data", frontendDist=frontendDist)) as client:
         rootResponse = client.head("/")
+        legacyFaviconResponse = client.get("/favicon.ico")
         apiResponse = client.head("/api/v1/unknown-route")
         scannerResponse = client.get("/.git/HEAD")
 
     assert rootResponse.status_code == 200
     assert rootResponse.content == b""
+    assert legacyFaviconResponse.status_code == 200
+    assert legacyFaviconResponse.headers["content-type"].startswith("image/svg+xml")
     assert apiResponse.status_code == 404
     assert apiResponse.headers["X-Trace-ID"].startswith("http-")
     assert scannerResponse.status_code == 404
@@ -198,6 +204,193 @@ def test_event_pack_review_and_freeze_are_session_isolated(tmp_path: Path) -> No
         claim for claim in sessionB["claims"] if claim["claimId"] == "claim-limited-depth"
     )
     assert sessionBClaim["reviewStatus"] == "AI_PROPOSED"
+
+
+def test_bulk_claim_approval_preserves_resolved_claims_and_is_auditable(
+    tmp_path: Path,
+) -> None:
+    with TestClient(createApp(tmp_path)) as client:
+        initial = client.get(
+            f"/api/v1/event-packs/{BULK_REVIEW_PACK_ID}",
+            headers={"X-Session-ID": SESSION_A},
+        ).json()
+        rejectedClaimId = "claim-board-refreshment"
+        editedClaimId = "claim-account-participation"
+        rejectResponse = client.post(
+            f"/api/v1/event-packs/{BULK_REVIEW_PACK_ID}/claims/{rejectedClaimId}/review",
+            headers={"X-Session-ID": SESSION_A},
+            json={"status": "REJECTED"},
+        )
+        editResponse = client.post(
+            f"/api/v1/event-packs/{BULK_REVIEW_PACK_ID}/claims/{editedClaimId}/review",
+            headers={"X-Session-ID": SESSION_A},
+            json={
+                "status": "EDITED",
+                "editedText": "A human-bounded account participation claim.",
+            },
+        )
+        assert rejectResponse.status_code == 200
+        assert editResponse.status_code == 200
+
+        pendingClaimIds = [
+            claim["claimId"]
+            for claim in editResponse.json()["claims"]
+            if claim["reviewStatus"] == "AI_PROPOSED"
+        ]
+        assert len(pendingClaimIds) == len(initial["claims"]) - 2
+        bulkResponse = client.post(
+            f"/api/v1/event-packs/{BULK_REVIEW_PACK_ID}/claims/approve-all",
+            headers={"X-Session-ID": SESSION_A},
+            json={
+                "acknowledgedBulkApproval": True,
+                # 顺序不属于确认契约；集合必须与当前待审核队列完全一致。
+                "expectedClaimIds": list(reversed(pendingClaimIds)),
+                "rationale": "Confirmed after reading the bulk-approval warning.",
+            },
+        )
+
+        assert bulkResponse.status_code == 200
+        reviewedClaims = {claim["claimId"]: claim for claim in bulkResponse.json()["claims"]}
+        assert reviewedClaims[rejectedClaimId]["reviewStatus"] == "REJECTED"
+        assert reviewedClaims[editedClaimId]["reviewStatus"] == "EDITED"
+        assert reviewedClaims[editedClaimId]["reviewedBy"] == SESSION_A
+        assert all(
+            reviewedClaims[claimId]["reviewStatus"] == "HUMAN_APPROVED"
+            and reviewedClaims[claimId]["reviewedBy"] == SESSION_A
+            for claimId in pendingClaimIds
+        )
+        assert len({reviewedClaims[claimId]["reviewedAt"] for claimId in pendingClaimIds}) == 1
+
+        auditEvents = client.app.state.database.listAuditEvents(SESSION_A)
+        bulkAudit = next(
+            event for event in auditEvents if event["action"] == "BULK_CLAIMS_APPROVED"
+        )
+        assert bulkAudit["entityType"] == "EVENT_PACK"
+        assert bulkAudit["entityId"] == BULK_REVIEW_PACK_ID
+        assert bulkAudit["payload"] == {
+            "claimCount": len(pendingClaimIds),
+            "claimIds": pendingClaimIds,
+            "reviewStatus": "HUMAN_APPROVED",
+            "warningAcknowledged": True,
+            "rationale": "Confirmed after reading the bulk-approval warning.",
+        }
+        assert client.app.state.database.verifyAuditChain(SESSION_A)["valid"] is True
+
+        otherOwner = client.get(
+            f"/api/v1/event-packs/{BULK_REVIEW_PACK_ID}",
+            headers={"X-Session-ID": SESSION_B},
+        ).json()
+        assert all(claim["reviewStatus"] == "AI_PROPOSED" for claim in otherOwner["claims"])
+        freezeResponse = client.post(
+            f"/api/v1/event-packs/{BULK_REVIEW_PACK_ID}/freeze",
+            headers={"X-Session-ID": SESSION_A},
+        )
+
+    assert freezeResponse.status_code == 200
+    assert freezeResponse.json()["status"] == "FROZEN"
+
+
+def test_bulk_claim_approval_requires_confirmation_and_exact_pending_queue(
+    tmp_path: Path,
+) -> None:
+    endpoint = f"/api/v1/event-packs/{PACK_ID}/claims/approve-all"
+    headers = {"X-Session-ID": SESSION_A}
+    expectedClaimIds = ["claim-limited-depth"]
+    with TestClient(createApp(tmp_path)) as client:
+        missingConfirmation = client.post(
+            endpoint,
+            headers=headers,
+            json={"expectedClaimIds": expectedClaimIds},
+        )
+        falseConfirmation = client.post(
+            endpoint,
+            headers=headers,
+            json={
+                "acknowledgedBulkApproval": False,
+                "expectedClaimIds": expectedClaimIds,
+            },
+        )
+        duplicateIds = client.post(
+            endpoint,
+            headers=headers,
+            json={
+                "acknowledgedBulkApproval": True,
+                "expectedClaimIds": ["claim-limited-depth", "claim-limited-depth"],
+            },
+        )
+        changedQueue = client.post(
+            endpoint,
+            headers=headers,
+            json={
+                "acknowledgedBulkApproval": True,
+                "expectedClaimIds": ["claim-different"],
+            },
+        )
+        validLlmIdentifierShape = client.post(
+            endpoint,
+            headers=headers,
+            json={
+                "acknowledgedBulkApproval": True,
+                # LLM 抽取契约允许冒号和最多 128 字符；批量接口必须接受同一标识空间。
+                "expectedClaimIds": ["c:" + ("a" * 126)],
+            },
+        )
+        unchanged = client.get(
+            f"/api/v1/event-packs/{PACK_ID}",
+            headers=headers,
+        ).json()
+
+    assert missingConfirmation.status_code == 422
+    assert falseConfirmation.status_code == 422
+    assert duplicateIds.status_code == 422
+    assert changedQueue.status_code == 409
+    assert changedQueue.json()["error"]["code"] == "CLAIM_QUEUE_CHANGED"
+    assert validLlmIdentifierShape.status_code == 409
+    assert validLlmIdentifierShape.json()["error"]["code"] == "CLAIM_QUEUE_CHANGED"
+    pending = next(
+        claim for claim in unchanged["claims"] if claim["claimId"] == "claim-limited-depth"
+    )
+    assert pending["reviewStatus"] == "AI_PROPOSED"
+    assert unchanged["status"] == "DRAFT"
+
+
+def test_bulk_claim_approval_rejects_empty_and_frozen_queues(tmp_path: Path) -> None:
+    endpoint = f"/api/v1/event-packs/{PACK_ID}/claims/approve-all"
+    headers = {"X-Session-ID": SESSION_A}
+    payload = {
+        "acknowledgedBulkApproval": True,
+        "expectedClaimIds": ["claim-limited-depth"],
+    }
+    with TestClient(createApp(tmp_path)) as client:
+        approved = client.post(endpoint, headers=headers, json=payload)
+        assert approved.status_code == 200
+        noPending = client.post(endpoint, headers=headers, json=payload)
+        frozen = client.post(
+            f"/api/v1/event-packs/{PACK_ID}/freeze",
+            headers=headers,
+        )
+        afterFreeze = client.post(endpoint, headers=headers, json=payload)
+
+    assert noPending.status_code == 409
+    assert noPending.json()["error"]["code"] == "NO_PENDING_CLAIMS"
+    assert frozen.status_code == 200
+    assert afterFreeze.status_code == 409
+    assert afterFreeze.json()["error"]["code"] == "EVENT_PACK_FROZEN"
+
+
+def test_bulk_claim_approval_uses_the_standard_write_rate_limit(tmp_path: Path) -> None:
+    endpoint = f"/api/v1/event-packs/{PACK_ID}/claims/approve-all"
+    headers = {"X-Session-ID": SESSION_A}
+    stalePayload = {
+        "acknowledgedBulkApproval": True,
+        "expectedClaimIds": ["claim-different"],
+    }
+    with TestClient(createApp(tmp_path)) as client:
+        responses = [client.post(endpoint, headers=headers, json=stalePayload) for _ in range(31)]
+
+    assert all(response.status_code == 409 for response in responses[:30])
+    assert responses[30].status_code == 429
+    assert responses[30].json()["error"]["code"] == "RATE_LIMIT_EXCEEDED"
 
 
 def test_rejected_clarification_blocks_clarification_delay_intervention(
@@ -381,6 +574,7 @@ def test_experiment_subresources_and_invalidation_contract(tmp_path: Path) -> No
         )
         client.app.state.database.updateExperiment(
             experimentId,
+            SESSION_A,
             status="COMPLETED",
             result_json=persistedResult,
             progress=1.0,
@@ -619,6 +813,7 @@ def test_retryable_experiment_resumes_verified_matched_pair_checkpoint(tmp_path:
         )
         database.updateExperiment(
             experimentId,
+            SESSION_A,
             status="FAILED_RETRYABLE",
             error_code="SERVER_RESTARTED",
             completed_pairs=1,

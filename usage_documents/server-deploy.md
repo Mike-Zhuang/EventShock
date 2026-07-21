@@ -37,6 +37,7 @@ Internet :80/:443
 - UFW 启用时，注册工具只允许动态识别出的 Caddy Docker bridge 及其 subnet 访问 host-gateway 的 `18080`；该规则是容器到宿主机的内部通道，不是公网端口放行。
 - 实验状态接口使用 SSE；宝塔 Nginx 的 EventShock 代理配置必须关闭响应缓冲，保留长连接相关请求头，并且不能缓存 `/api/v1/experiments/*/events`。
 - SQLite 保存在 Docker 命名卷 `eventshock-data`；重新构建应用镜像不会删除该卷。
+- 长期认证随机密钥与 SMTP 密码只保存在服务器 `/opt/eventshock/shared/secrets`，以只读文件挂载给固定 UID `10001` 的应用；真实值不进入 Git、Compose 环境变量、镜像或部署日志。
 - 每个发布目录都生成独立的 `.release.env`，应用镜像标签形如 `eventshock-app:<release-id>`。上一版本不会因下一次构建而被同名镜像覆盖。
 
 第 9 节说明如何在不中断现有 HTTPS 的前提下完成宝塔 Nginx 接入。Caddy 直连仅作为首次引导和故障诊断模式，不是本项目要求的最终监测拓扑。
@@ -164,6 +165,57 @@ EVENTSHOCK_GITHUB_REPOSITORY=Mike-Zhuang/EventShock
 
 配置文件位于 `/opt/eventshock/shared/github-sync.env`，由 root 拥有且权限为 `0600`。新安装默认跟踪 `main`；安装器不会覆盖已经存在的配置，因此旧服务器升级后必须人工确认该值。仓库为公有仓库，配置中不应出现 GitHub Token、密码或部署密钥。
 
+### 5.1 首次配置登录与邮件密钥
+
+真实密码不得写入仓库、`.env.example`、Docker 环境变量或 SSH 命令参数。先建立受限目录；应用固定使用 UID/GID `10001`，只允许读取两个长期密钥文件：
+
+```bash
+sudo install -d -o root -g 10001 -m 0750 /opt/eventshock/shared/secrets
+openssl rand -hex 32 \
+  | sudo install -o root -g 10001 -m 0440 /dev/stdin \
+      /opt/eventshock/shared/secrets/auth-secret
+
+read -r -s -p 'SMTP password: ' smtpPassword
+printf '\n'
+printf '%s\n' "${smtpPassword}" \
+  | sudo install -o root -g 10001 -m 0440 /dev/stdin \
+      /opt/eventshock/shared/secrets/smtp-password
+unset smtpPassword
+```
+
+在 root 专用的 `/opt/eventshock/shared/.env` 中只填写非敏感配置和密钥目录路径；以下值都是占位示例：
+
+```dotenv
+EVENTSHOCK_AUTH_REQUIRED=true
+EVENTSHOCK_AUTH_COOKIE_SECURE=true
+EVENTSHOCK_ADMIN_EMAIL=admin@example.com
+EVENTSHOCK_SMTP_HOST=smtp.example.com
+EVENTSHOCK_SMTP_PORT=465
+EVENTSHOCK_SMTP_USERNAME=sender@example.com
+EVENTSHOCK_SMTP_SENDER=sender@example.com
+EVENTSHOCK_SECRETS_DIR=/opt/eventshock/shared/secrets
+```
+
+首次发布还需要一个只允许 root 读取的一次性管理员初始密码。它不挂载为应用可读密钥，也不设置成环境变量；新版本通过容器健康检查后，部署脚本用标准输入把它交给管理员引导命令，事务成功后立即删除：
+
+```bash
+read -r -s -p 'Initial admin password: ' adminPassword
+printf '\n'
+printf '%s\n' "${adminPassword}" \
+  | sudo install -o root -g root -m 0400 /dev/stdin \
+      /opt/eventshock/shared/secrets/admin-bootstrap-password.once
+unset adminPassword
+```
+
+只核对文件名、所有者和权限，不得打印内容：
+
+```bash
+sudo find /opt/eventshock/shared/secrets -maxdepth 1 -type f \
+  -printf '%u:%g %m %f\n' | sort
+```
+
+预期目录为 `root:10001 750`，使容器 UID/GID `10001` 只能进入受限目录；`auth-secret`、`smtp-password` 为 `root:10001 440`，一次性管理员文件为 `root:root 400`，因此应用即使看见文件名也不能读取初始密码，且整个挂载在容器内为只读。部署脚本会在构建和启动前逐项验证这些所有者、权限、文件类型、大小及共享环境配置，任何偏差都会终止发布。管理员引导失败时部署会回滚并保留 `.once` 文件以便安全重试；成功时该文件必须消失。不要在共享配置中增加 `EVENTSHOCK_ADMIN_BOOTSTRAP_PASSWORD` 或 `EVENTSHOCK_ADMIN_BOOTSTRAP_PASSWORD_FILE`。
+
 安装完成后，可先做只读检查：
 
 ```bash
@@ -240,9 +292,13 @@ sudo grep -E 'NO_CHANGE|WAIT_CI|CI_BLOCKED|RUNTIME_(DRIFT|SELF_HEAL_)|TARGET_SEL
 6. 查询目标 SHA 的三项 GitHub CI；只有全部成功才继续。
 7. 使用 `git archive` 把该提交解包到临时目录，拒绝缺少 `frontend/dist/index.html`、后端入口、注册器或 systemd 安装器的提交。旧注册器无法恢复代理但 GitHub 存在新目标时，会先用已经通过 CI 的目标注册器再自愈一次，避免修复版本被旧故障锁死。
 8. 本地应用健康但代理仍无法恢复时记录 `INFRASTRUCTURE_BLOCKED`，不把已知正常的已部署 commit 写入失败退避；只有需要实际发布的目标才进入发布失败退避。
-9. 运行目标提交自己的 `deploy-server.sh`，创建 `/opt/eventshock/releases/<release-id>`，并构建唯一镜像标签 `eventshock-app:<release-id>`。
-10. 等待应用容器健康，修复并验证宝塔代理，再要求公网 `/api/health` 同时返回 `status=ok` 与目标 40 位 `releaseCommit`。
-11. 成功后才写同步状态，并把 `/opt/eventshock/bin` 原子切换到目标 commit 的不可变运维脚本目录；失败时先验证宝塔代理和上一版本公网 SHA，再恢复上一发布目录。
+9. 运行目标提交自己的 `deploy-server.sh`，创建 `/opt/eventshock/releases/<release-id>`，验证认证配置和密钥权限，并构建唯一镜像标签 `eventshock-app:<release-id>`。
+10. 如果已有线上版本，先用目标提交的注册器在旧应用仍运行时安装并验收 EventShock 专用的无 Cookie 宝塔流量格式；该步骤完成前不得启动认证版本。
+11. 等待新应用容器通过内部健康检查。首次管理员尚未创建的短暂窗口内，后端会对注册、登录和密码重置返回 `AUTHENTICATION_INITIALIZING`，因此不能抢先创建普通账号。
+12. 若 root 专用的一次性管理员密码文件存在，通过容器标准输入执行幂等管理员引导；成功后删除文件，失败则触发整次发布回滚。
+13. 在容器内确认配置的管理员确实存在，且六类历史业务记录的未归属数量全部为零；遗漏 `.once` 文件或迁移不完整都会阻断发布。
+14. 再次修复并验证宝塔代理，要求公网 `/api/health` 同时返回 `status=ok` 与目标 40 位 `releaseCommit`。
+15. 成功后才写同步状态，并把 `/opt/eventshock/bin` 原子切换到目标 commit 的不可变运维脚本目录；失败时先验证宝塔代理和上一版本公网 SHA，再恢复上一发布目录。
 
 同一目标 SHA 部署失败后会进入有界退避：第一次至少等待 30 分钟，后续失败至少等待 60 分钟；分支出现新的 SHA 后自动解除。这样 10 分钟计划任务仍会持续记录状态，但不会反复构建一个已知失败版本。应用发布和运维脚本各保留最近 5 个不可变版本，当前版本不会被清理。
 
@@ -367,6 +423,8 @@ sudo /opt/eventshock/bin/register-baota-site.py \
 
 注册工具调用宝塔自己的 `panelSite.AddSite` 与 `CreateProxy`，不会直接插入 `sites` 数据库；它还会停用宝塔默认公网 vhost 与 `phpfpm_status` vhost，把安装器内置的 phpMyAdmin `888` listener 收口到 `127.0.0.1:888`，并要求唯一非回环业务 listener 是私网 `18080`。生成的站点扩展配置包含 `proxy_buffering off`，使实验 SSE 状态流不会被 Nginx 聚合后才一次性返回。站点会以 `project_type=PHP`、`version=00` 出现在宝塔 PHP 项目列表，但实际业务是指向 FastAPI 的反向代理，不会安装或执行 PHP。
 
+宝塔 `free_site_total` 的全局默认格式会采集 `$http_cookie`，不能直接用于登录后的 EventShock 流量。注册工具会从宝塔当前格式生成一个站点专用副本，将 Cookie、Authorization、CSRF Token 和旧会话头固定替换为 `[REDACTED]`，再把 EventShock 的统计 socket 切换到该格式。专用格式和站点统计配置都纳入 Nginx 快照、`nginx -t` 与失败回滚；不得为恢复统计而改回全局 `site_total` 格式。Caddy 访问日志也会显式删除相同认证头。
+
 工具从正在运行的 Caddy 容器动态读取 Docker network ID、subnet 与对应 Linux bridge。UFW active 时，它只认领完整语法、Docker bridge、当前 host-gateway、`18080/tcp` 和 `EventShock-Caddy-Nginx` 注释都满足安全边界的规则；先添加当前窄规则，再删除旧 bridge 的自有窄规则，并能从“新旧规则同时存在”的中断状态继续收敛。任何 broad/public、错误目标、错误接口或未知规则都会在首次写操作前被拒绝。后续步骤失败时，规则按修改前的集合恢复。
 
 注册器还会原子安装 `/etc/systemd/system/nginx.service.d/eventshock-docker-order.conf`：`Wants=docker.service` 与 `After=docker.service` 确保开机时 Docker 先就绪；Nginx 启动失败后每 5 秒重试，并受 60 秒内 6 次的启动限制保护。这里有意不用 `Requires` 或 `PartOf`，避免停止 Docker 时连带停止承载其他宝塔站点的全局 Nginx。安装器会启用 `nginx.service`，验证 drop-in 已被 systemd 读取，并在写入或验证失败时恢复原文件。
@@ -411,6 +469,9 @@ sudo /opt/eventshock/bin/register-baota-site.py \
 APP_DOMAIN=eventshock.mikezhuang.cn
 APP_ENV=production
 LOG_LEVEL=INFO
+EVENTSHOCK_AUTH_REQUIRED=true
+EVENTSHOCK_AUTH_COOKIE_SECURE=true
+EVENTSHOCK_SECRETS_DIR=/opt/eventshock/shared/secrets
 ```
 
 若 DNS 或证书签发临时不可用，可短期改为：
@@ -432,10 +493,11 @@ IP 回退没有 HTTPS，只用于排查；问题解决后必须恢复域名。�
 - `app` 最多使用 1.5 个 CPU、1024 MiB 内存；`caddy` 最多使用 0.25 个 CPU、128 MiB 内存。
 - 容器采用 `restart: unless-stopped` 与日志轮转。应用以非 root 用户运行、根文件系统只读，并删除不需要的 Linux capabilities。
 - 宝塔 Nginx 的持久 systemd drop-in 要求 `After/Wants=docker.service` 并启用失败重试；10 分钟同步任务继续核对进程、内部代理和公网 SHA，覆盖运行期崩溃与配置漂移。
-- Caddy 将请求体限制为 2 MiB，并删除访问日志中的匿名会话请求头 `X-Session-ID`。
+- Caddy 将请求体限制为 2 MiB，并删除访问日志中的 Cookie、Authorization、CSRF Token 与旧匿名会话请求头；宝塔流量统计使用同样的站点专用脱敏格式。
 - Caddy 与 Python 基础镜像锁定到仓库中审核过的版本或 digest；依赖分别由 `package-lock.json`、`requirements.lock` 和 `requirements-dev.lock` 固定。
 - GitHub 同步使用匿名只读请求；服务器不保存 GitHub Token。
 - 每次更新前通过 SQLite online backup 在持久卷的 `deployment-backups/` 中创建一致性备份，并只保留最近 3 份。失败回滚不会自动覆盖数据库，因为新版本短暂对外期间可能已经产生合法写入；如需恢复数据，应先停写并人工核对备份时间点。
+- 在线备份使用临时数据库并在原子替换后清理该临时文件及其 `-wal`、`-shm` sidecar；不得通过通配符删除其他发布正在使用的文件。认证所有权迁移前还应额外建立一份固定名称、不会被三份滚动窗口删除的人工备份，并执行 `PRAGMA quick_check`。
 - 代码发布目录与唯一镜像默认保留最近 5 个版本，同时始终保留当前版本和直接回滚目标；清理失败只记录警告，不影响已经验证成功的版本。
 - 服务器是单实例 MVP，不提供高可用。至少在重要演示前使用 SQLite 在线备份能力创建站外备份；不要在应用写入期间直接复制数据库文件。
 

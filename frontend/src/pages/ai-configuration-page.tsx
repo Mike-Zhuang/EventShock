@@ -18,8 +18,10 @@ import type {
   LlmConnectionTest,
   PromptRegistryItem,
 } from '../api/types';
-import { ErrorPanel, LoadingPanel, Notice, PageHeader, StatusBadge } from '../components/common';
+import { ErrorPanel, ExplainedLabel, LoadingPanel, Notice, PageHeader, ParameterHelp, StatusBadge } from '../components/common';
 import { useI18n } from '../i18n';
+import { getPageGuide } from '../page-guidance';
+import { getParameterHelp } from '../parameter-help';
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -28,6 +30,12 @@ function messageOf(error: unknown): string {
 export function AiConfigurationPage() {
   const { language, t } = useI18n();
   const isZh = language === 'zh-CN';
+  const explained = (key: string, label: string) => (
+    <ExplainedLabel label={label} explanation={getParameterHelp(key, language) ?? label} />
+  );
+  const parameterHelp = (key: string, label: string) => (
+    <ParameterHelp label={label} explanation={getParameterHelp(key, language) ?? label} />
+  );
   const [catalog, setCatalog] = useState<LlmCatalog>();
   const [config, setConfig] = useState<LlmConfigView>();
   const [prompts, setPrompts] = useState<PromptRegistryItem[]>([]);
@@ -164,8 +172,9 @@ export function AiConfigurationPage() {
       <PageHeader
         title={isZh ? 'AI 模型配置' : 'AI Model Configuration'}
         subtitle={isZh
-          ? '配置用于证据抽取与代表性认知智能体的智谱 API。密钥只在本服务器内存中短时保存。'
-          : 'Configure Zhipu API access for evidence extraction and representative cognitive agents. The key remains only in short-lived server memory.'}
+          ? '配置用于证据抽取与代表性认知智能体的智谱 API。密钥仅绑定当前登录会话并短时驻留服务器内存，不写入账户或数据库。'
+          : 'Configure Zhipu API access for evidence extraction and representative cognitive agents. The key is bound only to this sign-in session, kept briefly in server memory, and never written to the account or database.'}
+        guide={getPageGuide('ai', language)}
         actions={<StatusBadge status={config?.configured ? 'CONFIGURED' : 'RULE ONLY'} />}
       />
 
@@ -194,7 +203,7 @@ export function AiConfigurationPage() {
         <section className="ai-config-panel" aria-labelledby="provider-settings-heading">
           <div className="section-heading">
             <h2 id="provider-settings-heading">{isZh ? '供应商与凭据' : 'Provider and credential'}</h2>
-            <p>{isZh ? '浏览器只把密钥发送到同源后端，不直接请求智谱。' : 'The browser sends the key only to the same-origin backend and never calls Zhipu directly.'}</p>
+            <p>{isZh ? '浏览器只把密钥发送到同源后端，不直接请求智谱；退出、过期或服务重启后需要重新填写。' : 'The browser sends the key only to the same-origin backend and never calls Zhipu directly. Re-enter it after sign-out, expiry, or a service restart.'}</p>
           </div>
           <div className="config-form-grid">
             <TextInput
@@ -206,6 +215,7 @@ export function AiConfigurationPage() {
             <Select
               id="llm-model"
               labelText={isZh ? '模型' : 'Model'}
+              decorator={parameterHelp('model', isZh ? '模型' : 'Model')}
               value={model}
               onChange={(event) => {
                 setModel(event.target.value);
@@ -228,7 +238,7 @@ export function AiConfigurationPage() {
               labelText={isZh ? '智谱 API Key' : 'Zhipu API key'}
               helperText={config?.configured
                 ? `${isZh ? '当前配置' : 'Current credential'}: ${config.credentialHint ?? 'hidden'}`
-                : isZh ? '保存后输入框会立即清空。' : 'The field clears immediately after saving.'}
+                : isZh ? '仅为当前登录会话临时启用；保存后输入框立即清空。' : 'Used temporarily for this sign-in session only; the field clears immediately after saving.'}
               value={apiKey}
               autoComplete="off"
               onChange={(event) => setApiKey(event.target.value)}
@@ -236,6 +246,7 @@ export function AiConfigurationPage() {
             <NumberInput
               id="llm-max-tokens"
               label={isZh ? '最大输出 token' : 'Maximum output tokens'}
+              decorator={parameterHelp('maxOutputTokens', isZh ? '最大输出 token' : 'Maximum output tokens')}
               min={256}
               max={Math.min(selectedModel?.maxOutputTokens ?? 131_072, 32_768)}
               step={256}
@@ -246,22 +257,25 @@ export function AiConfigurationPage() {
               }}
             />
           </div>
-          <Toggle
-            id="llm-thinking"
-            labelText={isZh ? '思考模式' : 'Thinking mode'}
-            labelA={isZh ? '关闭' : 'Off'}
-            labelB={isZh ? '开启' : 'On'}
-            toggled={thinkingEnabled}
-            disabled={!selectedModel?.supportsThinking}
-            onToggle={setThinkingEnabled}
-          />
+          <div className="toggle-with-help">
+            {explained('thinkingMode', isZh ? '思考模式' : 'Thinking mode')}
+            <Toggle
+              id="llm-thinking"
+              aria-label={isZh ? '思考模式' : 'Thinking mode'}
+              labelA={isZh ? '关闭' : 'Off'}
+              labelB={isZh ? '开启' : 'On'}
+              toggled={thinkingEnabled}
+              disabled={!selectedModel?.supportsThinking}
+              onToggle={setThinkingEnabled}
+            />
+          </div>
           <div className="ai-config-actions">
             <Button
               renderIcon={FloppyDisk}
               disabled={!apiKey.trim() || busyAction !== undefined || selectedModel?.pricingStatus !== 'VERIFIED_UPPER_BOUND'}
               onClick={() => void save()}
             >
-              {busyAction === 'save' ? isZh ? '保存中' : 'Saving' : isZh ? '保存到会话' : 'Save for session'}
+              {busyAction === 'save' ? isZh ? '保存中' : 'Saving' : isZh ? '临时用于本次登录' : 'Use for this sign-in'}
             </Button>
             <Button
               kind="tertiary"
@@ -322,7 +336,7 @@ export function AiConfigurationPage() {
             <div className="credential-state">
               <Key size={20} />
               <div>
-                <strong>{isZh ? '会话凭据已配置' : 'Session credential configured'}</strong>
+                <strong>{isZh ? '当前登录的临时凭据已配置' : 'Temporary credential configured for this sign-in'}</strong>
                 <span>{config.expiresAt ? new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(config.expiresAt)) : ''}</span>
               </div>
             </div>
@@ -388,7 +402,7 @@ export function AiConfigurationPage() {
             {evaluationBusy === 'LIVE_CONFIGURED_MODEL' ? isZh ? '评估模型中' : 'Evaluating model' : isZh ? '运行真实智谱模型评估' : 'Run live Zhipu evaluation'}
           </Button>
         </div>
-        {!config?.configured ? <Notice>{isZh ? '真实模型评估需要先保存当前会话的智谱 API Key。代码 grader 自检不需要密钥。' : 'Live-model evaluation requires a session-scoped Zhipu API key. The code-grader self-test does not require a key.'}</Notice> : null}
+        {!config?.configured ? <Notice>{isZh ? '真实模型评估需要先为当前登录临时填写智谱 API Key。Key 不写入账户或数据库；代码 grader 自检不需要密钥。' : 'Live-model evaluation requires a temporary Zhipu API key for this sign-in. The key is never written to the account or database; the code-grader self-test does not require it.'}</Notice> : null}
         {evaluationRun ? (
           <div className="ai-evaluation-result">
             <div className="ai-evaluation-result__summary">

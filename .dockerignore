@@ -20,6 +20,7 @@
 __pycache__/
 *.py[cod]
 .eventshock-data/
+.eventshock-secrets/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

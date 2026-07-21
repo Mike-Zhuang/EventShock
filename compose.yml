@@ -12,6 +12,15 @@ services:
       EVENTSHOCK_DATA_DIR: /data
       EVENTSHOCK_RELEASE_COMMIT: "${EVENTSHOCK_RELEASE_COMMIT:-development}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      EVENTSHOCK_AUTH_REQUIRED: "${EVENTSHOCK_AUTH_REQUIRED:-true}"
+      EVENTSHOCK_AUTH_COOKIE_SECURE: "${EVENTSHOCK_AUTH_COOKIE_SECURE:-true}"
+      EVENTSHOCK_ADMIN_EMAIL: "${EVENTSHOCK_ADMIN_EMAIL:-}"
+      EVENTSHOCK_AUTH_SECRET_FILE: /run/secrets/eventshock/auth-secret
+      EVENTSHOCK_SMTP_HOST: "${EVENTSHOCK_SMTP_HOST:-}"
+      EVENTSHOCK_SMTP_PORT: "${EVENTSHOCK_SMTP_PORT:-465}"
+      EVENTSHOCK_SMTP_USERNAME: "${EVENTSHOCK_SMTP_USERNAME:-}"
+      EVENTSHOCK_SMTP_PASSWORD_FILE: /run/secrets/eventshock/smtp-password
+      EVENTSHOCK_SMTP_SENDER: "${EVENTSHOCK_SMTP_SENDER:-}"
     expose:
       - "8000"
     ports:
@@ -19,6 +28,10 @@ services:
       - "127.0.0.1:${EVENTSHOCK_APP_HOST_PORT:-18000}:8000"
     volumes:
       - eventshock-data:/data
+      # 目录中只允许放服务器侧密钥文件；不得把真实值写进 Compose 或 Git。
+      # 一次性管理员密码保持 root:root 0400，应用 UID 10001 无权读取，
+      # 仅由 deploy-server.sh 通过标准输入交给引导命令。
+      - "${EVENTSHOCK_SECRETS_DIR:-./.eventshock-secrets}:/run/secrets/eventshock:ro"
     healthcheck:
       test:
         - CMD

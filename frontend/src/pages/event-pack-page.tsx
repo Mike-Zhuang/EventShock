@@ -7,12 +7,15 @@ import {
   LockKey,
   PencilSimple,
   UploadSimple,
+  Warning,
   X,
 } from '@phosphor-icons/react';
 import { useMemo, useState } from 'react';
 import type { ViewId } from '../app';
-import { EmptyState, ErrorPanel, LoadingPanel, PageHeader, StatusBadge } from '../components/common';
+import { EmptyState, ErrorPanel, ExplainedLabel, LoadingPanel, PageHeader, StatusBadge } from '../components/common';
 import { useI18n } from '../i18n';
+import { getPageGuide } from '../page-guidance';
+import { getParameterHelp } from '../parameter-help';
 import { useWorkflow } from '../state/workflow-context';
 import type { EventClaim } from '../api/types';
 import { EventPackUploadModal } from '../components/event-pack-upload-modal';
@@ -25,6 +28,7 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
     eventPackError,
     claimBusyId,
     reviewClaim,
+    approveAllPendingClaims,
     freezeEventPack,
   } = useWorkflow();
   const [editingClaim, setEditingClaim] = useState<EventClaim>();
@@ -33,12 +37,16 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
   const [actionError, setActionError] = useState<string>();
   const [uploadOpen, setUploadOpen] = useState(false);
   const [reextractOpen, setReextractOpen] = useState(false);
+  const [bulkApproveOpen, setBulkApproveOpen] = useState(false);
+  const [bulkApproveError, setBulkApproveError] = useState<string>();
 
-  const unresolvedCount = useMemo(
-    () => eventPack?.claims.filter((claim) => claim.status === 'AI_PROPOSED').length ?? 0,
+  const pendingClaimIds = useMemo(
+    () => eventPack?.claims.filter((claim) => claim.status === 'AI_PROPOSED').map((claim) => claim.id) ?? [],
     [eventPack],
   );
+  const unresolvedCount = pendingClaimIds.length;
   const isFrozen = eventPack?.status.toUpperCase() === 'FROZEN' || Boolean(eventPack?.frozenAt);
+  const reviewBusy = Boolean(claimBusyId);
 
   const decideClaim = async (claimId: string, status: 'HUMAN_APPROVED' | 'REJECTED') => {
     setActionError(undefined);
@@ -79,6 +87,21 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
     }
   };
 
+  const approveAll = async () => {
+    if (pendingClaimIds.length === 0) return;
+    setBulkApproveError(undefined);
+    try {
+      await approveAllPendingClaims({
+        acknowledgedBulkApproval: true,
+        expectedClaimIds: pendingClaimIds,
+        rationale: 'User acknowledged the bulk-approval warning in the Event Pack review interface.',
+      });
+      setBulkApproveOpen(false);
+    } catch (error) {
+      setBulkApproveError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   if (eventPackState === 'loading') return <div className="page"><PageHeader title={t('pack.title')} subtitle={t('pack.subtitle')} /><LoadingPanel /></div>;
   if (eventPackState === 'error') return (
     <div className="page">
@@ -114,13 +137,14 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
       <PageHeader
         title={language === 'zh-CN' ? eventPack.nameZh ?? eventPack.name : eventPack.name}
         subtitle={t('pack.subtitle')}
+        guide={getPageGuide('pack', language)}
         actions={(
           <div className="page-header-action-group">
             <Button kind="tertiary" renderIcon={UploadSimple} onClick={() => setUploadOpen(true)}>
               {language === 'zh-CN' ? '新建 Event Pack' : 'New Event Pack'}
             </Button>
             {!isFrozen && eventPack.editableExtraction ? (
-              <Button kind="ghost" renderIcon={FileText} onClick={() => setReextractOpen(true)}>
+              <Button kind="ghost" renderIcon={FileText} disabled={reviewBusy} onClick={() => setReextractOpen(true)}>
                 {language === 'zh-CN' ? '重新抽取' : 'Re-extract'}
               </Button>
             ) : null}
@@ -178,7 +202,7 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
           <strong>{eventPack.claims.length}</strong>
         </div>
         <div>
-          <span>{t('pack.pointInTime')}</span>
+          <span><ExplainedLabel label={t('pack.pointInTime')} explanation={getParameterHelp('asOf', language) ?? ''} /></span>
           <strong>{eventPack.pointInTime ? new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(eventPack.pointInTime)) : t('common.unavailable')}</strong>
         </div>
         <div>
@@ -234,9 +258,9 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
                   <p>{source.publisher ?? t('common.unavailable')}</p>
                   <dl>
                     <div><dt>{t('common.id')}</dt><dd>{source.id}</dd></div>
-                    {source.tier ? <div><dt>{t('common.tier')}</dt><dd>{source.tier}</dd></div> : null}
-                    {source.publishedAt ? <div><dt>{language === 'zh-CN' ? '发布时间' : 'Published at'}</dt><dd>{new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(source.publishedAt))}</dd></div> : null}
-                    {source.knownAt ? <div><dt>{language === 'zh-CN' ? '可见时间' : 'Known at'}</dt><dd>{new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(source.knownAt))}</dd></div> : null}
+                    {source.tier ? <div><dt><ExplainedLabel label={t('common.tier')} explanation={language === 'zh-CN' ? '来源层级描述证据类型与可靠性边界；它不是主张真实性的概率评分。' : 'The source tier records evidence type and reliability boundaries; it is not a probability that a claim is true.'} /></dt><dd>{source.tier}</dd></div> : null}
+                    {source.publishedAt ? <div><dt><ExplainedLabel label={language === 'zh-CN' ? '发布时间' : 'Published at'} explanation={language === 'zh-CN' ? '来源首次公开发布的时间。' : 'Time when the source was first published publicly.'} /></dt><dd>{new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(source.publishedAt))}</dd></div> : null}
+                    {source.knownAt ? <div><dt><ExplainedLabel label={language === 'zh-CN' ? '可见时间' : 'Known at'} explanation={language === 'zh-CN' ? '研究者在时点约束下最早可使用该来源的时间，不一定等于发布时间。' : 'Earliest time the source may be used under the point-in-time constraint; it may differ from publication time.'} /></dt><dd>{new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(source.knownAt))}</dd></div> : null}
                     {source.hash ? <div><dt>{t('common.hash')}</dt><dd title={source.hash}>{source.hash.slice(0, 14)}</dd></div> : null}
                   </dl>
                   {source.url ? <a href={source.url} target="_blank" rel="noreferrer"><LinkIcon size={16} />{t('common.source')}</a> : null}
@@ -251,17 +275,34 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
             <h2 id="claim-queue-heading">{t('pack.claimQueue')}</h2>
             <p>{t('pack.claimQueueHelp')}</p>
           </div>
+          {!isFrozen && unresolvedCount > 0 ? (
+            <div className="bulk-review-callout">
+              <div>
+                <strong>{language === 'zh-CN' ? `${unresolvedCount} 项仍待人工审核` : `${unresolvedCount} claim(s) still require human review`}</strong>
+                <p>{language === 'zh-CN' ? '建议逐条核对；批量批准必须先经过风险警告，并会留下单独审计记录。' : 'Review one by one when possible. Bulk approval requires a risk warning and leaves a separate audit record.'}</p>
+              </div>
+              <Button
+                kind="danger--tertiary"
+                size="sm"
+                renderIcon={Warning}
+                disabled={reviewBusy}
+                onClick={() => { setBulkApproveError(undefined); setBulkApproveOpen(true); }}
+              >
+                {language === 'zh-CN' ? `批准全部待审核项（${unresolvedCount}）` : `Approve all pending (${unresolvedCount})`}
+              </Button>
+            </div>
+          ) : null}
           {eventPack.claims.length === 0 ? <p className="empty-inline">{t('pack.noClaims')}</p> : (
             <div className="claim-list">
               {eventPack.claims.map((claim) => {
-                const disabled = isFrozen || claimBusyId === claim.id;
+                const disabled = isFrozen || reviewBusy;
                 return (
                   <article key={claim.id} className="claim-item">
                     <div className="claim-item__meta">
                       <StatusBadge status={claim.status} />
-                      {claim.isRequired ? <span>{t('pack.required')}</span> : null}
+                      {claim.isRequired ? <span><ExplainedLabel label={t('pack.required')} explanation={language === 'zh-CN' ? '必需主张必须被批准或编辑后，事件包才允许冻结；不能仅拒绝。' : 'A required claim must be approved or edited before the Event Pack can freeze; rejection alone is not allowed.'} /></span> : null}
                       {claim.sourceTier ? <span>{claim.sourceTier}</span> : null}
-                      {claim.confidence !== undefined ? <span>{Math.round(claim.confidence * 100)}%</span> : null}
+                      {claim.confidence !== undefined ? <span><ExplainedLabel label={`${Math.round(claim.confidence * 100)}%`} explanation={language === 'zh-CN' ? '这是候选抽取置信度，用于排序人工复核，不表示该主张为真的概率。' : 'Candidate-extraction confidence for prioritizing review; it is not the probability that the claim is true.'} /></span> : null}
                     </div>
                     <p className="claim-item__text">{language === 'zh-CN' ? claim.textZh ?? claim.text : claim.text}</p>
                     {claim.impactChannels && claim.impactChannels.length > 0 ? (
@@ -271,7 +312,8 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
                       {(claim.sourceIds?.length ? claim.sourceIds : claim.sourceId ? [claim.sourceId] : []).map((sourceId) => (
                         <Tag key={sourceId} type="cool-gray" size="sm">{sourceId}</Tag>
                       ))}
-                      {claim.publishedAt ? <span>{language === 'zh-CN' ? '可见时间' : 'Known at'} {new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(claim.publishedAt))}</span> : null}
+                      {claim.publishedAt ? <span>{language === 'zh-CN' ? '发布时间' : 'Published at'} {new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(claim.publishedAt))}</span> : null}
+                      {claim.knownAt ? <span>{language === 'zh-CN' ? '可见时间' : 'Known at'} {new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(claim.knownAt))}</span> : null}
                     </div>
                     <div className="claim-item__actions">
                       <Button kind="ghost" size="sm" renderIcon={Check} disabled={disabled} onClick={() => void decideClaim(claim.id, 'HUMAN_APPROVED')}>
@@ -296,7 +338,7 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
             </div>
             <Button
               renderIcon={LockKey}
-              disabled={isFrozen || unresolvedCount > 0}
+              disabled={isFrozen || unresolvedCount > 0 || reviewBusy}
               onClick={() => void freeze()}
             >
               {t('pack.freeze')}
@@ -312,6 +354,35 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
         ) : <p className="empty-inline">{language === 'zh-CN' ? '此自定义事件包尚未附加额外限制；仍受情景分析、合成机制和非投资建议边界约束。' : 'This custom Event Pack has no additional limitation record. Scenario-analysis, synthetic-mechanism, and non-advisory boundaries still apply.'}</p>}
       </section>
 
+      <Modal
+        open={bulkApproveOpen}
+        danger
+        modalLabel={language === 'zh-CN' ? '人工审核警告' : 'Human-review warning'}
+        modalHeading={language === 'zh-CN' ? `批准全部 ${unresolvedCount} 项待审核主张？` : `Approve all ${unresolvedCount} pending claims?`}
+        primaryButtonText={reviewBusy
+          ? language === 'zh-CN' ? '正在批准' : 'Approving'
+          : language === 'zh-CN' ? `我已理解，批准 ${unresolvedCount} 项` : `I understand — approve ${unresolvedCount}`}
+        secondaryButtonText={t('common.cancel')}
+        primaryButtonDisabled={reviewBusy || unresolvedCount === 0}
+        onRequestClose={() => { if (!reviewBusy) setBulkApproveOpen(false); }}
+        onRequestSubmit={() => void approveAll()}
+      >
+        <InlineNotification
+          kind="warning"
+          lowContrast
+          hideCloseButton
+          title={language === 'zh-CN' ? '这不是来源核验的替代品' : 'This does not replace source verification'}
+          subtitle={language === 'zh-CN'
+            ? '确认后，当前所有待审核事实、估计与合成假设都会被标为“人工批准”。系统不会替你判断它们是否正确；已有修改、拒绝和批准保持不变，也不会自动冻结事件包。'
+            : 'Every currently pending fact, estimate, and synthetic assumption will be marked human-approved. The system cannot decide whether they are correct. Existing edits, rejections, and approvals remain unchanged, and the Event Pack will not freeze automatically.'}
+        />
+        <p className="modal-help">{language === 'zh-CN'
+          ? '如果另一标签页已经改变待审核队列，服务器会拒绝本次操作并要求你重新确认。'
+          : 'If another tab changed the pending queue, the server will reject this request and require a fresh confirmation.'}</p>
+        {bulkApproveError ? (
+          <InlineNotification kind="error" lowContrast hideCloseButton title={t('common.errorTitle')} subtitle={bulkApproveError} />
+        ) : null}
+      </Modal>
       <Modal
         open={Boolean(editingClaim)}
         modalHeading={t('pack.editTitle')}

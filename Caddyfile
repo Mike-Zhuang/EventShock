@@ -32,8 +32,11 @@
 
 	log {
 		output stdout
-		# X-Session-ID 用于匿名会话隔离，不应进入访问日志。
+		# 登录 Cookie、认证头、CSRF Token 与旧匿名会话标识都不能进入访问日志。
 		format filter {
+			request>headers>Cookie delete
+			request>headers>Authorization delete
+			request>headers>X-Csrf-Token delete
 			request>headers>X-Session-Id delete
 			wrap json
 		}

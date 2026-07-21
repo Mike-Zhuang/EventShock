@@ -1,7 +1,7 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../api/client';
-import type { Experiment, ExperimentResults } from '../api/types';
+import type { EventPack, Experiment, ExperimentResults } from '../api/types';
 import { useWorkflow, WorkflowProvider } from './workflow-context';
 
 vi.mock('../api/client', () => ({
@@ -11,6 +11,8 @@ vi.mock('../api/client', () => ({
     getExperiments: vi.fn(async () => []),
     getExperiment: vi.fn(),
     getResults: vi.fn(),
+    getEventPack: vi.fn(),
+    approveAllClaims: vi.fn(),
     createExperiment: vi.fn(),
     startExperiment: vi.fn(),
     streamExperiment: vi.fn(async () => undefined),
@@ -42,6 +44,19 @@ function completedExperiment(id: string): Experiment {
     status: 'COMPLETED',
     progress: 100,
     logs: [],
+  };
+}
+
+function reviewPack(status: 'AI_PROPOSED' | 'HUMAN_APPROVED'): EventPack {
+  return {
+    id: 'pack-review',
+    name: 'Review pack',
+    status: 'DRAFT',
+    editableExtraction: false,
+    limitations: [],
+    limitationsZh: [],
+    sources: [],
+    claims: [{ id: 'claim-one', text: 'A reviewable candidate claim.', status }],
   };
 }
 
@@ -108,6 +123,38 @@ describe('工作流实验与结果归属', () => {
       await oldRequest;
     });
     expect(screen.getByTestId('workflow-state')).toHaveTextContent('exp-new|none');
+  });
+
+  it('批量批准只发出一次原子请求并用完整响应替换事件包', async () => {
+    let workflow!: ReturnType<typeof useWorkflow>;
+    vi.mocked(api.getEventPack).mockResolvedValue(reviewPack('AI_PROPOSED'));
+    vi.mocked(api.approveAllClaims).mockResolvedValue(reviewPack('HUMAN_APPROVED'));
+
+    function Harness() {
+      workflow = useWorkflow();
+      return <output data-testid="claim-status">{workflow.eventPack?.claims[0]?.status ?? 'none'}</output>;
+    }
+
+    render(<WorkflowProvider><Harness /></WorkflowProvider>);
+    await waitFor(() => expect(api.getExperiments).toHaveBeenCalled());
+    await act(async () => {
+      await workflow.selectCase({ id: 'case-review', eventPackId: 'pack-review', name: 'Review case' });
+    });
+    expect(screen.getByTestId('claim-status')).toHaveTextContent('AI_PROPOSED');
+
+    await act(async () => {
+      await workflow.approveAllPendingClaims({
+        acknowledgedBulkApproval: true,
+        expectedClaimIds: ['claim-one'],
+      });
+    });
+
+    expect(api.approveAllClaims).toHaveBeenCalledTimes(1);
+    expect(api.approveAllClaims).toHaveBeenCalledWith('pack-review', {
+      acknowledgedBulkApproval: true,
+      expectedClaimIds: ['claim-one'],
+    });
+    expect(screen.getByTestId('claim-status')).toHaveTextContent('HUMAN_APPROVED');
   });
 
   it('并发选择实验时只提交最后一次选择，并拒绝为非活动实验加载结果', async () => {

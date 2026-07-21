@@ -40,6 +40,11 @@ NGINX_SYSTEMD_FALLBACK_INSTALLER = (
 )
 SITE_TOTAL_SOCKET = "/tmp/site_total.sock"
 SITE_TOTAL_EXTENSION_PATH = os.path.join(EXTENSION_DIR, "site_total.conf")
+SITE_TOTAL_SOURCE_LOG_FORMAT_PATH = "/www/server/panel/vhost/nginx/0.site_total_log_format.conf"
+SITE_TOTAL_SAFE_LOG_FORMAT_PATH = (
+    "/www/server/panel/vhost/nginx/0.eventshock_site_total_log_format.conf"
+)
+SITE_TOTAL_SAFE_LOG_FORMAT_NAME = "eventshock_site_total"
 SITE_TOTAL_DATA_GLOB = f"/www/server/site_total/data/total/{SITE_NAME}/*.json"
 PANEL_LOOPBACK_LISTENER = "127.0.0.1:888"
 UFW_BINARY_PATH = "/usr/sbin/ufw"
@@ -615,6 +620,69 @@ def atomicWrite(path, content, mode=0o644):
     os.replace(temporaryPath, path)
 
 
+def installCookieSafeSiteTrafficLog(siteId):
+    """为 EventShock 复制站点统计格式，但删除全部认证相关请求头。"""
+
+    if not os.path.isfile(SITE_TOTAL_SOURCE_LOG_FORMAT_PATH):
+        raise RuntimeError("宝塔 free_site_total 的全局日志格式不存在")
+    sourceContent = open(SITE_TOTAL_SOURCE_LOG_FORMAT_PATH).read()
+    safeContent, formatCount = re.subn(
+        r"(?m)^(\s*log_format\s+)site_total(\s+)",
+        rf"\g<1>{SITE_TOTAL_SAFE_LOG_FORMAT_NAME}\g<2>",
+        sourceContent,
+        count=1,
+    )
+    if formatCount != 1:
+        raise RuntimeError("宝塔 free_site_total 日志格式无法唯一识别")
+
+    sensitiveVariables = (
+        "$http_cookie",
+        "$http_authorization",
+        "$http_x_csrf_token",
+        "$http_x_session_id",
+    )
+    for variable in sensitiveVariables:
+        safeContent = safeContent.replace(variable, "[REDACTED]")
+    if any(variable in safeContent for variable in sensitiveVariables):
+        raise RuntimeError("EventShock 站点统计格式仍包含认证相关请求头")
+    atomicWrite(SITE_TOTAL_SAFE_LOG_FORMAT_PATH, safeContent)
+
+    if not os.path.isfile(SITE_TOTAL_EXTENSION_PATH):
+        raise RuntimeError("宝塔 free_site_total 的 EventShock 站点配置不存在")
+    extensionContent = open(SITE_TOTAL_EXTENSION_PATH).read()
+    match = re.fullmatch(r"\s*access_log\s+(\S+)\s+\S+;\s*", extensionContent)
+    if match is None:
+        raise RuntimeError("EventShock 站点统计 access_log 不是唯一受管指令")
+    expectedTarget = f"syslog:server=unix:{SITE_TOTAL_SOCKET},nohostname,tag={int(siteId)}__access"
+    if match.group(1) != expectedTarget:
+        raise RuntimeError("EventShock 站点统计 access_log 的 socket 或站点 ID 不匹配")
+    atomicWrite(
+        SITE_TOTAL_EXTENSION_PATH,
+        f"access_log {expectedTarget} {SITE_TOTAL_SAFE_LOG_FORMAT_NAME};\n",
+    )
+
+
+def cookieSafeSiteTrafficReady(siteId):
+    try:
+        safeContent = open(SITE_TOTAL_SAFE_LOG_FORMAT_PATH).read()
+        extensionContent = open(SITE_TOTAL_EXTENSION_PATH).read()
+    except OSError:
+        return False
+    sensitiveVariables = (
+        "$http_cookie",
+        "$http_authorization",
+        "$http_x_csrf_token",
+        "$http_x_session_id",
+    )
+    expectedTarget = f"syslog:server=unix:{SITE_TOTAL_SOCKET},nohostname,tag={int(siteId)}__access"
+    return (
+        f"log_format {SITE_TOTAL_SAFE_LOG_FORMAT_NAME}" in safeContent
+        and not any(variable in safeContent for variable in sensitiveVariables)
+        and extensionContent.strip()
+        == f"access_log {expectedTarget} {SITE_TOTAL_SAFE_LOG_FORMAT_NAME};"
+    )
+
+
 def snapshotFiles(paths):
     snapshots = {}
     for path in paths:
@@ -846,9 +914,25 @@ def validateCaddyToNginx(caddyContainerId, expectedReleaseCommit):
 
 
 def enableSiteTraffic(siteTotalConfigClass, siteId):
-    result = siteTotalConfigClass().one_site_status(int(siteId), True)
-    if result:
-        raise RuntimeError(f"启用宝塔 free_site_total 失败：{result}")
+    siteTotal = siteTotalConfigClass()
+    existingConfig = siteTotal.get_status()
+    existingEnabledSiteIds = {
+        int(item["site_id"]) for item in existingConfig.get("sites", []) if item.get("is_open")
+    }
+    existingRuntimeReady = (
+        os.path.isfile(SITE_TOTAL_EXTENSION_PATH)
+        and os.path.exists(SITE_TOTAL_SOCKET)
+        and stat.S_ISSOCK(os.stat(SITE_TOTAL_SOCKET).st_mode)
+        and subprocess.call(["systemctl", "is-active", "--quiet", "site_total"]) == 0
+    )
+    if (
+        not existingConfig.get("is_open", False)
+        or int(siteId) not in existingEnabledSiteIds
+        or not existingRuntimeReady
+    ):
+        result = siteTotal.one_site_status(int(siteId), True)
+        if result:
+            raise RuntimeError(f"启用宝塔 free_site_total 失败：{result}")
 
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
@@ -868,7 +952,7 @@ def enableSiteTraffic(siteTotalConfigClass, siteId):
     if SITE_TOTAL_SOCKET not in content or expectedTag not in content:
         raise RuntimeError("宝塔站点流量统计配置未绑定正确的站点 ID 或 Unix socket")
 
-    config = siteTotalConfigClass().get_status()
+    config = siteTotal.get_status()
     enabledSiteIds = {
         int(item["site_id"]) for item in config.get("sites", []) if item.get("is_open")
     }
@@ -972,6 +1056,9 @@ def main():
                         "socketReady": os.path.exists(SITE_TOTAL_SOCKET)
                         and stat.S_ISSOCK(os.stat(SITE_TOTAL_SOCKET).st_mode),
                         "extensionReady": os.path.isfile(SITE_TOTAL_EXTENSION_PATH),
+                        "credentialHeadersRedacted": (
+                            cookieSafeSiteTrafficReady(int(site["id"])) if site else False
+                        ),
                         "requests": siteTrafficRequests(),
                     },
                 },
@@ -1005,6 +1092,7 @@ def main():
         DISABLED_PHPFPM_STATUS_PATH,
         EXTENSION_PATH,
         SITE_TOTAL_EXTENSION_PATH,
+        SITE_TOTAL_SAFE_LOG_FORMAT_PATH,
     ]
     snapshots = snapshotFiles(managedPaths)
     scopedUfwMutation = None
@@ -1019,6 +1107,7 @@ def main():
         # 宝塔生成代理配置时可能重写主 vhost；再次强制并验证内部监听。
         restrictVhostListener(listenAddress, trustedCaddyNetwork)
         enableSiteTraffic(siteTotalConfigClass, int(site["id"]))
+        installCookieSafeSiteTrafficLog(int(site["id"]))
         trafficRequestsBefore = siteTrafficRequests()
         validateEffectiveNginxConfig(listenAddress)
         scopedUfwMutation = ensureScopedUfwRule(

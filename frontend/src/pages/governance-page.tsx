@@ -21,6 +21,7 @@ import type {
 } from '../api/types';
 import { EmptyState, LoadingPanel, Notice, PageHeader, StatusBadge } from '../components/common';
 import { useI18n } from '../i18n';
+import { getPageGuide } from '../page-guidance';
 import { useWorkflow } from '../state/workflow-context';
 import { formatMetricValue, safeDate } from '../utils/format';
 
@@ -144,6 +145,7 @@ export function GovernancePage() {
       <PageHeader
         title={t('governance.title')}
         subtitle={t('governance.subtitle')}
+        guide={getPageGuide('governance', language)}
         actions={<Button kind="ghost" onClick={() => void load()}>{isZh ? '刷新治理证据' : 'Refresh evidence'}</Button>}
       />
 

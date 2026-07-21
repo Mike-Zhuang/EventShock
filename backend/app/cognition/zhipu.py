@@ -252,6 +252,7 @@ class ZhipuRestGateway:
     @staticmethod
     def _cacheKey(request: ModelRequest) -> str:
         return buildDecisionCacheKey(
+            tenantHash=hashlib.sha256(request.userId.encode("utf-8")).hexdigest(),
             provider=request.provider,
             model=request.model,
             promptHash=request.promptHash,

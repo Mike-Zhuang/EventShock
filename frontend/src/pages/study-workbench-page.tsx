@@ -16,6 +16,7 @@ import {
 } from '@phosphor-icons/react';
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
+import { getPageGuide } from '../page-guidance';
 import type {
   StudyDesignInput,
   StudyDesignKind,
@@ -560,6 +561,7 @@ export function StudyWorkbenchPage({ navigate }: { navigate: (view: ViewId) => v
         subtitle={isZh
           ? '把模型内部机制问题预注册为有界设计，执行共同随机种子、完整负对照、消融、Holm 校正和敏感性筛查。'
           : 'Preregister a model-mechanism question as a bounded design, then execute common seeds, the full control and ablation suite, Holm correction, and sensitivity screening.'}
+        guide={getPageGuide('study', language)}
         actions={<Tag type="purple" size="md">MODEL-INTERNAL ONLY</Tag>}
       />
 

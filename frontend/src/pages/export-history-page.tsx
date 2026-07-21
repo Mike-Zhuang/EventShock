@@ -5,6 +5,7 @@ import type { Navigate } from '../app';
 import { EmptyState, LoadingPanel, PageHeader, StatusBadge } from '../components/common';
 import { ExperimentHistoryDisclosure, experimentHistoryLabel } from '../components/experiment-history';
 import { useI18n } from '../i18n';
+import { getPageGuide } from '../page-guidance';
 import { useWorkflow } from '../state/workflow-context';
 import { safeDate } from '../utils/format';
 
@@ -80,7 +81,7 @@ export function ExportHistoryPage({ navigate }: { navigate: Navigate }) {
 
   return (
     <div className="page page--export">
-      <PageHeader title={t('export.title')} subtitle={t('export.subtitle')} />
+      <PageHeader title={t('export.title')} subtitle={t('export.subtitle')} guide={getPageGuide('export', language)} />
       {message ? (
         <InlineNotification kind={message.kind} lowContrast hideCloseButton title={message.kind === 'success' ? t('export.success') : t('common.errorTitle')} subtitle={message.text} />
       ) : null}

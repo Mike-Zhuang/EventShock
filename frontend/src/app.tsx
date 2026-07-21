@@ -1,4 +1,4 @@
-import { IconButton, Theme } from '@carbon/react';
+import { Button, IconButton, InlineNotification, Theme } from '@carbon/react';
 import {
   Archive,
   Books,
@@ -15,6 +15,9 @@ import {
   SlidersHorizontal,
   Sun,
   TreeStructure,
+  SignOut,
+  UserCircle,
+  UsersThree,
   X,
 } from '@phosphor-icons/react';
 import {
@@ -28,7 +31,9 @@ import {
 } from 'react';
 import { ApiConnectionBanner, LoadingPanel, ServiceStatus } from './components/common';
 import { I18nProvider, useI18n } from './i18n';
+import { AuthenticationPage } from './pages/authentication-page';
 import { CaseLibraryPage } from './pages/case-library-page';
+import { AuthProvider, useAuth } from './state/auth-context';
 import { useWorkflow, WorkflowProvider } from './state/workflow-context';
 
 const EventPackPage = lazy(async () => ({ default: (await import('./pages/event-pack-page')).EventPackPage }));
@@ -41,11 +46,12 @@ const RunCenterPage = lazy(async () => ({ default: (await import('./pages/run-ce
 const ScenarioBuilderPage = lazy(async () => ({ default: (await import('./pages/scenario-builder-page')).ScenarioBuilderPage }));
 const StudyWorkbenchPage = lazy(async () => ({ default: (await import('./pages/study-workbench-page')).StudyWorkbenchPage }));
 const TraceExplorerPage = lazy(async () => ({ default: (await import('./pages/trace-explorer-page')).TraceExplorerPage }));
+const AdminPage = lazy(async () => ({ default: (await import('./pages/admin-page')).AdminPage }));
 
-export type ViewId = 'cases' | 'pack' | 'ai' | 'scenario' | 'preflight' | 'runs' | 'results' | 'study' | 'trace' | 'governance' | 'export';
+export type ViewId = 'cases' | 'pack' | 'ai' | 'scenario' | 'preflight' | 'runs' | 'results' | 'study' | 'trace' | 'governance' | 'export' | 'admin';
 export type Navigate = (view: ViewId, experimentId?: string) => void;
 
-const VIEW_IDS: ViewId[] = ['cases', 'pack', 'ai', 'scenario', 'preflight', 'runs', 'results', 'study', 'trace', 'governance', 'export'];
+const VIEW_IDS: ViewId[] = ['cases', 'pack', 'ai', 'scenario', 'preflight', 'runs', 'results', 'study', 'trace', 'governance', 'export', 'admin'];
 const MOBILE_NAVIGATION_ID = 'mobile-primary-navigation';
 
 interface NavigationItem {
@@ -66,55 +72,62 @@ export function buildAppHash(view: ViewId, experimentId?: string): string {
   return `#/${view}?${new URLSearchParams({ experimentId }).toString()}`;
 }
 
+interface NavigationSection {
+  label: string;
+  items: NavigationItem[];
+}
+
 function NavigationItems({
-  items,
+  sections,
   view,
   onNavigate,
 }: {
-  items: NavigationItem[];
+  sections: NavigationSection[];
   view: ViewId;
   onNavigate: (view: ViewId) => void;
 }) {
   return (
     <>
-      {items.map((item) => {
-        const Icon = item.icon;
-        return (
-          <button
-            key={item.id}
-            type="button"
-            className={view === item.id ? 'is-active' : ''}
-            aria-current={view === item.id ? 'page' : undefined}
-            onClick={() => onNavigate(item.id)}
-          >
-            <Icon size={19} weight={view === item.id ? 'fill' : 'regular'} />
-            <span>{item.label}</span>
-          </button>
-        );
-      })}
+      {sections.map((section) => (
+        <section className="navigation-section" key={section.label} aria-label={section.label}>
+          <span className="navigation-section__label">{section.label}</span>
+          {section.items.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                className={view === item.id ? 'is-active' : ''}
+                aria-current={view === item.id ? 'page' : undefined}
+                onClick={() => onNavigate(item.id)}
+              >
+                <Icon size={19} weight={view === item.id ? 'fill' : 'regular'} />
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
+        </section>
+      ))}
     </>
   );
 }
 
-function AppShell() {
+function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: () => void }) {
   const { language, setLanguage, t } = useI18n();
+  const { user, logout } = useAuth();
   const { cancelPendingExperimentRequests, loadResults, selectExperiment } = useWorkflow();
   const loadResultsRef = useRef(loadResults);
   const routeGenerationRef = useRef(0);
   const [view, setView] = useState<ViewId>(() => parseAppRoute(window.location.hash).view);
-  const [isDark, setIsDark] = useState(() => window.localStorage.getItem('eventshock-theme') === 'dark');
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [logoutBusy, setLogoutBusy] = useState(false);
+  const [logoutError, setLogoutError] = useState(false);
   const mobileMenuButtonRef = useRef<HTMLButtonElement>(null);
   const mobileNavigationRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     loadResultsRef.current = loadResults;
   }, [loadResults]);
-
-  useEffect(() => {
-    window.localStorage.setItem('eventshock-theme', isDark ? 'dark' : 'light');
-    document.documentElement.dataset.theme = isDark ? 'dark' : 'light';
-  }, [isDark]);
 
   useEffect(() => {
     let cancelled = false;
@@ -215,19 +228,42 @@ function AppShell() {
     window.scrollTo({ top: 0, behavior: 'auto' });
   };
 
-  const navigation = useMemo<NavigationItem[]>(() => [
-    { id: 'cases', label: t('nav.cases'), icon: Books },
-    { id: 'pack', label: t('nav.pack'), icon: ClipboardText },
-    { id: 'ai', label: t('nav.ai'), icon: Cpu },
-    { id: 'scenario', label: t('nav.scenario'), icon: SlidersHorizontal },
-    { id: 'preflight', label: t('nav.preflight'), icon: CheckSquare },
-    { id: 'runs', label: t('nav.runs'), icon: PlayCircle },
-    { id: 'results', label: t('nav.results'), icon: ChartLineUp },
-    { id: 'study', label: t('nav.study'), icon: Flask },
-    { id: 'trace', label: t('nav.trace'), icon: TreeStructure },
-    { id: 'governance', label: t('nav.governance'), icon: ShieldCheck },
-    { id: 'export', label: t('nav.export'), icon: Archive },
-  ], [t]);
+  useEffect(() => {
+    if (view === 'admin' && user?.role !== 'ADMIN') navigate('cases');
+  }, [user?.role, view]);
+
+  const navigation = useMemo<NavigationSection[]>(() => {
+    const sections: NavigationSection[] = [
+      {
+        label: t('nav.groupCore'),
+        items: [
+          { id: 'cases', label: t('nav.cases'), icon: Books },
+          { id: 'pack', label: t('nav.pack'), icon: ClipboardText },
+          { id: 'scenario', label: t('nav.scenario'), icon: SlidersHorizontal },
+          { id: 'preflight', label: t('nav.preflight'), icon: CheckSquare },
+          { id: 'runs', label: t('nav.runs'), icon: PlayCircle },
+          { id: 'results', label: t('nav.results'), icon: ChartLineUp },
+        ],
+      },
+      {
+        label: t('nav.groupOptional'),
+        items: [
+          { id: 'ai', label: t('nav.ai'), icon: Cpu },
+          { id: 'study', label: t('nav.study'), icon: Flask },
+          { id: 'trace', label: t('nav.trace'), icon: TreeStructure },
+          { id: 'governance', label: t('nav.governance'), icon: ShieldCheck },
+          { id: 'export', label: t('nav.export'), icon: Archive },
+        ],
+      },
+    ];
+    if (user?.role === 'ADMIN') {
+      sections.push({
+        label: t('nav.groupAdmin'),
+        items: [{ id: 'admin', label: t('nav.admin'), icon: UsersThree }],
+      });
+    }
+    return sections;
+  }, [t, user?.role]);
 
   const pages: Record<ViewId, React.ReactNode> = {
     cases: <CaseLibraryPage navigate={navigate} />,
@@ -241,6 +277,20 @@ function AppShell() {
     trace: <TraceExplorerPage />,
     governance: <GovernancePage />,
     export: <ExportHistoryPage navigate={navigate} />,
+    admin: <AdminPage />,
+  };
+
+  const signOut = async () => {
+    setLogoutBusy(true);
+    setLogoutError(false);
+    try {
+      await logout();
+    } catch {
+      // 后端未确认注销时保留当前界面与 Cookie 状态，避免共享设备产生“假退出”。
+      setLogoutError(true);
+    } finally {
+      setLogoutBusy(false);
+    }
   };
 
   return (
@@ -269,6 +319,11 @@ function AppShell() {
           </div>
           <div className="topbar__controls">
             <ServiceStatus />
+            <div className="account-summary" title={user?.email}>
+              <UserCircle size={19} weight="duotone" aria-hidden="true" />
+              <span>{user?.email}</span>
+              {user?.role === 'ADMIN' ? <small>{t('app.adminRole')}</small> : null}
+            </div>
             <div className="language-toggle" role="group" aria-label={t('app.language')}>
               <button type="button" className={language === 'en' ? 'is-active' : ''} onClick={() => setLanguage('en')}>EN</button>
               <button type="button" className={language === 'zh-CN' ? 'is-active' : ''} onClick={() => setLanguage('zh-CN')}>中文</button>
@@ -277,16 +332,29 @@ function AppShell() {
               kind="ghost"
               size="sm"
               label={isDark ? t('app.themeLight') : t('app.themeDark')}
-              onClick={() => setIsDark((current) => !current)}
+              onClick={onToggleTheme}
             >
               {isDark ? <Sun size={19} /> : <Moon size={19} />}
             </IconButton>
+            <Button
+              className="logout-button"
+              kind="ghost"
+              size="sm"
+              renderIcon={SignOut}
+              aria-label={logoutBusy ? t('app.signingOut') : t('app.signOut')}
+              disabled={logoutBusy}
+              onClick={() => void signOut()}
+            >
+              <span className="logout-button__label">
+                {logoutBusy ? t('app.signingOut') : t('app.signOut')}
+              </span>
+            </Button>
           </div>
         </header>
 
         <aside className="sidebar" aria-label={t('app.primaryNavigation')}>
           <nav>
-            <NavigationItems items={navigation} view={view} onNavigate={navigate} />
+            <NavigationItems sections={navigation} view={view} onNavigate={navigate} />
           </nav>
           <footer className="sidebar__footer">
             <p>{t('footer.disclaimer')}</p>
@@ -312,7 +380,7 @@ function AppShell() {
           hidden={!mobileNavOpen}
         >
           <nav aria-label={t('app.primaryNavigation')}>
-            <NavigationItems items={navigation} view={view} onNavigate={navigate} />
+            <NavigationItems sections={navigation} view={view} onNavigate={navigate} />
           </nav>
           <footer className="sidebar__footer">
             <p>{t('footer.disclaimer')}</p>
@@ -320,6 +388,15 @@ function AppShell() {
         </aside>
 
         <main id="main-content" className="main-content" tabIndex={-1}>
+          {logoutError ? (
+            <InlineNotification
+              kind="error"
+              lowContrast
+              hideCloseButton
+              title={t('app.signOutFailed')}
+              subtitle={t('app.signOutFailedBody')}
+            />
+          ) : null}
           <ApiConnectionBanner />
           <Suspense fallback={<LoadingPanel />}>
             {pages[view]}
@@ -335,12 +412,40 @@ function AppShell() {
   );
 }
 
+function AuthenticationBoundary() {
+  const { state } = useAuth();
+  const [isDark, setIsDark] = useState(() => window.localStorage.getItem('eventshock-theme') === 'dark');
+
+  useEffect(() => {
+    window.localStorage.setItem('eventshock-theme', isDark ? 'dark' : 'light');
+    document.documentElement.dataset.theme = isDark ? 'dark' : 'light';
+  }, [isDark]);
+
+  if (state === 'authenticated') {
+    return (
+      <WorkflowProvider>
+        <AppShell isDark={isDark} onToggleTheme={() => setIsDark((current) => !current)} />
+      </WorkflowProvider>
+    );
+  }
+
+  return (
+    <Theme theme={isDark ? 'g100' : 'g10'} className="app-theme">
+      {state === 'checking' ? (
+        <div className="auth-loading"><LoadingPanel /></div>
+      ) : (
+        <AuthenticationPage isDark={isDark} onToggleTheme={() => setIsDark((current) => !current)} />
+      )}
+    </Theme>
+  );
+}
+
 export function App() {
   return (
     <I18nProvider>
-      <WorkflowProvider>
-        <AppShell />
-      </WorkflowProvider>
+      <AuthProvider>
+        <AuthenticationBoundary />
+      </AuthProvider>
     </I18nProvider>
   );
 }

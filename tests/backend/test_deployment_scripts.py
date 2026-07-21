@@ -296,6 +296,196 @@ def testEventShockNginxExtensionDisablesStreamingBuffers() -> None:
     assert '"proxy_cache off;\\n"' in source
 
 
+def testInstallCookieSafeSiteTrafficLogRedactsCredentialHeaders(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = loadBaotaSiteModule()
+    sourceFormat = tmp_path / "0.site_total_log_format.conf"
+    safeFormat = tmp_path / "0.eventshock_site_total_log_format.conf"
+    siteExtension = tmp_path / "site_total.conf"
+    sourceFormat.write_text(
+        "log_format site_total escape=json "
+        '\'{\\"cookie\\":\\"$http_cookie\\",\'\n'
+        '\'\\"authorization\\":\\"$http_authorization\\",\'\n'
+        '\'\\"csrf\\":\\"$http_x_csrf_token\\",\'\n'
+        '\'\\"session\\":\\"$http_x_session_id\\"}\';\n'
+    )
+    siteExtension.write_text(
+        "access_log syslog:server=unix:/tmp/site_total.sock,nohostname,tag=9__access site_total;\n"
+    )
+    monkeypatch.setattr(module, "SITE_TOTAL_SOURCE_LOG_FORMAT_PATH", str(sourceFormat))
+    monkeypatch.setattr(module, "SITE_TOTAL_SAFE_LOG_FORMAT_PATH", str(safeFormat))
+    monkeypatch.setattr(module, "SITE_TOTAL_EXTENSION_PATH", str(siteExtension))
+
+    module.installCookieSafeSiteTrafficLog(9)
+
+    safeContent = safeFormat.read_text()
+    assert "log_format eventshock_site_total" in safeContent
+    assert safeContent.count("[REDACTED]") == 4
+    assert "$http_cookie" not in safeContent
+    assert "$http_authorization" not in safeContent
+    assert "$http_x_csrf_token" not in safeContent
+    assert "$http_x_session_id" not in safeContent
+    assert siteExtension.read_text() == (
+        "access_log syslog:server=unix:/tmp/site_total.sock,nohostname,tag=9__access "
+        "eventshock_site_total;\n"
+    )
+    assert module.cookieSafeSiteTrafficReady(9)
+
+
+def testInstallCookieSafeSiteTrafficLogRejectsUnexpectedSocket(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = loadBaotaSiteModule()
+    sourceFormat = tmp_path / "0.site_total_log_format.conf"
+    safeFormat = tmp_path / "0.eventshock_site_total_log_format.conf"
+    siteExtension = tmp_path / "site_total.conf"
+    sourceFormat.write_text(
+        'log_format site_total escape=json \'{\\"cookie\\":\\"$http_cookie\\"}\';\n'
+    )
+    siteExtension.write_text(
+        "access_log syslog:server=unix:/tmp/untrusted.sock,nohostname,tag=9__access site_total;\n"
+    )
+    monkeypatch.setattr(module, "SITE_TOTAL_SOURCE_LOG_FORMAT_PATH", str(sourceFormat))
+    monkeypatch.setattr(module, "SITE_TOTAL_SAFE_LOG_FORMAT_PATH", str(safeFormat))
+    monkeypatch.setattr(module, "SITE_TOTAL_EXTENSION_PATH", str(siteExtension))
+
+    with pytest.raises(RuntimeError, match="socket 或站点 ID"):
+        module.installCookieSafeSiteTrafficLog(9)
+
+
+def testEnableSiteTrafficDoesNotRewriteHealthyEnabledConfiguration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = loadBaotaSiteModule()
+    siteExtension = tmp_path / "site_total.conf"
+    socketPath = str(tmp_path / "site_total.sock")
+    siteExtension.write_text(
+        f"access_log syslog:server=unix:{socketPath},nohostname,tag=9__access "
+        "eventshock_site_total;\n"
+    )
+    monkeypatch.setattr(module, "SITE_TOTAL_EXTENSION_PATH", str(siteExtension))
+    monkeypatch.setattr(module, "SITE_TOTAL_SOCKET", socketPath)
+    originalExists = module.os.path.exists
+    monkeypatch.setattr(
+        module.os.path,
+        "exists",
+        lambda path: True if path == socketPath else originalExists(path),
+    )
+    originalStat = module.os.stat
+    monkeypatch.setattr(
+        module.os,
+        "stat",
+        lambda path: (
+            SimpleNamespace(st_mode=stat.S_IFSOCK) if path == socketPath else originalStat(path)
+        ),
+    )
+    monkeypatch.setattr(module.subprocess, "call", lambda *_args, **_kwargs: 0)
+
+    class FakeSiteTotal:
+        enableCalls = 0
+
+        @staticmethod
+        def get_status():
+            return {"is_open": True, "sites": [{"site_id": 9, "is_open": True}]}
+
+        def one_site_status(self, *_args):
+            self.enableCalls += 1
+            return None
+
+    siteTotal = FakeSiteTotal()
+
+    module.enableSiteTraffic(lambda: siteTotal, 9)
+
+    assert siteTotal.enableCalls == 0
+
+
+def testAuthenticationDeploymentConfigurationNeverEmbedsSecrets() -> None:
+    composeContent = (PROJECT_ROOT / "compose.yml").read_text()
+    environmentExample = (PROJECT_ROOT / ".env.example").read_text()
+    caddyContent = (PROJECT_ROOT / "Caddyfile").read_text()
+    dockerIgnore = (PROJECT_ROOT / ".dockerignore").read_text()
+    deploySource = (PROJECT_ROOT / "scripts" / "deploy-server.sh").read_text()
+
+    assert (
+        '"${EVENTSHOCK_SECRETS_DIR:-./.eventshock-secrets}:/run/secrets/eventshock:ro"'
+    ) in composeContent
+    assert "EVENTSHOCK_AUTH_SECRET_FILE: /run/secrets/eventshock/auth-secret" in composeContent
+    assert "EVENTSHOCK_SMTP_PASSWORD_FILE: /run/secrets/eventshock/smtp-password" in composeContent
+    assert "EVENTSHOCK_ADMIN_BOOTSTRAP_PASSWORD_FILE" not in composeContent
+    assert "EVENTSHOCK_AUTH_SECRET:" not in composeContent
+    assert "EVENTSHOCK_SMTP_PASSWORD:" not in composeContent
+    assert "EVENTSHOCK_ADMIN_BOOTSTRAP_PASSWORD=" not in environmentExample
+    assert "EVENTSHOCK_SMTP_PASSWORD=" not in environmentExample
+    assert "EVENTSHOCK_AUTH_SECRET=" not in environmentExample
+    assert ".eventshock-secrets/" in dockerIgnore
+    assert "--exclude='.eventshock-secrets'" in deploySource
+    for headerPath in (
+        "request>headers>Cookie delete",
+        "request>headers>Authorization delete",
+        "request>headers>X-Csrf-Token delete",
+        "request>headers>X-Session-Id delete",
+    ):
+        assert headerPath in caddyContent
+
+
+def testDeployScriptConsumesOneTimeAdminPasswordThroughStdin() -> None:
+    source = (PROJECT_ROOT / "scripts" / "deploy-server.sh").read_text()
+
+    assert 'ADMIN_BOOTSTRAP_PASSWORD_FILE="${SHARED_SECRETS_DIR}/' in source
+    assert 'admin-bootstrap-password.once"' in source
+    assert "python -m backend.app.auth.bootstrap_admin" in source
+    assert '<"${ADMIN_BOOTSTRAP_PASSWORD_FILE}"' in source
+    assert "fileOwner=\"$(stat -c '%u'" in source
+    assert "fileMode=\"$(stat -c '%a'" in source
+    assert '[[ "${fileMode}" == "400" ]]' in source
+    assert 'rm -f -- "${ADMIN_BOOTSTRAP_PASSWORD_FILE}"' in source
+
+
+def testDeployScriptFailsClosedAndOrdersCredentialSafetyBeforeCutover() -> None:
+    source = (PROJECT_ROOT / "scripts" / "deploy-server.sh").read_text()
+    deployBody = source[source.index("deploy_release() {") : source.index("main() {")]
+
+    assert '"0:10001:750"' in source
+    assert '"0:10001:440"' in source
+    assert '"0:0:400"' in source
+    assert "verify_auth_migration" in source
+    assert "legacy ownership migration is incomplete" in source
+    assert deployBody.index("validate_auth_configuration") < deployBody.index(
+        'run_compose "${releaseDir}" config --quiet'
+    )
+    assert deployBody.index("prepare_baota_logging_before_auth") < deployBody.index(
+        'run_compose "${releaseDir}" up -d --remove-orphans'
+    )
+    assert deployBody.index("bootstrap_admin_if_requested") < deployBody.index(
+        "verify_auth_migration"
+    )
+    assert deployBody.index("verify_auth_migration") < deployBody.index(
+        'ensure_baota_proxy "${releaseDir}"'
+    )
+
+
+def testProductionContainerCiStartsWithRealProductionAuthBoundary() -> None:
+    workflow = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+
+    assert "--env APP_ENV=production" in workflow
+    assert "EVENTSHOCK_AUTH_SECRET_FILE=/run/secrets/eventshock/auth-secret" in workflow
+    assert "EVENTSHOCK_SMTP_PASSWORD_FILE=/run/secrets/eventshock/smtp-password" in workflow
+    assert "http://127.0.0.1:18000/api/v1/cases" in workflow
+    assert '"401"' in workflow
+
+
+def testDeployBackupAlwaysRemovesTemporaryWalSidecars() -> None:
+    source = (PROJECT_ROOT / "scripts" / "deploy-server.sh").read_text()
+
+    assert 'Path(f"{temporary_path}-wal")' in source
+    assert 'Path(f"{temporary_path}-shm")' in source
+    assert "temporary_artifact.unlink(missing_ok=True)" in source
+
+
 def testValidateCurrentSiteRequiresExpectedDomain() -> None:
     module = loadBaotaSiteModule()
 

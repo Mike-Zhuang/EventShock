@@ -5,6 +5,8 @@ export LC_ALL=C
 
 readonly TARGET_ROOT="/opt/eventshock"
 readonly SHARED_DIR="${TARGET_ROOT}/shared"
+readonly SHARED_SECRETS_DIR="${SHARED_DIR}/secrets"
+readonly ADMIN_BOOTSTRAP_PASSWORD_FILE="${SHARED_SECRETS_DIR}/admin-bootstrap-password.once"
 readonly RELEASES_DIR="${TARGET_ROOT}/releases"
 DEFAULT_SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly DEFAULT_SOURCE_ROOT
@@ -44,9 +46,17 @@ run_compose() {
     -u CADDY_UPSTREAM \
     -u COMPOSE_FILE \
     -u COMPOSE_PROJECT_NAME \
+    -u EVENTSHOCK_ADMIN_EMAIL \
     -u EVENTSHOCK_APP_HOST_PORT \
     -u EVENTSHOCK_APP_IMAGE \
+    -u EVENTSHOCK_AUTH_COOKIE_SECURE \
+    -u EVENTSHOCK_AUTH_REQUIRED \
     -u EVENTSHOCK_RELEASE_COMMIT \
+    -u EVENTSHOCK_SECRETS_DIR \
+    -u EVENTSHOCK_SMTP_HOST \
+    -u EVENTSHOCK_SMTP_PORT \
+    -u EVENTSHOCK_SMTP_SENDER \
+    -u EVENTSHOCK_SMTP_USERNAME \
     -u LOG_LEVEL \
     docker compose --project-name eventshock "${composeArguments[@]}" "$@"
 }
@@ -277,6 +287,7 @@ create_release() {
     --exclude='*.p12' \
     --exclude='*.pfx' \
     --exclude='.eventshock-data' \
+    --exclude='.eventshock-secrets' \
     --exclude='*.db' \
     --exclude='*.db-*' \
     --exclude='*.sqlite' \
@@ -301,6 +312,65 @@ create_release() {
   } >"${releaseDir}/.release.env"
   chmod 0600 "${releaseDir}/.release.env"
   CREATED_RELEASE_DIR="${releaseDir}"
+}
+
+shared_env_value() {
+  local key="$1"
+  sed -n "s/^${key}=//p" "${SHARED_DIR}/.env" | tail -n 1
+}
+
+validate_auth_configuration() {
+  local directoryOwner directoryGroup directoryMode path fileOwner fileGroup fileMode fileSize
+  [[ -f "${SHARED_DIR}/.env" ]] || fail "缺少 root 专用共享配置：${SHARED_DIR}/.env"
+  [[ "$(shared_env_value EVENTSHOCK_AUTH_REQUIRED)" == "true" ]] \
+    || fail "EVENTSHOCK_AUTH_REQUIRED 必须为 true。"
+  [[ "$(shared_env_value EVENTSHOCK_AUTH_COOKIE_SECURE)" == "true" ]] \
+    || fail "EVENTSHOCK_AUTH_COOKIE_SECURE 必须为 true。"
+  [[ -n "$(shared_env_value EVENTSHOCK_ADMIN_EMAIL)" ]] \
+    || fail "EVENTSHOCK_ADMIN_EMAIL 不能为空。"
+  [[ -n "$(shared_env_value EVENTSHOCK_SMTP_HOST)" ]] \
+    || fail "EVENTSHOCK_SMTP_HOST 不能为空。"
+  [[ -n "$(shared_env_value EVENTSHOCK_SMTP_USERNAME)" ]] \
+    || fail "EVENTSHOCK_SMTP_USERNAME 不能为空。"
+  [[ -n "$(shared_env_value EVENTSHOCK_SMTP_SENDER)" ]] \
+    || fail "EVENTSHOCK_SMTP_SENDER 不能为空。"
+  [[ "$(shared_env_value EVENTSHOCK_SECRETS_DIR)" == "${SHARED_SECRETS_DIR}" ]] \
+    || fail "EVENTSHOCK_SECRETS_DIR 必须精确指向 ${SHARED_SECRETS_DIR}。"
+
+  [[ -d "${SHARED_SECRETS_DIR}" ]] && [[ ! -L "${SHARED_SECRETS_DIR}" ]] \
+    || fail "密钥目录必须是普通目录且不能是符号链接。"
+  read -r directoryOwner directoryGroup directoryMode \
+    < <(stat -c '%u %g %a' "${SHARED_SECRETS_DIR}")
+  [[ "${directoryOwner}:${directoryGroup}:${directoryMode}" == "0:10001:750" ]] \
+    || fail "密钥目录权限必须精确为 root:10001 0750。"
+
+  for path in \
+    "${SHARED_SECRETS_DIR}/auth-secret" \
+    "${SHARED_SECRETS_DIR}/smtp-password"; do
+    [[ -f "${path}" ]] && [[ ! -L "${path}" ]] \
+      || fail "长期密钥必须是普通文件且不能是符号链接：$(basename "${path}")"
+    read -r fileOwner fileGroup fileMode < <(stat -c '%u %g %a' "${path}")
+    [[ "${fileOwner}:${fileGroup}:${fileMode}" == "0:10001:440" ]] \
+      || fail "长期密钥权限必须精确为 root:10001 0440：$(basename "${path}")"
+    fileSize="$(stat -c '%s' "${path}")"
+    [[ "${fileSize}" -ge 1 ]] && [[ "${fileSize}" -le 4096 ]] \
+      || fail "长期密钥文件大小不合法：$(basename "${path}")"
+  done
+  [[ "$(stat -c '%s' "${SHARED_SECRETS_DIR}/auth-secret")" -ge 32 ]] \
+    || fail "认证随机密钥至少需要 32 字节。"
+
+  if [[ -e "${ADMIN_BOOTSTRAP_PASSWORD_FILE}" ]]; then
+    [[ -f "${ADMIN_BOOTSTRAP_PASSWORD_FILE}" ]] \
+      && [[ ! -L "${ADMIN_BOOTSTRAP_PASSWORD_FILE}" ]] \
+      || fail "一次性管理员引导路径必须是普通文件且不能是符号链接。"
+    read -r fileOwner fileGroup fileMode \
+      < <(stat -c '%u %g %a' "${ADMIN_BOOTSTRAP_PASSWORD_FILE}")
+    [[ "${fileOwner}:${fileGroup}:${fileMode}" == "0:0:400" ]] \
+      || fail "一次性管理员引导文件权限必须精确为 root:root 0400。"
+    fileSize="$(stat -c '%s' "${ADMIN_BOOTSTRAP_PASSWORD_FILE}")"
+    [[ "${fileSize}" -ge 8 ]] && [[ "${fileSize}" -le 513 ]] \
+      || fail "一次性管理员密码文件大小必须为 8–513 字节（含可选换行）。"
+  fi
 }
 
 backup_database() {
@@ -345,10 +415,77 @@ try:
     finally:
         os.close(directory_fd)
 finally:
-    temporary_path.unlink(missing_ok=True)
+    # WAL 模式会为临时备份建立同名前缀的 sidecar。只清理本轮精确路径，
+    # 避免历史垃圾增长，也不触碰已经原子落盘的正式备份。
+    for temporary_artifact in (
+        temporary_path,
+        Path(f"{temporary_path}-wal"),
+        Path(f"{temporary_path}-shm"),
+    ):
+        temporary_artifact.unlink(missing_ok=True)
 backups = sorted(backup_dir.glob("pre-*.db"), key=lambda item: item.stat().st_mtime, reverse=True)
 for stale_backup in backups[3:]:
     stale_backup.unlink()
+PY
+}
+
+bootstrap_admin_if_requested() {
+  local releaseDir="$1"
+  local appContainerId fileOwner fileMode
+
+  [[ -e "${ADMIN_BOOTSTRAP_PASSWORD_FILE}" ]] || {
+    log "未检测到一次性管理员引导文件，跳过管理员引导。"
+    return
+  }
+  [[ -f "${ADMIN_BOOTSTRAP_PASSWORD_FILE}" ]] \
+    && [[ ! -L "${ADMIN_BOOTSTRAP_PASSWORD_FILE}" ]] \
+    || fail "一次性管理员引导路径必须是普通文件且不能是符号链接。"
+
+  fileOwner="$(stat -c '%u' "${ADMIN_BOOTSTRAP_PASSWORD_FILE}")"
+  fileMode="$(stat -c '%a' "${ADMIN_BOOTSTRAP_PASSWORD_FILE}")"
+  [[ "${fileOwner}" == "0" ]] || fail "一次性管理员引导文件必须由 root 拥有。"
+  [[ "${fileMode}" == "400" ]] || fail "一次性管理员引导文件权限必须精确为 0400。"
+
+  appContainerId="$(run_compose "${releaseDir}" ps -q app)"
+  [[ -n "${appContainerId}" ]] || fail "管理员引导前找不到新版本 app 容器。"
+
+  log "通过受限标准输入执行一次性管理员引导。"
+  if ! docker exec -i "${appContainerId}" \
+    python -m backend.app.auth.bootstrap_admin \
+    <"${ADMIN_BOOTSTRAP_PASSWORD_FILE}"; then
+    fail "管理员引导失败；一次性凭据已保留以便安全重试。"
+  fi
+  rm -f -- "${ADMIN_BOOTSTRAP_PASSWORD_FILE}" \
+    || fail "管理员已引导，但一次性凭据未能删除，拒绝继续发布。"
+  log "管理员引导完成，一次性凭据已删除。"
+}
+
+verify_auth_migration() {
+  local releaseDir="$1"
+  local appContainerId
+  appContainerId="$(run_compose "${releaseDir}" ps -q app)"
+  [[ -n "${appContainerId}" ]] || fail "认证迁移验证前找不到新版本 app 容器。"
+
+  log "验证管理员存在且历史数据已完成账号归属。"
+  docker exec -i "${appContainerId}" python - <<'PY'
+from backend.app.auth import AuthRepository, UserRole, normalizeEmail
+from backend.app.config import loadSettings
+from backend.app.database import Database
+
+settings = loadSettings()
+if not settings.adminEmail:
+    raise SystemExit("configured administrator email is missing")
+database = Database(settings.databasePath)
+database.initialize()
+repository = AuthRepository(database)
+repository.initialize()
+admin = repository.getUserByEmail(normalizeEmail(settings.adminEmail))
+if admin is None or admin["role"] != UserRole.ADMIN.value:
+    raise SystemExit("configured administrator account does not exist")
+unowned = database.countUnownedRecords()
+if any(unowned.values()):
+    raise SystemExit("legacy ownership migration is incomplete")
+print("authentication ownership migration verified")
 PY
 }
 
@@ -466,6 +603,20 @@ ensure_baota_proxy() {
   timeout 180 "${registrar}" --listen-address "${gatewayAddress}"
 }
 
+prepare_baota_logging_before_auth() {
+  local releaseDir="$1"
+  local currentRelease
+  currentRelease="$(readlink -f "${TARGET_ROOT}/current" 2>/dev/null || true)"
+  if [[ -z "${currentRelease}" ]] || [[ ! -d "${currentRelease}" ]]; then
+    log "首次部署尚无公网认证流量，宝塔站点将在应用启动后初始化。"
+    return
+  fi
+  log "认证应用启动前先安装并验收宝塔凭据脱敏日志格式。"
+  if ! ensure_baota_proxy "${releaseDir}"; then
+    fail "无法在认证应用启动前完成宝塔日志脱敏，拒绝发布。"
+  fi
+}
+
 cleanup_old_releases() {
   local currentRelease releaseDir imageName index cleanupFailed
   currentRelease="$(readlink -f "${TARGET_ROOT}/current" 2>/dev/null || true)"
@@ -511,6 +662,8 @@ cleanup_old_releases() {
 deploy_release() {
   local releaseDir="$1"
 
+  validate_auth_configuration
+
   log "校验 Compose 配置。"
   run_compose "${releaseDir}" config --quiet
 
@@ -518,6 +671,7 @@ deploy_release() {
   run_compose "${releaseDir}" build --pull app
 
   backup_database "${releaseDir}"
+  prepare_baota_logging_before_auth "${releaseDir}"
 
   log "启动 EventShock 服务。"
   DEPLOY_ATTEMPTED=1
@@ -526,6 +680,8 @@ deploy_release() {
   if ! wait_for_health "${releaseDir}"; then
     fail "新应用未通过容器健康检查。"
   fi
+  bootstrap_admin_if_requested "${releaseDir}"
+  verify_auth_migration "${releaseDir}"
   run_compose "${releaseDir}" ps
   if ! ensure_baota_proxy "${releaseDir}"; then
     fail "宝塔 Nginx 内部反向代理未能自愈。"

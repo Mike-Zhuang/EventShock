@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import copy
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.errors import ApiError
 from backend.app.main import createApp
+from backend.app.schemas import EventSourceInput
 
 SESSION_ID = "control-plane-session-12345"
 PACK_ID = "spacex-synthetic-v1"
@@ -170,6 +174,95 @@ def test_uploaded_source_text_is_hashed_but_not_retained(tmp_path: Path) -> None
     assert fetched.json()["sources"][0]["rawTextRetained"] is False
     assert len(fetched.json()["sources"][0]["contentHash"]) == 64
     assert rawText.encode() not in (tmp_path / "eventshock.db").read_bytes()
+
+
+def test_frozen_event_pack_cannot_be_reopened_by_concurrent_reextraction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sourcePayload = {
+        "sourceId": "concurrent-source-001",
+        "title": "Concurrent event notice",
+        "publisher": "Example issuer",
+        "url": "https://example.com/concurrent-event",
+        "sourceType": "OFFICIAL",
+        "publishedAt": "2026-07-10T14:00:00Z",
+        "knownAt": "2026-07-10T14:01:00Z",
+        "rawText": (
+            "The issuer confirmed a bounded event before the point-in-time cutoff "
+            "for the concurrency regression test."
+        ),
+    }
+    with TestClient(createApp(tmp_path)) as client:
+        created = client.post(
+            "/api/v1/event-packs",
+            headers={"X-Session-ID": SESSION_ID},
+            json={
+                "title": "Concurrent extraction event",
+                "summary": "A source-backed event for frozen-state concurrency testing.",
+                "asOf": "2026-07-10T15:00:00Z",
+                "instrument": "TEST",
+                "sources": [sourcePayload],
+            },
+        )
+        assert created.status_code == 201
+        eventPackId = created.json()["id"]
+        pendingClaimIds = [claim["claimId"] for claim in created.json()["claims"]]
+        approved = client.post(
+            f"/api/v1/event-packs/{eventPackId}/claims/approve-all",
+            headers={"X-Session-ID": SESSION_ID},
+            json={
+                "acknowledgedBulkApproval": True,
+                "expectedClaimIds": pendingClaimIds,
+            },
+        )
+        assert approved.status_code == 200
+
+        service = client.app.state.eventPackService
+        database = client.app.state.database
+        freezeCommitEntered = threading.Event()
+        extractionAttempted = threading.Event()
+        originalSave = database.saveEventPackDraftWithAudit
+
+        def blockFreezeCommit(*args, **kwargs):
+            freezeCommitEntered.set()
+            assert extractionAttempted.wait(timeout=2)
+            return originalSave(*args, **kwargs)
+
+        monkeypatch.setattr(database, "saveEventPackDraftWithAudit", blockFreezeCommit)
+
+        def attemptReextraction():
+            assert freezeCommitEntered.wait(timeout=2)
+            extractionAttempted.set()
+            return service.saveExtractedClaims(
+                eventPackId,
+                SESSION_ID,
+                [
+                    {
+                        "claimId": "claim-concurrent-replacement",
+                        "text": "A replacement claim that must not reopen a frozen pack.",
+                        "reviewStatus": "AI_PROPOSED",
+                        "isRequired": True,
+                    }
+                ],
+                "RULE_ONLY",
+                [EventSourceInput.model_validate(sourcePayload)],
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            freezeFuture = executor.submit(service.freezeEventPack, eventPackId, SESSION_ID)
+            extractionFuture = executor.submit(attemptReextraction)
+            frozen = freezeFuture.result(timeout=5)
+            with pytest.raises(ApiError) as error:
+                extractionFuture.result(timeout=5)
+
+        assert frozen["status"] == "FROZEN"
+        assert error.value.code == "EVENT_PACK_FROZEN"
+        finalPack = service.getEventPack(eventPackId, SESSION_ID)
+        assert finalPack["status"] == "FROZEN"
+        assert all(
+            claim["claimId"] != "claim-concurrent-replacement" for claim in finalPack["claims"]
+        )
 
 
 def test_event_pack_content_policy_blocks_secrets_and_prompt_injection(tmp_path: Path) -> None:

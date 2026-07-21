@@ -1,33 +1,100 @@
-import { Button, InlineNotification, SkeletonText, Tag } from '@carbon/react';
+import { Button, DefinitionTooltip, InlineNotification, SkeletonText, Tag } from '@carbon/react';
 import {
   ArrowClockwise,
   CheckCircle,
   CloudSlash,
+  Compass,
   Database,
   Info,
   WarningCircle,
 } from '@phosphor-icons/react';
 import type { ReactNode } from 'react';
 import { translateStatus, useI18n } from '../i18n';
+import type { PageGuideContent } from '../page-guidance';
 import { useWorkflow, type RequestState } from '../state/workflow-context';
 
 export function PageHeader({
   title,
   subtitle,
   actions,
+  guide,
 }: {
   title: string;
   subtitle: string;
   actions?: ReactNode;
+  guide?: PageGuideContent;
 }) {
   return (
-    <header className="page-header">
-      <div>
-        <h1>{title}</h1>
-        <p>{subtitle}</p>
+    <>
+      <header className="page-header">
+        <div>
+          <h1>{title}</h1>
+          <p>{subtitle}</p>
+        </div>
+        {actions ? <div className="page-header__actions">{actions}</div> : null}
+      </header>
+      {guide ? <PageGuide guide={guide} /> : null}
+    </>
+  );
+}
+
+export function PageGuide({ guide }: { guide: PageGuideContent }) {
+  return (
+    <aside className="page-guide" aria-label={guide.label}>
+      <div className="page-guide__label">
+        <Compass size={19} weight="duotone" aria-hidden="true" />
+        <strong>{guide.label}</strong>
+        {guide.optional ? <span>{guide.label === '本页怎么做' ? '高级可选' : 'Advanced · optional'}</span> : null}
       </div>
-      {actions ? <div className="page-header__actions">{actions}</div> : null}
-    </header>
+      <ol>
+        {guide.steps.map((step) => <li key={step}>{step}</li>)}
+      </ol>
+    </aside>
+  );
+}
+
+export function ExplainedLabel({
+  label,
+  explanation,
+}: {
+  label: ReactNode;
+  explanation: string;
+}) {
+  return (
+    <span className="explained-label">
+      <span>{label}</span>
+      <ParameterHelp
+        label={typeof label === 'string' ? label : undefined}
+        explanation={explanation}
+      />
+    </span>
+  );
+}
+
+export function ParameterHelp({
+  label,
+  explanation,
+}: {
+  label?: string;
+  explanation: string;
+}) {
+  const { language } = useI18n();
+  const genericLabel = language === 'zh-CN' ? '查看参数说明' : 'View parameter help';
+  const accessibilityLabel = label
+    ? language === 'zh-CN' ? `查看“${label}”的参数说明` : `View parameter help for ${label}`
+    : genericLabel;
+
+  return (
+    <DefinitionTooltip
+      definition={explanation}
+      align="top"
+      autoAlign
+      openOnHover
+      aria-label={accessibilityLabel}
+      triggerClassName="explained-label__trigger"
+    >
+      <Info size={15} weight="fill" aria-hidden="true" />
+    </DefinitionTooltip>
   );
 }
 

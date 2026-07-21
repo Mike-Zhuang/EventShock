@@ -17,9 +17,11 @@ import {
 import type { Navigate } from '../app';
 import type { InvalidationReasonCode, MetricResult } from '../api/types';
 import { buildHistogram } from '../api/normalize';
-import { EmptyState, LoadingPanel, Notice, PageHeader, StatusBadge } from '../components/common';
+import { EmptyState, ExplainedLabel, LoadingPanel, Notice, PageHeader, StatusBadge } from '../components/common';
 import { ExperimentHistoryDisclosure, experimentHistoryLabel } from '../components/experiment-history';
 import { translateAgentType, translateParameter, translateStatus, useI18n } from '../i18n';
+import { getPageGuide } from '../page-guidance';
+import { getParameterHelp } from '../parameter-help';
 import { useWorkflow } from '../state/workflow-context';
 import { formatInterval, formatMetricValue } from '../utils/format';
 
@@ -105,6 +107,9 @@ function ChartEmpty() {
 
 export function ResultsPage({ navigate }: { navigate: Navigate }) {
   const { language, t } = useI18n();
+  const explained = (key: string, label: string) => (
+    <ExplainedLabel label={label} explanation={getParameterHelp(key, language) ?? (language === 'zh-CN' ? '该指标由当前冻结模型与合成路径计算，仅用于情景间比较。' : 'This metric is computed from the frozen model and synthetic paths for scenario comparison only.')} />
+  );
   const {
     activeExperiment,
     experiments,
@@ -289,6 +294,7 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
       <PageHeader
         title={t('results.title')}
         subtitle={t('results.subtitle')}
+        guide={getPageGuide('results', language)}
         actions={(
           <div className="page-header-action-group">
             <StatusBadge status={activeExperiment.status} />
@@ -364,19 +370,19 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
           {metrics.map((metric) => (
             <article key={metric.id} className="metric-cell">
               <div className="metric-cell__heading">
-                <h3>{resultMetricLabel(metric, language, t)}</h3>
+                <h3>{explained(metric.id, resultMetricLabel(metric, language, t))}</h3>
                 {metric.stable !== undefined ? <StatusBadge status={metric.stable ? 'VALID' : 'INVALID'} /> : null}
               </div>
               <div className="metric-cell__values">
-                <div><span>{t('common.baseline')}</span><strong>{formatMetricValue(metric.baseline, metric.unit, language)}</strong></div>
-                <div><span>{t('common.intervention')}</span><strong>{formatMetricValue(metric.intervention, metric.unit, language)}</strong></div>
-                <div className="metric-cell__delta"><span>{t('common.delta')}</span><strong>{formatMetricValue(metric.delta, metric.unit, language)}</strong></div>
+                <div><span>{explained('baseline', t('common.baseline'))}</span><strong>{formatMetricValue(metric.baseline, metric.unit, language)}</strong></div>
+                <div><span>{explained('intervention', t('common.intervention'))}</span><strong>{formatMetricValue(metric.intervention, metric.unit, language)}</strong></div>
+                <div className="metric-cell__delta"><span>{explained('delta', t('common.delta'))}</span><strong>{formatMetricValue(metric.delta, metric.unit, language)}</strong></div>
               </div>
               <footer>
-                <span>{t('common.interval')} {formatInterval(metric.ciLow, metric.ciHigh, metric.unit, language)}</span>
-                <span>{t('common.sampleSize')} {metric.n ?? t('common.unavailable')}</span>
-                {metric.directionConsistencyRate !== undefined ? <span>{t('results.consistency')} {formatMetricValue(metric.directionConsistencyRate, 'ratio', language)}</span> : null}
-                <span>{language === 'zh-CN' ? '排除运行' : 'Excluded runs'} {metric.excludedRuns ?? 0}</span>
+                <span>{explained('interval', t('common.interval'))} {formatInterval(metric.ciLow, metric.ciHigh, metric.unit, language)}</span>
+                <span>{explained('sampleSize', t('common.sampleSize'))} {metric.n ?? t('common.unavailable')}</span>
+                {metric.directionConsistencyRate !== undefined ? <span>{explained('directionConsistency', t('results.consistency'))} {formatMetricValue(metric.directionConsistencyRate, 'ratio', language)}</span> : null}
+                <span>{explained('excludedRuns', language === 'zh-CN' ? '排除运行' : 'Excluded runs')} {metric.excludedRuns ?? 0}</span>
               </footer>
               {(metric.bootstrapCiLow !== undefined || metric.cohensDz !== undefined || metric.positiveTailProbability !== undefined) ? (
                 <details className="metric-diagnostics">

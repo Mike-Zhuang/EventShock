@@ -2,6 +2,7 @@ import { Button, Tag } from '@carbon/react';
 import { ArrowRight, CalendarBlank, Flask, ShieldCheck, UsersThree } from '@phosphor-icons/react';
 import { EmptyState, ErrorPanel, LoadingPanel, PageHeader, StatusBadge } from '../components/common';
 import { useI18n } from '../i18n';
+import { getPageGuide } from '../page-guidance';
 import { useWorkflow } from '../state/workflow-context';
 import type { ViewId } from '../app';
 
@@ -51,7 +52,7 @@ export function CaseLibraryPage({ navigate }: { navigate: (view: ViewId) => void
         </div>
       </section>
 
-      <PageHeader title={t('home.caseHeading')} subtitle={t('home.caseBody')} />
+      <PageHeader title={t('home.caseHeading')} subtitle={t('home.caseBody')} guide={getPageGuide('cases', language)} />
 
       {casesState === 'loading' || casesState === 'idle' ? <LoadingPanel /> : null}
       {casesState === 'error' ? <ErrorPanel detail={casesError} onRetry={() => void refreshCases()} /> : null}

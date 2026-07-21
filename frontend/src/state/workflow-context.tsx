@@ -10,6 +10,7 @@ import {
 } from 'react';
 import { api } from '../api/client';
 import type {
+  BulkClaimApprovalInput,
   CaseSummary,
   ClaimReviewInput,
   EventPack,
@@ -128,6 +129,7 @@ interface WorkflowContextValue {
     acknowledgedContentReview?: boolean,
   ) => Promise<EventPack>;
   reviewClaim: (claimId: string, input: ClaimReviewInput) => Promise<void>;
+  approveAllPendingClaims: (input: BulkClaimApprovalInput) => Promise<void>;
   freezeEventPack: () => Promise<void>;
   setScenario: (scenario: ScenarioDraft) => void;
   validateScenario: () => Promise<ScenarioValidation>;
@@ -314,6 +316,21 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     setEventPackError(undefined);
     try {
       const nextPack = await api.reviewClaim(eventPack.id, claimId, input);
+      setEventPack(nextPack);
+    } catch (error) {
+      setEventPackError(errorMessage(error));
+      throw error;
+    } finally {
+      setClaimBusyId(undefined);
+    }
+  }, [eventPack]);
+
+  const approveAllPendingClaims = useCallback(async (input: BulkClaimApprovalInput) => {
+    if (!eventPack) return;
+    setClaimBusyId('ALL_PENDING_CLAIMS');
+    setEventPackError(undefined);
+    try {
+      const nextPack = await api.approveAllClaims(eventPack.id, input);
       setEventPack(nextPack);
     } catch (error) {
       setEventPackError(errorMessage(error));
@@ -551,6 +568,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     eventPackState,
     eventPackError,
     claimBusyId,
+    approveAllPendingClaims,
     scenario,
     validation,
     validationState,
@@ -581,6 +599,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     exportExperiment,
   }), [
     activeExperiment,
+    approveAllPendingClaims,
     apiConnection,
     cases,
     casesError,
