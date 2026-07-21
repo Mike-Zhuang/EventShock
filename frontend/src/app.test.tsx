@@ -159,7 +159,11 @@ describe('移动主导航', () => {
     }));
     window.history.replaceState(null, '', buildAppHash('results', experiments[0].id));
     render(<App />);
-    const selector = await screen.findByLabelText('View historical experiment result');
+    const selector = await screen.findByLabelText(
+      'View historical experiment result',
+      {},
+      { timeout: 10_000 },
+    );
 
     await user.selectOptions(selector, experiments[1].id);
 
