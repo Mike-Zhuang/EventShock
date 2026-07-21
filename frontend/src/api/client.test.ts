@@ -68,4 +68,34 @@ describe('API client event stream', () => {
     expect(listener).toHaveBeenCalledTimes(1);
     window.removeEventListener(AUTH_SESSION_EXPIRED_EVENT, listener);
   });
+
+  it('submits one acknowledged bulk-approval request with the reviewed queue snapshot', async () => {
+    setCsrfToken('csrf-memory-only');
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      eventPackId: 'pack-review',
+      title: 'Review pack',
+      status: 'DRAFT',
+      sources: [],
+      claims: [],
+      limitations: [],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.approveAllClaims('pack-review', {
+      acknowledgedBulkApproval: true,
+      expectedClaimIds: ['claim-one', 'claim-two'],
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/event-packs/pack-review/claims/approve-all',
+      expect.objectContaining({
+        method: 'POST',
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          acknowledgedBulkApproval: true,
+          expectedClaimIds: ['claim-one', 'claim-two'],
+        }),
+      }),
+    );
+  });
 });

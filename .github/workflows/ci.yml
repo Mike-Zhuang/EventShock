@@ -143,6 +143,9 @@ jobs:
             eventshock-ci:${{ github.sha }})"
           cleanup() {
             docker rm --force "${container_id}" >/dev/null 2>&1 || true
+            # CI 故意把挂载目录设为只读；删除前只恢复 runner 所有者的目录写权限。
+            # 这不会改变镜像或生产服务器上的密钥权限。
+            chmod u+w .eventshock-secrets >/dev/null 2>&1 || true
             rm -rf .eventshock-secrets
           }
           trap cleanup EXIT

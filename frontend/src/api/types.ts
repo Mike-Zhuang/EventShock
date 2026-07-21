@@ -131,6 +131,7 @@ export interface EventClaim {
   sourceIds?: string[];
   sourceTier?: string;
   publishedAt?: string;
+  knownAt?: string;
   confidence?: number;
   impactChannels?: string[];
   editedText?: string;
@@ -944,6 +945,12 @@ export interface ClaimReviewInput {
   status: Exclude<ClaimReviewStatus, 'AI_PROPOSED' | 'FROZEN'>;
   editedText?: string;
   editedTextZh?: string;
+}
+
+export interface BulkClaimApprovalInput {
+  acknowledgedBulkApproval: true;
+  expectedClaimIds: string[];
+  rationale?: string;
 }
 
 export type StudyOutcomeId =

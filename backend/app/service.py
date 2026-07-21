@@ -46,6 +46,7 @@ from backend.app.database import Database, utcNow
 from backend.app.errors import ApiError
 from backend.app.export import buildParquetArtifacts
 from backend.app.schemas import (
+    BulkClaimApprovalRequest,
     ClaimReviewRequest,
     EventPackCreateRequest,
     EventSourceInput,
@@ -291,61 +292,63 @@ class EventPackService:
         sources: list[EventSourceInput],
         contentSecurity: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        eventPack = self.getEventPack(eventPackId, sessionId)
-        if eventPackId in self.canonicalPacks:
-            raise ApiError(
-                "CANONICAL_PACK_EXTRACTION_FORBIDDEN",
-                409,
-                "Canonical repository Event Packs cannot be replaced by session extraction.",
+        # LLM 请求在进入本方法前已经完成；这里只锁住最终的重新读取与落盘，
+        # 防止重抽取基于旧 DRAFT 状态覆盖另一个线程刚冻结的 Event Pack。
+        with self.database.writeLock:
+            eventPack = self.getEventPack(eventPackId, sessionId)
+            if eventPackId in self.canonicalPacks:
+                raise ApiError(
+                    "CANONICAL_PACK_EXTRACTION_FORBIDDEN",
+                    409,
+                    "Canonical repository Event Packs cannot be replaced by session extraction.",
+                )
+            if eventPack["status"] == "FROZEN":
+                raise ApiError("EVENT_PACK_FROZEN", 409, "A frozen Event Pack cannot be edited.")
+            self.validateSourcesAtCutoff(sources, eventPack["asOf"])
+            sourceRecords = [self._sourceRecord(source) for source in sources]
+            eventPack.pop("claims", None)
+            eventPack.pop("status", None)
+            eventPack.pop("frozenAt", None)
+            eventPack.pop("sessionScoped", None)
+            eventPack["extraction"] = {
+                "mode": extractionMode,
+                "humanReviewRequired": True,
+                "generatedAt": utcNow(),
+                "contentSecurity": contentSecurity or _defaultContentSecuritySummary(),
+            }
+            eventPack["sources"] = sourceRecords
+            retainedTimeline = [
+                item
+                for item in eventPack.get("timeline", [])
+                if not isinstance(item, dict) or item.get("eventType") != "SOURCE_KNOWN"
+            ]
+            eventPack["timeline"] = [
+                *retainedTimeline,
+                *[
+                    {
+                        "eventType": "SOURCE_KNOWN",
+                        "sourceId": source["sourceId"],
+                        "publishedAt": source["publishedAt"],
+                        "knownAt": source["knownAt"],
+                    }
+                    for source in sourceRecords
+                ],
+            ]
+            self.database.saveExtractedEventPackWithAudit(
+                sessionId,
+                eventPackId,
+                eventPack,
+                claims,
+                auditAction="CLAIMS_EXTRACTED",
+                auditPayload={
+                    "claimCount": len(claims),
+                    "sourceCount": len(sourceRecords),
+                    "sourceIds": [source["sourceId"] for source in sourceRecords],
+                    "extractionMode": extractionMode,
+                    "contentSecurity": _contentSecurityAuditSummary(contentSecurity),
+                },
             )
-        if eventPack["status"] == "FROZEN":
-            raise ApiError("EVENT_PACK_FROZEN", 409, "A frozen Event Pack cannot be edited.")
-        self.validateSourcesAtCutoff(sources, eventPack["asOf"])
-        sourceRecords = [self._sourceRecord(source) for source in sources]
-        eventPack.pop("claims", None)
-        eventPack.pop("status", None)
-        eventPack.pop("frozenAt", None)
-        eventPack.pop("sessionScoped", None)
-        eventPack["extraction"] = {
-            "mode": extractionMode,
-            "humanReviewRequired": True,
-            "generatedAt": utcNow(),
-            "contentSecurity": contentSecurity or _defaultContentSecuritySummary(),
-        }
-        eventPack["sources"] = sourceRecords
-        retainedTimeline = [
-            item
-            for item in eventPack.get("timeline", [])
-            if not isinstance(item, dict) or item.get("eventType") != "SOURCE_KNOWN"
-        ]
-        eventPack["timeline"] = [
-            *retainedTimeline,
-            *[
-                {
-                    "eventType": "SOURCE_KNOWN",
-                    "sourceId": source["sourceId"],
-                    "publishedAt": source["publishedAt"],
-                    "knownAt": source["knownAt"],
-                }
-                for source in sourceRecords
-            ],
-        ]
-        self.database.saveCustomEventPack(sessionId, eventPackId, eventPack, claims)
-        self.database.saveEventPackDraft(sessionId, eventPackId, claims, False, None)
-        self.database.appendAuditEvent(
-            sessionId,
-            "EVENT_PACK",
-            eventPackId,
-            "CLAIMS_EXTRACTED",
-            {
-                "claimCount": len(claims),
-                "sourceCount": len(sourceRecords),
-                "sourceIds": [source["sourceId"] for source in sourceRecords],
-                "extractionMode": extractionMode,
-                "contentSecurity": _contentSecurityAuditSummary(contentSecurity),
-            },
-        )
-        return self.getEventPack(eventPackId, sessionId)
+            return self.getEventPack(eventPackId, sessionId)
 
     @staticmethod
     def validateSourcesAtCutoff(
@@ -436,73 +439,141 @@ class EventPackService:
         sessionId: str,
         review: ClaimReviewRequest,
     ) -> dict[str, Any]:
-        eventPack = self.getEventPack(eventPackId, sessionId)
-        if eventPack["status"] == "FROZEN":
-            raise ApiError("EVENT_PACK_FROZEN", 409, "A frozen Event Pack cannot be edited.")
-        claim = next((item for item in eventPack["claims"] if item["claimId"] == claimId), None)
-        if claim is None:
-            raise ApiError("CLAIM_NOT_FOUND", 404, "The claim does not exist.")
-        claim["reviewStatus"] = review.reviewStatus.value
-        claim["reviewedBy"] = "anonymous-demo-session"
-        claim["reviewedAt"] = utcNow()
-        claim["reviewRationale"] = review.rationale
-        if review.editedText:
-            claim["originalText"] = claim["text"]
-            claim["text"] = review.editedText
-        if review.editedTextZh:
-            claim["originalTextZh"] = claim.get("textZh")
-            claim["textZh"] = review.editedTextZh
-        self.database.saveEventPackDraft(sessionId, eventPackId, eventPack["claims"], False, None)
-        self.database.appendAuditEvent(
-            sessionId,
-            "CLAIM",
-            claimId,
-            review.reviewStatus.value,
-            {"eventPackId": eventPackId, "rationale": review.rationale},
-        )
-        return self.getEventPack(eventPackId, sessionId)
+        # 审核会重写整份 claims JSON，因此读取、修改、持久化与审计必须串行，
+        # 否则两个快速点击可能各自基于旧快照并互相覆盖。
+        with self.database.writeLock:
+            eventPack = self.getEventPack(eventPackId, sessionId)
+            if eventPack["status"] == "FROZEN":
+                raise ApiError("EVENT_PACK_FROZEN", 409, "A frozen Event Pack cannot be edited.")
+            claim = next(
+                (item for item in eventPack["claims"] if item["claimId"] == claimId),
+                None,
+            )
+            if claim is None:
+                raise ApiError("CLAIM_NOT_FOUND", 404, "The claim does not exist.")
+            claim["reviewStatus"] = review.reviewStatus.value
+            claim["reviewedBy"] = sessionId
+            claim["reviewedAt"] = utcNow()
+            claim["reviewRationale"] = review.rationale
+            if review.editedText:
+                claim["originalText"] = claim["text"]
+                claim["text"] = review.editedText
+            if review.editedTextZh:
+                claim["originalTextZh"] = claim.get("textZh")
+                claim["textZh"] = review.editedTextZh
+            self.database.saveEventPackDraftWithAudit(
+                sessionId,
+                eventPackId,
+                eventPack["claims"],
+                auditEntityType="CLAIM",
+                auditEntityId=claimId,
+                auditAction=review.reviewStatus.value,
+                auditPayload={"eventPackId": eventPackId, "rationale": review.rationale},
+            )
+            return self.getEventPack(eventPackId, sessionId)
+
+    def approveAllProposedClaims(
+        self,
+        eventPackId: str,
+        sessionId: str,
+        approval: BulkClaimApprovalRequest,
+    ) -> dict[str, Any]:
+        """一次批准用户在警告框中确认过的全部待审核主张。"""
+
+        with self.database.writeLock:
+            eventPack = self.getEventPack(eventPackId, sessionId)
+            if eventPack["status"] == "FROZEN":
+                raise ApiError("EVENT_PACK_FROZEN", 409, "A frozen Event Pack cannot be edited.")
+
+            proposedClaims = [
+                claim for claim in eventPack["claims"] if claim.get("reviewStatus") == "AI_PROPOSED"
+            ]
+            if not proposedClaims:
+                raise ApiError(
+                    "NO_PENDING_CLAIMS",
+                    409,
+                    "The Event Pack does not contain any pending claims.",
+                )
+
+            proposedClaimIds = [claim["claimId"] for claim in proposedClaims]
+            if len(proposedClaimIds) != len(approval.expectedClaimIds) or set(
+                proposedClaimIds
+            ) != set(approval.expectedClaimIds):
+                raise ApiError(
+                    "CLAIM_QUEUE_CHANGED",
+                    409,
+                    "The pending claim queue changed. Reload it and confirm bulk approval again.",
+                )
+
+            reviewedAt = utcNow()
+            for claim in proposedClaims:
+                claim["reviewStatus"] = "HUMAN_APPROVED"
+                claim["reviewedBy"] = sessionId
+                claim["reviewedAt"] = reviewedAt
+                claim["reviewRationale"] = approval.rationale
+
+            self.database.saveEventPackDraftWithAudit(
+                sessionId,
+                eventPackId,
+                eventPack["claims"],
+                auditAction="BULK_CLAIMS_APPROVED",
+                auditPayload={
+                    "claimCount": len(proposedClaimIds),
+                    "claimIds": proposedClaimIds,
+                    "reviewStatus": "HUMAN_APPROVED",
+                    "warningAcknowledged": approval.acknowledgedBulkApproval,
+                    "rationale": approval.rationale,
+                },
+            )
+            return self.getEventPack(eventPackId, sessionId)
 
     def freezeEventPack(self, eventPackId: str, sessionId: str) -> dict[str, Any]:
-        eventPack = self.getEventPack(eventPackId, sessionId)
-        if eventPack["status"] == "FROZEN":
-            return eventPack
-        unresolvedClaims = [
-            claim["claimId"]
-            for claim in eventPack["claims"]
-            if claim.get("reviewStatus") == "AI_PROPOSED"
-        ]
-        if unresolvedClaims:
-            raise ApiError(
-                "CLAIMS_REQUIRE_HUMAN_REVIEW",
-                422,
-                "Every proposed claim must be approved, edited, or rejected before freezing.",
+        with self.database.writeLock:
+            eventPack = self.getEventPack(eventPackId, sessionId)
+            if eventPack["status"] == "FROZEN":
+                return eventPack
+            unresolvedClaims = [
+                claim["claimId"]
+                for claim in eventPack["claims"]
+                if claim.get("reviewStatus") == "AI_PROPOSED"
+            ]
+            if unresolvedClaims:
+                raise ApiError(
+                    "CLAIMS_REQUIRE_HUMAN_REVIEW",
+                    422,
+                    "Every proposed claim must be approved, edited, or rejected before freezing.",
+                )
+            unapprovedClaims = [
+                claim["claimId"]
+                for claim in eventPack["claims"]
+                if claim.get("isRequired")
+                and claim.get("reviewStatus") not in {"HUMAN_APPROVED", "EDITED"}
+            ]
+            if unapprovedClaims:
+                raise ApiError(
+                    "REQUIRED_CLAIMS_NOT_APPROVED",
+                    422,
+                    "Every required claim must be human-approved or edited before freezing.",
+                )
+            frozenAt = utcNow()
+            frozenClaims = [
+                {
+                    **claim,
+                    "reviewStatus": "FROZEN",
+                    "preFreezeReviewStatus": claim["reviewStatus"],
+                }
+                for claim in eventPack["claims"]
+            ]
+            self.database.saveEventPackDraftWithAudit(
+                sessionId,
+                eventPackId,
+                frozenClaims,
+                frozen=True,
+                frozenAt=frozenAt,
+                auditAction="FROZEN",
+                auditPayload={"claimCount": len(frozenClaims), "frozenAt": frozenAt},
             )
-        unapprovedClaims = [
-            claim["claimId"]
-            for claim in eventPack["claims"]
-            if claim.get("isRequired")
-            and claim.get("reviewStatus") not in {"HUMAN_APPROVED", "EDITED"}
-        ]
-        if unapprovedClaims:
-            raise ApiError(
-                "REQUIRED_CLAIMS_NOT_APPROVED",
-                422,
-                "Every required claim must be human-approved or edited before freezing.",
-            )
-        frozenAt = utcNow()
-        frozenClaims = [
-            {**claim, "reviewStatus": "FROZEN", "preFreezeReviewStatus": claim["reviewStatus"]}
-            for claim in eventPack["claims"]
-        ]
-        self.database.saveEventPackDraft(sessionId, eventPackId, frozenClaims, True, frozenAt)
-        self.database.appendAuditEvent(
-            sessionId,
-            "EVENT_PACK",
-            eventPackId,
-            "FROZEN",
-            {"claimCount": len(frozenClaims), "frozenAt": frozenAt},
-        )
-        return self.getEventPack(eventPackId, sessionId)
+            return self.getEventPack(eventPackId, sessionId)
 
     def validateExperiment(
         self,

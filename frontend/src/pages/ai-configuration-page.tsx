@@ -18,8 +18,10 @@ import type {
   LlmConnectionTest,
   PromptRegistryItem,
 } from '../api/types';
-import { ErrorPanel, LoadingPanel, Notice, PageHeader, StatusBadge } from '../components/common';
+import { ErrorPanel, ExplainedLabel, LoadingPanel, Notice, PageHeader, ParameterHelp, StatusBadge } from '../components/common';
 import { useI18n } from '../i18n';
+import { getPageGuide } from '../page-guidance';
+import { getParameterHelp } from '../parameter-help';
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -28,6 +30,12 @@ function messageOf(error: unknown): string {
 export function AiConfigurationPage() {
   const { language, t } = useI18n();
   const isZh = language === 'zh-CN';
+  const explained = (key: string, label: string) => (
+    <ExplainedLabel label={label} explanation={getParameterHelp(key, language) ?? label} />
+  );
+  const parameterHelp = (key: string, label: string) => (
+    <ParameterHelp label={label} explanation={getParameterHelp(key, language) ?? label} />
+  );
   const [catalog, setCatalog] = useState<LlmCatalog>();
   const [config, setConfig] = useState<LlmConfigView>();
   const [prompts, setPrompts] = useState<PromptRegistryItem[]>([]);
@@ -166,6 +174,7 @@ export function AiConfigurationPage() {
         subtitle={isZh
           ? '配置用于证据抽取与代表性认知智能体的智谱 API。密钥仅绑定当前登录会话并短时驻留服务器内存，不写入账户或数据库。'
           : 'Configure Zhipu API access for evidence extraction and representative cognitive agents. The key is bound only to this sign-in session, kept briefly in server memory, and never written to the account or database.'}
+        guide={getPageGuide('ai', language)}
         actions={<StatusBadge status={config?.configured ? 'CONFIGURED' : 'RULE ONLY'} />}
       />
 
@@ -206,6 +215,7 @@ export function AiConfigurationPage() {
             <Select
               id="llm-model"
               labelText={isZh ? '模型' : 'Model'}
+              decorator={parameterHelp('model', isZh ? '模型' : 'Model')}
               value={model}
               onChange={(event) => {
                 setModel(event.target.value);
@@ -236,6 +246,7 @@ export function AiConfigurationPage() {
             <NumberInput
               id="llm-max-tokens"
               label={isZh ? '最大输出 token' : 'Maximum output tokens'}
+              decorator={parameterHelp('maxOutputTokens', isZh ? '最大输出 token' : 'Maximum output tokens')}
               min={256}
               max={Math.min(selectedModel?.maxOutputTokens ?? 131_072, 32_768)}
               step={256}
@@ -246,15 +257,18 @@ export function AiConfigurationPage() {
               }}
             />
           </div>
-          <Toggle
-            id="llm-thinking"
-            labelText={isZh ? '思考模式' : 'Thinking mode'}
-            labelA={isZh ? '关闭' : 'Off'}
-            labelB={isZh ? '开启' : 'On'}
-            toggled={thinkingEnabled}
-            disabled={!selectedModel?.supportsThinking}
-            onToggle={setThinkingEnabled}
-          />
+          <div className="toggle-with-help">
+            {explained('thinkingMode', isZh ? '思考模式' : 'Thinking mode')}
+            <Toggle
+              id="llm-thinking"
+              aria-label={isZh ? '思考模式' : 'Thinking mode'}
+              labelA={isZh ? '关闭' : 'Off'}
+              labelB={isZh ? '开启' : 'On'}
+              toggled={thinkingEnabled}
+              disabled={!selectedModel?.supportsThinking}
+              onToggle={setThinkingEnabled}
+            />
+          </div>
           <div className="ai-config-actions">
             <Button
               renderIcon={FloppyDisk}

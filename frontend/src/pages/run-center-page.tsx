@@ -2,13 +2,18 @@ import { Button, InlineNotification, ProgressBar } from '@carbon/react';
 import { ArrowClockwise, ChartLineUp, Stop, TerminalWindow } from '@phosphor-icons/react';
 import { useEffect, useState } from 'react';
 import type { Navigate } from '../app';
-import { EmptyState, ErrorPanel, LoadingPanel, Notice, PageHeader, StatusBadge } from '../components/common';
+import { EmptyState, ErrorPanel, ExplainedLabel, LoadingPanel, Notice, PageHeader, StatusBadge } from '../components/common';
 import { ExperimentHistoryDisclosure, experimentHistoryLabel } from '../components/experiment-history';
 import { translateLogLevel, useI18n } from '../i18n';
+import { getPageGuide } from '../page-guidance';
+import { getParameterHelp } from '../parameter-help';
 import { useWorkflow } from '../state/workflow-context';
 
 export function RunCenterPage({ navigate }: { navigate: Navigate }) {
   const { language, t } = useI18n();
+  const explained = (key: string, label: string, fallback?: string) => (
+    <ExplainedLabel label={label} explanation={getParameterHelp(key, language) ?? fallback ?? label} />
+  );
   const {
     experiments,
     experimentsState,
@@ -80,6 +85,7 @@ export function RunCenterPage({ navigate }: { navigate: Navigate }) {
       <PageHeader
         title={t('runs.title')}
         subtitle={t('runs.subtitle')}
+        guide={getPageGuide('runs', language)}
         actions={(
           <Button kind="ghost" renderIcon={ArrowClockwise} onClick={() => void refreshExperiments()}>
             {t('runs.refresh')}
@@ -144,9 +150,9 @@ export function RunCenterPage({ navigate }: { navigate: Navigate }) {
               />
 
               <div className="run-stats">
-                <div><span>{t('runs.validSeeds')}</span><strong>{activeExperiment.validSeeds ?? 0} / {activeExperiment.totalSeeds ?? t('common.unavailable')}</strong></div>
-                <div><span>{t('runs.currentSeed')}</span><strong>{activeExperiment.currentSeed ?? t('common.unavailable')}</strong></div>
-                <div><span>{t('scenario.population')}</span><strong>{activeExperiment.scenario?.populationSize ?? t('common.unavailable')}</strong></div>
+                <div><span>{explained('matchedSeeds', t('runs.validSeeds'))}</span><strong>{activeExperiment.validSeeds ?? 0} / {activeExperiment.totalSeeds ?? t('common.unavailable')}</strong></div>
+                <div><span>{explained('rootSeed', t('runs.currentSeed'), language === 'zh-CN' ? '当前正在计算的配对随机种子；同一值同时驱动基准与干预路径。' : 'Current matched seed being computed; the same value drives baseline and intervention paths.')}</span><strong>{activeExperiment.currentSeed ?? t('common.unavailable')}</strong></div>
+                <div><span>{explained('populationSize', t('scenario.population'))}</span><strong>{activeExperiment.scenario?.populationSize ?? t('common.unavailable')}</strong></div>
               </div>
 
               <Notice><strong>{t('runs.singlePath')}.</strong> {t('runs.singlePathHelp')}</Notice>
@@ -185,7 +191,7 @@ export function RunCenterPage({ navigate }: { navigate: Navigate }) {
 
               <div className="live-market-status">
                 <div>
-                  <span>{language === 'zh-CN' ? '运行阶段' : 'Run phase'}</span>
+                  <span>{explained('runPhase', language === 'zh-CN' ? '运行阶段' : 'Run phase', language === 'zh-CN' ? '当前后端计算阶段，例如认知信号生成、基准路径、干预路径或聚合。' : 'Current backend phase, such as cognition generation, baseline, intervention, or aggregation.')}</span>
                   <strong>{liveState?.phase ?? (language === 'zh-CN' ? '等待首个检查点' : 'Waiting for first checkpoint')}</strong>
                 </div>
                 <div>
@@ -193,7 +199,7 @@ export function RunCenterPage({ navigate }: { navigate: Navigate }) {
                   <strong>{formatValue(activeSnapshot?.price, 4)}</strong>
                 </div>
                 <div>
-                  <span>{language === 'zh-CN' ? '价差 / 深度' : 'Spread / depth'}</span>
+                  <span>{explained('maxSpreadBps', language === 'zh-CN' ? '价差 / 深度' : 'Spread / depth', language === 'zh-CN' ? '价差以基点表示买卖报价距离；深度表示当前订单簿可成交数量。' : 'Spread is the bid–ask distance in basis points; depth is currently available order-book quantity.')}</span>
                   <strong>{activeSnapshot
                     ? `${formatValue(activeSnapshot.spreadBps)} bps / ${formatValue(activeSnapshot.depth, 0)}`
                     : t('common.unavailable')}</strong>

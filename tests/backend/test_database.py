@@ -6,6 +6,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from backend.app.database import DEFAULT_EXPERIMENT_RETENTION_DAYS, Database
 
 
@@ -38,6 +40,60 @@ def test_initialize_marks_interrupted_experiment_retryable(tmp_path: Path) -> No
     assert recovered["status"] == "FAILED_RETRYABLE"
     assert recovered["errorCode"] == "SERVER_RESTARTED"
     assert recovered["completedAt"] is not None
+
+
+def test_event_pack_draft_and_audit_are_committed_atomically(tmp_path: Path) -> None:
+    database = Database(tmp_path / "eventshock.db")
+    database.initialize()
+    sessionId = "test-session-atomic-review"
+    eventPackId = "event-pack-atomic-review"
+    claims = [{"claimId": "claim-1", "reviewStatus": "HUMAN_APPROVED"}]
+
+    # 审计 payload 无法序列化时，之前执行的 draft UPSERT 也必须回滚。
+    with pytest.raises(TypeError):
+        database.saveEventPackDraftWithAudit(
+            sessionId,
+            eventPackId,
+            claims,
+            auditAction="BULK_CLAIMS_APPROVED",
+            auditPayload={"invalid": object()},
+        )
+
+    assert database.getEventPackDraft(sessionId, eventPackId) is None
+    assert database.listAuditEvents(sessionId) == []
+
+
+def test_reextracted_pack_draft_and_audit_are_committed_atomically(tmp_path: Path) -> None:
+    database = Database(tmp_path / "eventshock.db")
+    database.initialize()
+    sessionId = "test-session-atomic-extraction"
+    eventPackId = "event-pack-atomic-extraction"
+    originalClaims = [{"claimId": "claim-old", "reviewStatus": "HUMAN_APPROVED"}]
+    database.saveCustomEventPack(
+        sessionId,
+        eventPackId,
+        {"id": eventPackId, "title": "Original"},
+        originalClaims,
+    )
+    database.saveEventPackDraft(sessionId, eventPackId, originalClaims, False, None)
+
+    # 最后的审计序列化失败时，manifest 与 draft 都不能停留在新版本。
+    with pytest.raises(TypeError):
+        database.saveExtractedEventPackWithAudit(
+            sessionId,
+            eventPackId,
+            {"id": eventPackId, "title": "Replacement"},
+            [{"claimId": "claim-new", "reviewStatus": "AI_PROPOSED"}],
+            auditAction="CLAIMS_EXTRACTED",
+            auditPayload={"invalid": object()},
+        )
+
+    storedPack = database.getCustomEventPack(sessionId, eventPackId)
+    storedDraft = database.getEventPackDraft(sessionId, eventPackId)
+    assert storedPack is not None and storedPack["title"] == "Original"
+    assert storedPack["claims"] == originalClaims
+    assert storedDraft is not None and storedDraft["claims"] == originalClaims
+    assert database.listAuditEvents(sessionId) == []
 
 
 def test_ready_experiment_can_be_claimed_for_queue_only_once(tmp_path: Path) -> None:

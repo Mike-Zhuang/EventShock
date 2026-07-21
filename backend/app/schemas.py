@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -62,6 +62,25 @@ class ClaimReviewRequest(StrictModel):
         if self.reviewStatus == ReviewStatus.EDITED and not self.editedText:
             raise ValueError("editedText is required when reviewStatus is EDITED")
         return self
+
+
+ClaimId = Annotated[
+    str,
+    Field(min_length=3, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$"),
+]
+
+
+class BulkClaimApprovalRequest(StrictModel):
+    acknowledgedBulkApproval: Literal[True]
+    expectedClaimIds: list[ClaimId] = Field(min_length=1, max_length=50)
+    rationale: str | None = Field(default=None, max_length=500)
+
+    @field_validator("expectedClaimIds")
+    @classmethod
+    def validateUniqueClaimIds(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("expectedClaimIds must not contain duplicates")
+        return value
 
 
 class InterventionConfig(StrictModel):

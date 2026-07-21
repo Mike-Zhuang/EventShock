@@ -12,6 +12,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { TraceNode } from '../api/types';
 import { EmptyState, Notice, PageHeader } from '../components/common';
 import { useI18n } from '../i18n';
+import { getPageGuide } from '../page-guidance';
 import { useWorkflow } from '../state/workflow-context';
 import { formatMetricValue, safeDate } from '../utils/format';
 
@@ -125,7 +126,7 @@ export function TraceExplorerPage() {
 
   return (
     <div className="page page--trace">
-      <PageHeader title={t('trace.title')} subtitle={t('trace.subtitle')} />
+      <PageHeader title={t('trace.title')} subtitle={t('trace.subtitle')} guide={getPageGuide('trace', language)} />
       {!results || results.traces.length === 0 ? (
         <EmptyState title={t('trace.selectTitle')} body={t('trace.selectBody')} icon={<FlowArrow size={28} weight="duotone" />} />
       ) : (

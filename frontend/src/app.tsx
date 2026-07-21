@@ -72,32 +72,42 @@ export function buildAppHash(view: ViewId, experimentId?: string): string {
   return `#/${view}?${new URLSearchParams({ experimentId }).toString()}`;
 }
 
+interface NavigationSection {
+  label: string;
+  items: NavigationItem[];
+}
+
 function NavigationItems({
-  items,
+  sections,
   view,
   onNavigate,
 }: {
-  items: NavigationItem[];
+  sections: NavigationSection[];
   view: ViewId;
   onNavigate: (view: ViewId) => void;
 }) {
   return (
     <>
-      {items.map((item) => {
-        const Icon = item.icon;
-        return (
-          <button
-            key={item.id}
-            type="button"
-            className={view === item.id ? 'is-active' : ''}
-            aria-current={view === item.id ? 'page' : undefined}
-            onClick={() => onNavigate(item.id)}
-          >
-            <Icon size={19} weight={view === item.id ? 'fill' : 'regular'} />
-            <span>{item.label}</span>
-          </button>
-        );
-      })}
+      {sections.map((section) => (
+        <section className="navigation-section" key={section.label} aria-label={section.label}>
+          <span className="navigation-section__label">{section.label}</span>
+          {section.items.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                className={view === item.id ? 'is-active' : ''}
+                aria-current={view === item.id ? 'page' : undefined}
+                onClick={() => onNavigate(item.id)}
+              >
+                <Icon size={19} weight={view === item.id ? 'fill' : 'regular'} />
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
+        </section>
+      ))}
     </>
   );
 }
@@ -222,22 +232,37 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
     if (view === 'admin' && user?.role !== 'ADMIN') navigate('cases');
   }, [user?.role, view]);
 
-  const navigation = useMemo<NavigationItem[]>(() => {
-    const items: NavigationItem[] = [
-      { id: 'cases', label: t('nav.cases'), icon: Books },
-      { id: 'pack', label: t('nav.pack'), icon: ClipboardText },
-      { id: 'ai', label: t('nav.ai'), icon: Cpu },
-      { id: 'scenario', label: t('nav.scenario'), icon: SlidersHorizontal },
-      { id: 'preflight', label: t('nav.preflight'), icon: CheckSquare },
-      { id: 'runs', label: t('nav.runs'), icon: PlayCircle },
-      { id: 'results', label: t('nav.results'), icon: ChartLineUp },
-      { id: 'study', label: t('nav.study'), icon: Flask },
-      { id: 'trace', label: t('nav.trace'), icon: TreeStructure },
-      { id: 'governance', label: t('nav.governance'), icon: ShieldCheck },
-      { id: 'export', label: t('nav.export'), icon: Archive },
+  const navigation = useMemo<NavigationSection[]>(() => {
+    const sections: NavigationSection[] = [
+      {
+        label: t('nav.groupCore'),
+        items: [
+          { id: 'cases', label: t('nav.cases'), icon: Books },
+          { id: 'pack', label: t('nav.pack'), icon: ClipboardText },
+          { id: 'scenario', label: t('nav.scenario'), icon: SlidersHorizontal },
+          { id: 'preflight', label: t('nav.preflight'), icon: CheckSquare },
+          { id: 'runs', label: t('nav.runs'), icon: PlayCircle },
+          { id: 'results', label: t('nav.results'), icon: ChartLineUp },
+        ],
+      },
+      {
+        label: t('nav.groupOptional'),
+        items: [
+          { id: 'ai', label: t('nav.ai'), icon: Cpu },
+          { id: 'study', label: t('nav.study'), icon: Flask },
+          { id: 'trace', label: t('nav.trace'), icon: TreeStructure },
+          { id: 'governance', label: t('nav.governance'), icon: ShieldCheck },
+          { id: 'export', label: t('nav.export'), icon: Archive },
+        ],
+      },
     ];
-    if (user?.role === 'ADMIN') items.push({ id: 'admin', label: t('nav.admin'), icon: UsersThree });
-    return items;
+    if (user?.role === 'ADMIN') {
+      sections.push({
+        label: t('nav.groupAdmin'),
+        items: [{ id: 'admin', label: t('nav.admin'), icon: UsersThree }],
+      });
+    }
+    return sections;
   }, [t, user?.role]);
 
   const pages: Record<ViewId, React.ReactNode> = {
@@ -329,7 +354,7 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
 
         <aside className="sidebar" aria-label={t('app.primaryNavigation')}>
           <nav>
-            <NavigationItems items={navigation} view={view} onNavigate={navigate} />
+            <NavigationItems sections={navigation} view={view} onNavigate={navigate} />
           </nav>
           <footer className="sidebar__footer">
             <p>{t('footer.disclaimer')}</p>
@@ -355,7 +380,7 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
           hidden={!mobileNavOpen}
         >
           <nav aria-label={t('app.primaryNavigation')}>
-            <NavigationItems items={navigation} view={view} onNavigate={navigate} />
+            <NavigationItems sections={navigation} view={view} onNavigate={navigate} />
           </nav>
           <footer className="sidebar__footer">
             <p>{t('footer.disclaimer')}</p>

@@ -251,6 +251,8 @@ describe('API normalizers', () => {
         text: 'Candidate claim',
         textZh: '候选主张',
         sourceIds: ['source-1'],
+        publishedAt: '2026-07-07T13:00:00Z',
+        knownAt: '2026-07-07T13:05:00Z',
         reviewStatus: 'AI_PROPOSED',
         isRequired: true,
       }],
@@ -274,6 +276,8 @@ describe('API normalizers', () => {
       status: 'AI_PROPOSED',
       sourceIds: ['source-1'],
       textZh: '候选主张',
+      publishedAt: '2026-07-07T13:00:00Z',
+      knownAt: '2026-07-07T13:05:00Z',
     });
     expect(pack.defaultExperiment).toMatchObject({
       eventPackId: 'synthetic-pack-v1',

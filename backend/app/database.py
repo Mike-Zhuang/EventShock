@@ -263,29 +263,85 @@ class Database:
     ) -> None:
         now = utcNow()
         with self.writeLock, self.connection() as connection:
-            connection.execute(
-                """
-                INSERT INTO event_pack_drafts(
-                    session_id, owner_user_id, event_pack_id, claims_json,
-                    frozen, frozen_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(session_id, event_pack_id) DO UPDATE SET
-                    owner_user_id=excluded.owner_user_id,
-                    claims_json=excluded.claims_json,
-                    frozen=excluded.frozen,
-                    frozen_at=excluded.frozen_at,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    sessionId,
-                    sessionId,
-                    eventPackId,
-                    json.dumps(claims, ensure_ascii=False, separators=(",", ":")),
-                    int(frozen),
-                    frozenAt,
-                    now,
-                ),
+            self._saveEventPackDraftInConnection(
+                connection,
+                sessionId,
+                eventPackId,
+                claims,
+                frozen,
+                frozenAt,
+                now,
             )
+
+    def saveEventPackDraftWithAudit(
+        self,
+        sessionId: str,
+        eventPackId: str,
+        claims: list[dict[str, Any]],
+        *,
+        frozen: bool = False,
+        frozenAt: str | None = None,
+        auditEntityType: str = "EVENT_PACK",
+        auditEntityId: str | None = None,
+        auditAction: str,
+        auditPayload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """在同一事务中保存整包审核结果并追加不可变审计事件。"""
+
+        now = utcNow()
+        with self.writeLock, self.connection() as connection:
+            self._saveEventPackDraftInConnection(
+                connection,
+                sessionId,
+                eventPackId,
+                claims,
+                frozen,
+                frozenAt,
+                now,
+            )
+            return self._appendAuditEventInConnection(
+                connection,
+                sessionId,
+                auditEntityType,
+                auditEntityId or eventPackId,
+                auditAction,
+                auditPayload,
+                now,
+            )
+
+    @staticmethod
+    def _saveEventPackDraftInConnection(
+        connection: sqlite3.Connection,
+        sessionId: str,
+        eventPackId: str,
+        claims: list[dict[str, Any]],
+        frozen: bool,
+        frozenAt: str | None,
+        updatedAt: str,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO event_pack_drafts(
+                session_id, owner_user_id, event_pack_id, claims_json,
+                frozen, frozen_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, event_pack_id) DO UPDATE SET
+                owner_user_id=excluded.owner_user_id,
+                claims_json=excluded.claims_json,
+                frozen=excluded.frozen,
+                frozen_at=excluded.frozen_at,
+                updated_at=excluded.updated_at
+            """,
+            (
+                sessionId,
+                sessionId,
+                eventPackId,
+                json.dumps(claims, ensure_ascii=False, separators=(",", ":")),
+                int(frozen),
+                frozenAt,
+                updatedAt,
+            ),
+        )
 
     def saveCustomEventPack(
         self,
@@ -296,23 +352,82 @@ class Database:
     ) -> None:
         """保存匿名会话创建的 Event Pack；不会覆盖仓库内的规范包。"""
         now = utcNow()
+        with self.writeLock, self.connection() as connection:
+            self._saveCustomEventPackInConnection(
+                connection,
+                sessionId,
+                eventPackId,
+                manifest,
+                claims,
+                now,
+            )
+
+    def saveExtractedEventPackWithAudit(
+        self,
+        sessionId: str,
+        eventPackId: str,
+        manifest: dict[str, Any],
+        claims: list[dict[str, Any]],
+        *,
+        auditAction: str,
+        auditPayload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """在同一事务中替换重抽取结果、重置草稿并追加审计事件。"""
+
+        now = utcNow()
+        with self.writeLock, self.connection() as connection:
+            self._saveCustomEventPackInConnection(
+                connection,
+                sessionId,
+                eventPackId,
+                manifest,
+                claims,
+                now,
+            )
+            self._saveEventPackDraftInConnection(
+                connection,
+                sessionId,
+                eventPackId,
+                claims,
+                False,
+                None,
+                now,
+            )
+            return self._appendAuditEventInConnection(
+                connection,
+                sessionId,
+                "EVENT_PACK",
+                eventPackId,
+                auditAction,
+                auditPayload,
+                now,
+            )
+
+    @staticmethod
+    def _saveCustomEventPackInConnection(
+        connection: sqlite3.Connection,
+        sessionId: str,
+        eventPackId: str,
+        manifest: dict[str, Any],
+        claims: list[dict[str, Any]],
+        updatedAt: str,
+    ) -> None:
         manifestJson = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
         claimsJson = json.dumps(claims, ensure_ascii=False, separators=(",", ":"))
-        with self.writeLock, self.connection() as connection:
-            connection.execute(
-                """
-                INSERT INTO custom_event_packs(
-                    session_id, owner_user_id, event_pack_id, manifest_json,
-                    claims_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(session_id, event_pack_id) DO UPDATE SET
-                    owner_user_id=excluded.owner_user_id,
-                    manifest_json=excluded.manifest_json,
-                    claims_json=excluded.claims_json,
-                    updated_at=excluded.updated_at
-                """,
-                (sessionId, sessionId, eventPackId, manifestJson, claimsJson, now, now),
-            )
+        connection.execute(
+            """
+            INSERT INTO custom_event_packs(
+                session_id, owner_user_id, event_pack_id, manifest_json,
+                claims_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, event_pack_id) DO UPDATE SET
+                owner_user_id=excluded.owner_user_id,
+                manifest_json=excluded.manifest_json,
+                claims_json=excluded.claims_json,
+                updated_at=excluded.updated_at
+            """,
+            (sessionId, sessionId, eventPackId, manifestJson, claimsJson, updatedAt, updatedAt),
+        )
 
     def getCustomEventPack(self, sessionId: str, eventPackId: str) -> dict[str, Any] | None:
         with self.connection() as connection:
@@ -443,44 +558,64 @@ class Database:
     ) -> dict[str, Any]:
         """追加 hash-chain 审计事件，历史记录没有更新或删除接口。"""
         createdAt = utcNow()
-        payloadJson = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         with self.writeLock, self.connection() as connection:
-            previousRow = connection.execute(
-                "SELECT event_hash FROM audit_events WHERE session_id=? ORDER BY id DESC LIMIT 1",
-                (sessionId,),
-            ).fetchone()
-            previousHash = previousRow["event_hash"] if previousRow else None
-            material = "|".join(
-                (
-                    sessionId,
-                    entityType,
-                    entityId,
-                    action,
-                    payloadJson,
-                    previousHash or "",
-                    createdAt,
-                )
+            return self._appendAuditEventInConnection(
+                connection,
+                sessionId,
+                entityType,
+                entityId,
+                action,
+                payload,
+                createdAt,
             )
-            eventHash = hashlib.sha256(material.encode()).hexdigest()
-            cursor = connection.execute(
-                """
-                INSERT INTO audit_events(
-                    session_id, owner_user_id, entity_type, entity_id, action,
-                    payload_json, previous_hash, event_hash, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    sessionId,
-                    sessionId,
-                    entityType,
-                    entityId,
-                    action,
-                    payloadJson,
-                    previousHash,
-                    eventHash,
-                    createdAt,
-                ),
+
+    @staticmethod
+    def _appendAuditEventInConnection(
+        connection: sqlite3.Connection,
+        sessionId: str,
+        entityType: str,
+        entityId: str,
+        action: str,
+        payload: dict[str, Any],
+        createdAt: str,
+    ) -> dict[str, Any]:
+        payloadJson = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        previousRow = connection.execute(
+            "SELECT event_hash FROM audit_events WHERE session_id=? ORDER BY id DESC LIMIT 1",
+            (sessionId,),
+        ).fetchone()
+        previousHash = previousRow["event_hash"] if previousRow else None
+        material = "|".join(
+            (
+                sessionId,
+                entityType,
+                entityId,
+                action,
+                payloadJson,
+                previousHash or "",
+                createdAt,
             )
+        )
+        eventHash = hashlib.sha256(material.encode()).hexdigest()
+        cursor = connection.execute(
+            """
+            INSERT INTO audit_events(
+                session_id, owner_user_id, entity_type, entity_id, action,
+                payload_json, previous_hash, event_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                sessionId,
+                sessionId,
+                entityType,
+                entityId,
+                action,
+                payloadJson,
+                previousHash,
+                eventHash,
+                createdAt,
+            ),
+        )
         return {
             "id": cursor.lastrowid,
             "entityType": entityType,

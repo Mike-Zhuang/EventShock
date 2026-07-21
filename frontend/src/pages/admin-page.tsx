@@ -5,6 +5,7 @@ import { api } from '../api/client';
 import type { AdminActivityPage, AdminUserPage } from '../api/types';
 import { EmptyState, LoadingPanel, PageHeader } from '../components/common';
 import { useI18n } from '../i18n';
+import { getPageGuide } from '../page-guidance';
 import { useAuth } from '../state/auth-context';
 
 const USER_PAGE_SIZE = 25;
@@ -26,6 +27,12 @@ function actionLabel(action: string, isZh: boolean): string {
     EVENT_PACK_CREATE: ['Created Event Pack', '创建事件包'],
     EVENT_PACK_REVIEW: ['Reviewed a claim', '审核候选主张'],
     EVENT_PACK_FREEZE: ['Froze Event Pack', '冻结事件包'],
+    CLAIMS_EXTRACTED: ['Extracted candidate claims', '抽取候选主张'],
+    HUMAN_APPROVED: ['Approved a claim', '批准候选主张'],
+    BULK_CLAIMS_APPROVED: ['Bulk-approved pending claims', '批量批准待审核主张'],
+    EDITED: ['Edited a claim', '修改候选主张'],
+    REJECTED: ['Rejected a claim', '拒绝候选主张'],
+    FROZEN: ['Froze Event Pack', '冻结事件包'],
     SCENARIO_CREATE: ['Created scenario', '创建情景'],
     SCENARIO_UPDATE: ['Updated scenario', '更新情景'],
     SCENARIO_FREEZE: ['Froze scenario', '冻结情景'],
@@ -131,6 +138,7 @@ export function AdminPage() {
       <PageHeader
         title={t('admin.title')}
         subtitle={t('admin.subtitle')}
+        guide={getPageGuide('admin', language)}
         actions={(
           <Button kind="ghost" size="sm" renderIcon={ArrowClockwise} onClick={() => { void loadUsers(); void loadActivity(); }}>
             {t('admin.refresh')}

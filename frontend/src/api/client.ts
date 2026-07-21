@@ -33,6 +33,7 @@ import type {
   AdminActivityPage,
   AdminUserPage,
   AuthSession,
+  BulkClaimApprovalInput,
   CaseSummary,
   ClaimReviewInput,
   EventPack,
@@ -376,6 +377,16 @@ export const api = {
           editedText: input.editedText,
           editedTextZh: input.editedTextZh,
         }),
+      },
+    ));
+  },
+
+  async approveAllClaims(eventPackId: string, input: BulkClaimApprovalInput): Promise<EventPack> {
+    return normalizeEventPack(await requestJson(
+      `/v1/event-packs/${encodeURIComponent(eventPackId)}/claims/approve-all`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
       },
     ));
   },

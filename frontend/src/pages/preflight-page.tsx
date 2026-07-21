@@ -2,12 +2,30 @@ import { Button, InlineNotification } from '@carbon/react';
 import { ArrowLeft, Play, ShieldCheck } from '@phosphor-icons/react';
 import { useEffect, useState } from 'react';
 import type { ViewId } from '../app';
-import { CheckRow, EmptyState, Notice, PageHeader, StatusBadge } from '../components/common';
+import { CheckRow, EmptyState, ExplainedLabel, Notice, PageHeader, StatusBadge } from '../components/common';
 import { translateParameter, translateValidation, useI18n } from '../i18n';
+import { getPageGuide } from '../page-guidance';
+import { getParameterHelp } from '../parameter-help';
 import { useWorkflow } from '../state/workflow-context';
 
 export function PreflightPage({ navigate }: { navigate: (view: ViewId) => void }) {
   const { language, t } = useI18n();
+  const explained = (key: string, label: string) => (
+    <ExplainedLabel label={label} explanation={getParameterHelp(key, language) ?? label} />
+  );
+  const outcomeLabel = (outcomeId: string): string => {
+    const labels: Record<string, string> = {
+      maxSpreadBps: t('metric.peakSpread'),
+      maxDrawdownPct: t('metric.maxDrawdown'),
+      realizedVolatilityPct: t('metric.realizedVolatility'),
+      minDepth: t('metric.minDepth'),
+      recoverySteps: t('metric.recoveryTime'),
+      totalVolume: t('metric.totalVolume'),
+      orderImbalance: t('metric.orderImbalance'),
+      cascadeScore: t('metric.cascadeScore'),
+    };
+    return labels[outcomeId] ?? outcomeId;
+  };
   const {
     eventPack,
     scenario,
@@ -61,6 +79,7 @@ export function PreflightPage({ navigate }: { navigate: (view: ViewId) => void }
       <PageHeader
         title={t('preflight.title')}
         subtitle={t('preflight.subtitle')}
+        guide={getPageGuide('preflight', language)}
         actions={(
           <div className="page-header-action-group">
             <StatusBadge status={validation.valid ? 'VALID' : 'INVALID'} />
@@ -91,13 +110,13 @@ export function PreflightPage({ navigate }: { navigate: (view: ViewId) => void }
             <div><dt>{t('scenario.seedCount')}</dt><dd>{scenario.seedCount}</dd></div>
             <div><dt>{t('scenario.population')}</dt><dd>{scenario.populationSize}</dd></div>
             <div><dt>{t('scenario.steps')}</dt><dd>{scenario.steps}</dd></div>
-            <div><dt>{language === 'zh-CN' ? '主要指标' : 'Primary outcome'}</dt><dd><code>{scenario.primaryOutcome ?? 'maxSpreadBps'}</code></dd></div>
-            <div><dt>{language === 'zh-CN' ? '次要指标' : 'Secondary outcomes'}</dt><dd>{scenario.secondaryOutcomes?.join(', ') || t('common.unavailable')}</dd></div>
-            <div><dt>{t('preflight.stopRule')}</dt><dd>{language === 'zh-CN' ? `至少 ${scenario.stoppingRule?.minimumPairs ?? scenario.seedCount} 对，最多 ${scenario.stoppingRule?.maximumPairs ?? scenario.seedCount} 对${scenario.stoppingRule?.targetCiHalfWidth ? `，目标区间半宽 ${scenario.stoppingRule.targetCiHalfWidth}` : ''}` : `Minimum ${scenario.stoppingRule?.minimumPairs ?? scenario.seedCount} pairs, maximum ${scenario.stoppingRule?.maximumPairs ?? scenario.seedCount} pairs${scenario.stoppingRule?.targetCiHalfWidth ? `, target interval half-width ${scenario.stoppingRule.targetCiHalfWidth}` : ''}`}</dd></div>
+            <div><dt>{explained('primaryOutcome', language === 'zh-CN' ? '主要指标' : 'Primary outcome')}</dt><dd>{outcomeLabel(scenario.primaryOutcome ?? 'maxSpreadBps')} <code>{scenario.primaryOutcome ?? 'maxSpreadBps'}</code></dd></div>
+            <div><dt>{language === 'zh-CN' ? '次要指标' : 'Secondary outcomes'}</dt><dd>{scenario.secondaryOutcomes?.map(outcomeLabel).join(', ') || t('common.unavailable')}</dd></div>
+            <div><dt>{explained('minimumPairs', t('preflight.stopRule'))}</dt><dd>{language === 'zh-CN' ? `至少 ${scenario.stoppingRule?.minimumPairs ?? scenario.seedCount} 对，最多 ${scenario.stoppingRule?.maximumPairs ?? scenario.seedCount} 对${scenario.stoppingRule?.targetCiHalfWidth ? `，目标区间半宽 ${scenario.stoppingRule.targetCiHalfWidth}` : ''}` : `Minimum ${scenario.stoppingRule?.minimumPairs ?? scenario.seedCount} pairs, maximum ${scenario.stoppingRule?.maximumPairs ?? scenario.seedCount} pairs${scenario.stoppingRule?.targetCiHalfWidth ? `, target interval half-width ${scenario.stoppingRule.targetCiHalfWidth}` : ''}`}</dd></div>
             <div><dt>{language === 'zh-CN' ? '认知模式' : 'Cognition mode'}</dt><dd>{scenario.llmPolicy?.mode ?? 'RULE_ONLY'}</dd></div>
             <div><dt>{language === 'zh-CN' ? 'LLM 路由' : 'LLM route'}</dt><dd>{scenario.llmPolicy?.mode === 'HYBRID_LLM' ? `zhipu / ${scenario.llmPolicy.modelId}` : language === 'zh-CN' ? '不调用外部模型' : 'No external model call'}</dd></div>
-            <div><dt>{language === 'zh-CN' ? '预计 LLM 调用' : 'Estimated LLM calls'}</dt><dd>{validation.estimatedLlmCalls ?? 0}</dd></div>
-            <div><dt>{language === 'zh-CN' ? '最大费用责任上限（非预计账单）' : 'Maximum cost liability (not forecast spend)'}</dt><dd>${(validation.llmCostCapUsd ?? scenario.llmPolicy?.maxCostUsd ?? 0).toFixed(2)} USD</dd></div>
+            <div><dt>{explained('callBudget', language === 'zh-CN' ? '预计 LLM 调用' : 'Estimated LLM calls')}</dt><dd>{validation.estimatedLlmCalls ?? 0}</dd></div>
+            <div><dt>{explained('costCap', language === 'zh-CN' ? '最大费用责任上限（非预计账单）' : 'Maximum cost liability (not forecast spend)')}</dt><dd>${(validation.llmCostCapUsd ?? scenario.llmPolicy?.maxCostUsd ?? 0).toFixed(2)} USD</dd></div>
             <div><dt>{language === 'zh-CN' ? '价格核验状态' : 'Pricing verification'}</dt><dd><code>{validation.llmPricingStatus ?? (scenario.llmPolicy?.mode === 'RULE_ONLY' ? 'NOT_APPLICABLE' : 'UNAVAILABLE')}</code></dd></div>
             {validation.llmMinimumCallReservationUsd !== undefined ? <div><dt>{language === 'zh-CN' ? '单次调用前最坏预留' : 'Worst-case pre-dispatch reservation'}</dt><dd>${validation.llmMinimumCallReservationUsd.toFixed(6)} USD</dd></div> : null}
             <div><dt>{language === 'zh-CN' ? '数据许可边界' : 'Data-license boundary'}</dt><dd>{language === 'zh-CN' ? '导出来源元数据与哈希，不重新分发来源全文；公开再分发仍需人工许可审核。' : 'Export source metadata and hashes, not full source text. Public redistribution still requires human license review.'}</dd></div>

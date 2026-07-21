@@ -69,6 +69,7 @@ from backend.app.observability import RuntimeMetrics
 from backend.app.rate_limit import RateLimitExceeded, RateLimitRule, SlidingWindowRateLimiter
 from backend.app.scenario_service import ScenarioService
 from backend.app.schemas import (
+    BulkClaimApprovalRequest,
     ClaimReviewRequest,
     EvalRunRequest,
     EventPackCreateRequest,
@@ -1157,6 +1158,20 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         service: EventPackService = request.app.state.eventPackService
         return service.reviewClaim(eventPackId, claimId, _sessionId(sessionId), review)
 
+    @appInstance.post("/api/v1/event-packs/{eventPackId}/claims/approve-all")
+    async def approveAllClaims(
+        eventPackId: str,
+        approval: BulkClaimApprovalRequest,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        service: EventPackService = request.app.state.eventPackService
+        return service.approveAllProposedClaims(
+            eventPackId,
+            _sessionId(sessionId),
+            approval,
+        )
+
     @appInstance.post("/api/v1/event-packs/{eventPackId}/freeze")
     async def freezeEventPack(
         eventPackId: str,
@@ -1910,6 +1925,7 @@ def _rateLimitRules(request: Request) -> list[RateLimitRule]:
                 r"/api/v1/event-packs",
                 r"/api/v1/event-packs/[^/]+/extract",
                 r"/api/v1/event-packs/[^/]+/claims/[^/]+/review",
+                r"/api/v1/event-packs/[^/]+/claims/approve-all",
                 r"/api/v1/event-packs/[^/]+/freeze",
                 r"/api/v1/scenarios(?:/[^/]+(?:/(?:clone|freeze))?)?",
                 r"/api/v1/llm/(?:config|test)",
