@@ -1,8 +1,9 @@
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from backend.app.database import Database
+from backend.app.database import DEFAULT_EXPERIMENT_RETENTION_DAYS, Database
 
 
 def test_initialize_marks_interrupted_experiment_retryable(tmp_path: Path) -> None:
@@ -76,6 +77,31 @@ def test_retention_removes_expired_terminal_results(tmp_path: Path) -> None:
     database.enforceRetention(retentionDays=7)
 
     assert database.countExperiments() == 0
+
+
+def test_default_terminal_result_retention_is_ninety_days(tmp_path: Path) -> None:
+    assert DEFAULT_EXPERIMENT_RETENTION_DAYS == 90
+    database = Database(tmp_path / "eventshock.db")
+    database.initialize()
+    now = datetime.now(UTC)
+    for experimentId, ageDays in (("exp-retained", 89), ("exp-expired", 91)):
+        database.createExperiment(
+            experimentId,
+            "test-session-default-retention",
+            {"eventPackId": "spacex-synthetic-v1", "seedCount": 10},
+            None,
+        )
+        database.updateExperiment(
+            experimentId,
+            status="COMPLETED",
+            result_json={"large": "result"},
+            completed_at=(now - timedelta(days=ageDays)).isoformat(),
+        )
+
+    database.enforceRetention()
+
+    assert database.getExperiment("exp-retained", "test-session-default-retention") is not None
+    assert database.getExperiment("exp-expired", "test-session-default-retention") is None
 
 
 def test_retention_removes_stale_ready_and_rolls_session_history(tmp_path: Path) -> None:

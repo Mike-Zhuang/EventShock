@@ -75,6 +75,31 @@ function traceIcon(kind: string | undefined): ReactNode {
   }
 }
 
+function tracePayloadValue(
+  key: string,
+  value: unknown,
+  language: 'en' | 'zh-CN',
+): string {
+  if (key === 'source' && typeof value === 'string') {
+    const labels: Record<string, { en: string; zh: string }> = {
+      LLM_BELIEF_SIGNAL: { en: 'LLM belief signal', zh: 'LLM 信念信号' },
+      RULE_FALLBACK_BELIEF_SIGNAL: {
+        en: 'Deterministic rule-fallback belief signal',
+        zh: '确定性规则回退信念信号',
+      },
+      RULE_AGENT: { en: 'Deterministic rule agent', zh: '确定性规则智能体' },
+    };
+    const label = labels[value];
+    if (label) return language === 'zh-CN' ? label.zh : label.en;
+  }
+  if (typeof value === 'boolean') {
+    return value
+      ? language === 'zh-CN' ? '是' : 'Yes'
+      : language === 'zh-CN' ? '否' : 'No';
+  }
+  return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
 export function TraceExplorerPage() {
   const { language, t } = useI18n();
   const { results } = useWorkflow();
@@ -165,7 +190,7 @@ export function TraceExplorerPage() {
                     <summary>{language === 'zh-CN' ? '查看经过清理的事件负载' : 'Inspect sanitized event payload'}</summary>
                     <dl className="definition-list definition-list--compact">
                       {Object.entries(selectedNode.payload).map(([key, value]) => (
-                        <div key={key}><dt>{key}</dt><dd><code>{typeof value === 'string' ? value : JSON.stringify(value)}</code></dd></div>
+                        <div key={key}><dt>{key}</dt><dd><code>{tracePayloadValue(key, value, language)}</code></dd></div>
                       ))}
                     </dl>
                   </details>

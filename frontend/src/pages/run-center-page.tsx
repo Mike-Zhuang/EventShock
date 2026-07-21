@@ -1,12 +1,13 @@
 import { Button, InlineNotification, ProgressBar } from '@carbon/react';
 import { ArrowClockwise, ChartLineUp, Stop, TerminalWindow } from '@phosphor-icons/react';
 import { useEffect, useState } from 'react';
-import type { ViewId } from '../app';
+import type { Navigate } from '../app';
 import { EmptyState, ErrorPanel, LoadingPanel, Notice, PageHeader, StatusBadge } from '../components/common';
+import { ExperimentHistoryDisclosure, experimentHistoryLabel } from '../components/experiment-history';
 import { translateLogLevel, useI18n } from '../i18n';
 import { useWorkflow } from '../state/workflow-context';
 
-export function RunCenterPage({ navigate }: { navigate: (view: ViewId) => void }) {
+export function RunCenterPage({ navigate }: { navigate: Navigate }) {
   const { language, t } = useI18n();
   const {
     experiments,
@@ -66,8 +67,9 @@ export function RunCenterPage({ navigate }: { navigate: (view: ViewId) => void }
     if (!activeExperiment) return;
     setActionError(undefined);
     try {
-      await loadResults(activeExperiment.id);
-      navigate('results');
+      const nextResults = await loadResults(activeExperiment.id);
+      if (!nextResults) return;
+      navigate('results', activeExperiment.id);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error));
     }
@@ -84,6 +86,7 @@ export function RunCenterPage({ navigate }: { navigate: (view: ViewId) => void }
           </Button>
         )}
       />
+      <ExperimentHistoryDisclosure />
 
       {actionError || experimentsError || resultsError ? (
         <InlineNotification kind="error" lowContrast hideCloseButton title={t('common.errorTitle')} subtitle={t('common.errorFallback')} />
@@ -110,7 +113,10 @@ export function RunCenterPage({ navigate }: { navigate: (view: ViewId) => void }
                 onClick={() => void select(experiment.id)}
               >
                 <div>
-                  <code>{experiment.id}</code>
+                  <span>
+                    <code>{experiment.id}</code><br />
+                    <small>{experimentHistoryLabel(experiment, language, false, false)}</small>
+                  </span>
                   <StatusBadge status={experiment.status} />
                 </div>
                 <span>{experiment.createdAt ? new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(experiment.createdAt)) : t('common.unavailable')}</span>

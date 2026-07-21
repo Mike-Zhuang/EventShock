@@ -1728,8 +1728,9 @@ def _activateAgents(
         if cognitiveReady and cognitiveSignal is not None:
             intent = makeCognitiveOrderIntent(agent, context, cognitiveSignal)
             state.cognitiveUseCount[agent.agentId] = cognitiveUseIndex + 1
+            fallbackUsed = bool(cognitiveSignal.get("fallbackUsed", False))
             beliefPayload = {
-                "source": "LLM_BELIEF_SIGNAL",
+                "source": ("RULE_FALLBACK_BELIEF_SIGNAL" if fallbackUsed else "LLM_BELIEF_SIGNAL"),
                 "decisionId": cognitiveSignal.get("decisionId"),
                 "decisionRound": cognitiveSignal.get("decisionRound"),
                 "activeFromStep": activeFromStep,
@@ -1738,6 +1739,10 @@ def _activateAgents(
                 "evidenceIds": cognitiveSignal.get("evidenceIds", []),
                 "confidence": cognitiveSignal.get("confidence"),
                 "uncertainty": cognitiveSignal.get("uncertainty"),
+                "fallbackUsed": fallbackUsed,
+                "repairUsed": bool(cognitiveSignal.get("repairUsed", False)),
+                "failureReason": cognitiveSignal.get("failureReason"),
+                "failureCodes": cognitiveSignal.get("failureCodes", []),
             }
         else:
             behaviorRandom = random.Random(

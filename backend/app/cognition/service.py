@@ -113,6 +113,9 @@ class BeliefDecisionRun(StrictFrozenModel):
     completion_tokens: int = Field(ge=0)
     cached_tokens: int = Field(ge=0)
     cost_upper_bound_usd: float = Field(ge=0.0)
+    transport_attempts: int = Field(default=0, ge=0)
+    failure_codes: tuple[str, ...] = ()
+    fallback_reason: str | None = None
 
 
 class CognitionTelemetryView(StrictFrozenModel):
@@ -402,6 +405,7 @@ class CognitionService:
         sessionId: str,
         observation: Observation,
         costBudget: ModelCostBudget | None = None,
+        allowRuleFallback: bool = True,
     ) -> BeliefDecisionRun:
         runtime = self._configStore.getRuntimeConfig(sessionId)
         request = self._buildRequest(
@@ -418,8 +422,17 @@ class CognitionService:
         result = await self._execute(
             request=request,
             schema=BeliefDecision,
-            policy=self._modelPolicy,
+            policy=self._policy(allowRuleFallback=allowRuleFallback),
             costBudget=costBudget,
+        )
+        failureCodes = tuple(code.value for code in result.failureCodes)
+        fallbackReason = next(
+            (
+                code.value
+                for code in reversed(result.failureCodes)
+                if code not in {FailureCode.FALLBACK_USED, FailureCode.RULE_FALLBACK_USED}
+            ),
+            None,
         )
         return BeliefDecisionRun(
             decision=result.data,
@@ -434,6 +447,9 @@ class CognitionService:
             completion_tokens=result.usage.completionTokens,
             cached_tokens=result.usage.cachedTokens,
             cost_upper_bound_usd=result.costUpperBoundUsd or 0.0,
+            transport_attempts=result.transportAttempts,
+            failure_codes=failureCodes,
+            fallback_reason=fallbackReason,
         )
 
     def getTelemetry(self) -> CognitionTelemetryView:
@@ -502,6 +518,21 @@ class CognitionService:
                     result = replace(
                         result,
                         costUpperBoundUsd=float(settlement.chargedUsdUpperBound),
+                    )
+                if result.fallbackUsed and not policy.allow_rule_fallback:
+                    failureCode = next(
+                        (
+                            code
+                            for code in reversed(result.failureCodes)
+                            if code
+                            not in {FailureCode.FALLBACK_USED, FailureCode.RULE_FALLBACK_USED}
+                        ),
+                        FailureCode.RULE_FALLBACK_USED,
+                    )
+                    raise ModelGatewayError(
+                        failureCode,
+                        "the model result used a deterministic fallback while "
+                        "fallback was disabled",
                     )
                 # 即使注入的网关实现有缺陷，运行时仍执行最后一道确定性边界检查。
                 validateEvidenceReferences(result.data, request.allowedEvidenceIds)

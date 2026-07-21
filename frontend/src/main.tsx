@@ -1,6 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import '@carbon/styles/css/styles.css';
+import './carbon.scss';
 import './styles.css';
 import { App } from './app';
 

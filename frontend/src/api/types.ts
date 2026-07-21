@@ -378,10 +378,25 @@ export interface Experiment {
   logs: ExperimentLogEntry[];
 }
 
+export type MetricDisplayUnit =
+  | '%'
+  | 'percent'
+  | 'ratio'
+  | 'bps'
+  | 'steps'
+  | 'seconds'
+  | 's'
+  | 'shares'
+  | 'score'
+  | 'cents'
+  | 'count'
+  | 'events/s'
+  | 'ms';
+
 export interface MetricResult {
   id: string;
   label: string;
-  unit?: string;
+  unit?: MetricDisplayUnit;
   baseline?: number;
   intervention?: number;
   delta?: number;
@@ -561,6 +576,10 @@ export interface CognitionDecisionSummary {
   evidenceIds: string[];
   decisionSummary?: string;
   fallbackUsed?: boolean;
+  repairUsed?: boolean;
+  failureReason?: string;
+  failureCodes: string[];
+  transportAttempts?: number;
   requestId?: string;
   decisionRound?: number;
   observationAt?: string;
@@ -611,6 +630,7 @@ export interface CognitionRunMetadata {
   completionTokens: number;
   cachedTokens: number;
   fallbackCount: number;
+  fallbackReasons: string[];
   cacheHits: number;
   plannedCalls: number;
   attemptedCalls: number;

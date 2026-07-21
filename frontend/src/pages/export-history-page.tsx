@@ -1,8 +1,9 @@
 import { Button, InlineNotification } from '@carbon/react';
 import { DownloadSimple, FileZip, FolderOpen } from '@phosphor-icons/react';
 import { useState } from 'react';
-import type { ViewId } from '../app';
+import type { Navigate } from '../app';
 import { EmptyState, LoadingPanel, PageHeader, StatusBadge } from '../components/common';
+import { ExperimentHistoryDisclosure, experimentHistoryLabel } from '../components/experiment-history';
 import { useI18n } from '../i18n';
 import { useWorkflow } from '../state/workflow-context';
 import { safeDate } from '../utils/format';
@@ -34,13 +35,14 @@ const PARQUET_FILES = [
   'parquet/schema_manifest.json',
 ];
 
-export function ExportHistoryPage({ navigate }: { navigate: (view: ViewId) => void }) {
+export function ExportHistoryPage({ navigate }: { navigate: Navigate }) {
   const { language, t } = useI18n();
   const {
     experiments,
     experimentsState,
     activeExperiment,
     selectExperiment,
+    loadResults,
     exportExperiment,
   } = useWorkflow();
   const [exportingId, setExportingId] = useState<string>();
@@ -60,8 +62,20 @@ export function ExportHistoryPage({ navigate }: { navigate: (view: ViewId) => vo
   };
 
   const inspectRun = async (experimentId: string) => {
-    await selectExperiment(experimentId);
-    navigate('runs');
+    setMessage(undefined);
+    try {
+      const experiment = await selectExperiment(experimentId);
+      if (!experiment) return;
+      if (experiment.status === 'COMPLETED') {
+        const nextResults = await loadResults(experiment.id);
+        if (!nextResults) return;
+        navigate('results', experiment.id);
+        return;
+      }
+      navigate('runs');
+    } catch {
+      setMessage({ kind: 'error', text: t('common.errorFallback') });
+    }
   };
 
   return (
@@ -92,7 +106,7 @@ export function ExportHistoryPage({ navigate }: { navigate: (view: ViewId) => vo
           <ol>
             <li>{language === 'zh-CN' ? '核对 manifest 中的 Event Pack、场景、种子、引擎、模型和提示词哈希。' : 'Verify Event Pack, scenario, seed, engine, model, and prompt hashes in the manifest.'}</li>
             <li>{language === 'zh-CN' ? '使用 CPython 3.12.13 和 manifest 指定的引擎版本。' : 'Use CPython 3.12.13 and the engine version declared in the manifest.'}</li>
-            <li>{language === 'zh-CN' ? '若 resolvedMode 为 HYBRID_LLM，优先复用 cognitive_decisions.json 中的冻结决策，不重新请求漂移后的供应商模型。' : 'When resolvedMode is HYBRID_LLM, reuse frozen decisions in cognitive_decisions.json instead of calling a potentially drifted provider model.'}</li>
+            <li>{language === 'zh-CN' ? '若 resolvedMode 以 HYBRID_LLM 开头，优先复用 cognitive_decisions.json 中的冻结决策，不重新请求漂移后的供应商模型。' : 'When resolvedMode starts with HYBRID_LLM, reuse frozen decisions in cognitive_decisions.json instead of calling a potentially drifted provider model.'}</li>
             <li>{language === 'zh-CN' ? '按 README_REPRODUCE.md 验证配对种子和结果哈希。' : 'Follow README_REPRODUCE.md to verify matched seeds and result hashes.'}</li>
           </ol>
           <InlineNotification
@@ -107,6 +121,7 @@ export function ExportHistoryPage({ navigate }: { navigate: (view: ViewId) => vo
 
       <section className="history-section" aria-labelledby="history-heading">
         <div className="section-heading"><h2 id="history-heading">{t('export.history')}</h2></div>
+        <ExperimentHistoryDisclosure />
         {experimentsState === 'loading' && experiments.length === 0 ? <LoadingPanel /> : null}
         {experimentsState === 'success' && experiments.length === 0 ? (
           <EmptyState title={t('runs.emptyTitle')} body={t('export.noHistory')} icon={<FolderOpen size={28} weight="duotone" />} />
@@ -128,7 +143,7 @@ export function ExportHistoryPage({ navigate }: { navigate: (view: ViewId) => vo
                   <tr key={experiment.id} className={activeExperiment?.id === experiment.id ? 'is-selected' : ''}>
                     <td><code>{experiment.id}</code></td>
                     <td><code>{experiment.eventPackId}</code></td>
-                    <td><StatusBadge status={experiment.status} /></td>
+                    <td><StatusBadge status={experiment.status} /><div>{experimentHistoryLabel(experiment, language, false, false)}</div></td>
                     <td>{safeDate(experiment.updatedAt ?? experiment.createdAt, language)}</td>
                     <td>
                       <div className="table-actions">

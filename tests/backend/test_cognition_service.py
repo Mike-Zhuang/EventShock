@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import zipfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -29,11 +31,14 @@ from backend.app.cognition import (
     ModelUsage,
     Observation,
 )
+from backend.app.schemas import ExperimentRequest
 from backend.app.service import (
     COGNITION_PILOT_SCHEDULE_MODE,
     ExperimentService,
+    _buildExport,
     _cognitiveSignalSequenceHash,
 )
+from backend.app.simulation.analytics import aggregatePairedResults
 from backend.app.simulation.engine import PRICE_SCALE, runScenario
 
 API_KEY = "service-test-secret-key-4815"
@@ -381,6 +386,14 @@ def test_belief_fallback_cache_telemetry_and_eval_summary() -> None:
 
     assert first.decision.action_preference == ActionPreference.ABSTAIN
     assert first.fallback_used is True
+    assert first.repair_used is True
+    assert first.transport_attempts == 1
+    assert first.failure_codes == (
+        "SCHEMA_INVALID",
+        "FALLBACK_USED",
+        "RULE_FALLBACK_USED",
+    )
+    assert first.fallback_reason == "SCHEMA_INVALID"
     assert second.cache_hit is True
     assert harness.requests[0].allowedEvidenceIds == observation.evidenceIds()
     assert harness.requests[0].allowedActionValues == frozenset(
@@ -419,6 +432,35 @@ def test_belief_fallback_cache_telemetry_and_eval_summary() -> None:
     assert summary.passed_cases == 1
     assert summary.pass_rate == 1.0
     assert summary.telemetry == telemetry
+
+
+def test_belief_rule_fallback_is_rejected_when_policy_disables_it() -> None:
+    service, harness = configuredService(
+        [
+            FakeOutcome(
+                makeAbstainDecision(),
+                fallbackUsed=True,
+                failureCodes=(
+                    FailureCode.SCHEMA_INVALID,
+                    FailureCode.FALLBACK_USED,
+                    FailureCode.RULE_FALLBACK_USED,
+                ),
+            )
+        ]
+    )
+
+    with pytest.raises(ModelGatewayError) as error:
+        asyncio.run(
+            service.generateBeliefDecision(
+                sessionId=SESSION_ID,
+                observation=makeObservation(),
+                allowRuleFallback=False,
+            )
+        )
+
+    assert error.value.code == FailureCode.SCHEMA_INVALID
+    assert harness.policies[0].allow_rule_fallback is False
+    assert harness.gateways[0].closed is True
 
 
 def test_belief_result_with_disallowed_action_is_rejected_by_service_boundary() -> None:
@@ -469,10 +511,12 @@ def test_belief_result_with_disallowed_action_is_rejected_by_service_boundary() 
 class ClosedLoopPilotCognition:
     """以 observation hash 模拟不可变缓存，避免测试依赖真实供应商。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, fallbackRequestIndexes: set[int] | None = None) -> None:
         self.observations: list[Observation] = []
         self.observationKeys: set[str] = set()
         self.requestCount = 0
+        self.fallbackRequestIndexes = fallbackRequestIndexes or set()
+        self.allowRuleFallbackPolicies: list[bool] = []
 
     @staticmethod
     def getConfig(_sessionId: str) -> SimpleNamespace:
@@ -484,9 +528,11 @@ class ClosedLoopPilotCognition:
         sessionId: str,
         observation: Observation,
         costBudget: object,
+        allowRuleFallback: bool = True,
     ) -> BeliefDecisionRun:
         del sessionId, costBudget
         self.requestCount += 1
+        self.allowRuleFallbackPolicies.append(allowRuleFallback)
         self.observations.append(observation)
         observationKey = json.dumps(
             observation.model_dump(mode="json"),
@@ -526,19 +572,25 @@ class ClosedLoopPilotCognition:
                 }
             )
         )
+        fallbackUsed = self.requestCount in self.fallbackRequestIndexes
         return BeliefDecisionRun(
-            decision=decision,
+            decision=makeAbstainDecision() if fallbackUsed else decision,
             model="glm-5.2",
             request_id=f"request-pilot-{self.requestCount:04d}",
             cache_hit=cacheHit,
-            fallback_used=False,
-            repair_used=False,
+            fallback_used=fallbackUsed,
+            repair_used=fallbackUsed,
             latency_ms=0.0 if cacheHit else 3.0,
             total_tokens=0 if cacheHit else 24,
             prompt_tokens=0 if cacheHit else 16,
             completion_tokens=0 if cacheHit else 8,
             cached_tokens=0,
             cost_upper_bound_usd=0.0 if cacheHit else 0.0001,
+            transport_attempts=0 if cacheHit else 2 if fallbackUsed else 1,
+            failure_codes=(
+                ("SCHEMA_INVALID", "FALLBACK_USED", "RULE_FALLBACK_USED") if fallbackUsed else ()
+            ),
+            fallback_reason="SCHEMA_INVALID" if fallbackUsed else None,
         )
 
 
@@ -690,6 +742,115 @@ def test_closed_loop_pilot_uses_endogenous_market_feedback_and_labeled_social_fe
     assert secondRoundObservation.evidenceIds() == {"claim-risk-off"}
 
 
+def test_closed_loop_pilot_reports_partial_rule_fallback_with_reason() -> None:
+    cognition = ClosedLoopPilotCognition(fallbackRequestIndexes={1})
+    service = closedLoopService(cognition)
+
+    cognitionRun = service._prepareCognitiveSignals(
+        "exp-closed-loop-partial-fallback",
+        SESSION_ID,
+        closedLoopRequest(),
+        closedLoopEventPack(),
+    )
+
+    assert cognitionRun["resolvedMode"] == "HYBRID_LLM_PARTIAL_RULE_FALLBACK"
+    assert cognitionRun["fallbackCount"] == 1
+    assert cognitionRun["fallbackReasons"] == ["SCHEMA_INVALID"]
+    fallbackSignal = cognitionRun["signals"][0]
+    assert fallbackSignal["fallbackUsed"] is True
+    assert fallbackSignal["repairUsed"] is True
+    assert fallbackSignal["failureReason"] == "SCHEMA_INVALID"
+    assert fallbackSignal["failureCodes"] == [
+        "SCHEMA_INVALID",
+        "FALLBACK_USED",
+        "RULE_FALLBACK_USED",
+    ]
+    assert fallbackSignal["transportAttempts"] == 2
+
+
+def test_partial_rule_fallback_is_preserved_in_limitations_manifest_and_export() -> None:
+    service = closedLoopService(ClosedLoopPilotCognition(fallbackRequestIndexes={1}))
+    requestData = ExperimentRequest.model_validate(closedLoopRequest()).model_dump(mode="json")
+    eventPack = closedLoopEventPack()
+    eventPack["sources"][0]["contentHash"] = "a" * 64
+    cognitionRun = service._prepareCognitiveSignals(
+        "exp-partial-fallback-artifact",
+        SESSION_ID,
+        requestData,
+        eventPack,
+    )
+    seeds = [101, 102]
+    baselineRuns = []
+    interventionRuns = []
+    for seed in seeds:
+        commonArguments = {
+            "seed": seed,
+            "populationSize": requestData["populationSize"],
+            "steps": requestData["steps"],
+            "parameter": requestData["intervention"]["parameter"],
+            "eventPack": eventPack,
+            "cognitiveSignals": cognitionRun["signals"],
+            "scenarioConfig": requestData,
+        }
+        baselineRuns.append(
+            runScenario(
+                **commonArguments,
+                value=requestData["intervention"]["baselineValue"],
+            )
+        )
+        interventionRuns.append(
+            runScenario(
+                **commonArguments,
+                value=requestData["intervention"]["interventionValue"],
+            )
+        )
+    result = service._buildResult(
+        "exp-partial-fallback-artifact",
+        requestData,
+        eventPack,
+        seeds,
+        aggregatePairedResults(baselineRuns, interventionRuns),
+        cognitionRun,
+        {
+            "mode": "FIXED_PAIRS",
+            "triggered": False,
+            "reason": "MAXIMUM_PAIRS_REACHED",
+            "completedPairs": len(seeds),
+        },
+    )
+
+    fallbackLimitation = next(
+        item for item in result["limitations"] if item["code"] == "LLM_PARTIAL_RULE_FALLBACK"
+    )
+    assert "Recorded rule-fallback decisions: 1" in fallbackLimitation["text"]
+    assert "SCHEMA_INVALID" in fallbackLimitation["text"]
+    assert result["manifest"]["llmFallbackReasons"] == ["SCHEMA_INVALID"]
+
+    exportBytes = _buildExport({"request": requestData, "result": result})
+    with zipfile.ZipFile(io.BytesIO(exportBytes)) as archive:
+        modelVersions = json.loads(archive.read("model_and_prompt_versions.json"))
+        limitations = archive.read("limitations.md").decode()
+    assert modelVersions["fallbackReasons"] == ["SCHEMA_INVALID"]
+    assert "LLM_PARTIAL_RULE_FALLBACK" in limitations
+
+
+def test_closed_loop_pilot_rejects_fallback_when_disabled() -> None:
+    cognition = ClosedLoopPilotCognition(fallbackRequestIndexes={1})
+    service = closedLoopService(cognition)
+    requestData = closedLoopRequest()
+    requestData["llmPolicy"]["fallbackToRules"] = False
+
+    with pytest.raises(RuntimeError, match="fallback was disabled"):
+        service._prepareCognitiveSignals(
+            "exp-closed-loop-fallback-disabled",
+            SESSION_ID,
+            requestData,
+            closedLoopEventPack(),
+        )
+
+    assert cognition.allowRuleFallbackPolicies == [False]
+
+
 def test_closed_loop_replay_is_stable_and_formal_arms_reuse_one_frozen_sequence() -> None:
     cognition = ClosedLoopPilotCognition()
     service = closedLoopService(cognition)
@@ -784,3 +945,40 @@ def test_closed_loop_pilot_failure_discards_all_model_signals(
     assert cognitionRun["pilot"]["status"] == "FAILED_CLOSED"
     assert cognitionRun["pilot"]["discardedSignalCount"] == 4
     assert cognitionRun["pilot"]["frozenSignalsHash"] == _cognitiveSignalSequenceHash(())
+
+
+@pytest.mark.parametrize(
+    ("failedPilotCall", "message"),
+    [
+        (1, "pilot initialization failed while fallback was disabled"),
+        (2, "pilot feedback failed while fallback was disabled"),
+    ],
+)
+def test_closed_loop_pilot_failure_raises_when_fallback_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    failedPilotCall: int,
+    message: str,
+) -> None:
+    cognition = ClosedLoopPilotCognition()
+    service = closedLoopService(cognition)
+    originalPilotRunner = service._runCognitionPilot
+    pilotCallCount = 0
+
+    def failSelectedPilot(**arguments: object) -> dict:
+        nonlocal pilotCallCount
+        pilotCallCount += 1
+        if pilotCallCount == failedPilotCall:
+            raise RuntimeError("synthetic strict pilot failure")
+        return originalPilotRunner(**arguments)  # type: ignore[arg-type]
+
+    requestData = closedLoopRequest()
+    requestData["llmPolicy"]["fallbackToRules"] = False
+    monkeypatch.setattr(service, "_runCognitionPilot", failSelectedPilot)
+
+    with pytest.raises(RuntimeError, match=message):
+        service._prepareCognitiveSignals(
+            "exp-closed-loop-strict-failure",
+            SESSION_ID,
+            requestData,
+            closedLoopEventPack(),
+        )

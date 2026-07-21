@@ -1,5 +1,5 @@
 import { Button, Tag } from '@carbon/react';
-import { ArrowRight, CalendarBlank, Flask, ShieldCheck } from '@phosphor-icons/react';
+import { ArrowRight, CalendarBlank, Flask, ShieldCheck, UsersThree } from '@phosphor-icons/react';
 import { EmptyState, ErrorPanel, LoadingPanel, PageHeader, StatusBadge } from '../components/common';
 import { useI18n } from '../i18n';
 import { useWorkflow } from '../state/workflow-context';
@@ -33,6 +33,16 @@ export function CaseLibraryPage({ navigate }: { navigate: (view: ViewId) => void
           <span className="eyebrow">{t('home.eyebrow')}</span>
           <h1>{t('home.title')}</h1>
           <p>{t('home.subtitle')}</p>
+          <section className="home-audience" aria-labelledby="home-audience-title">
+            <div className="home-audience__label">
+              <UsersThree size={20} weight="duotone" aria-hidden="true" />
+              <span>{t('home.audienceLabel')}</span>
+            </div>
+            <div>
+              <h2 id="home-audience-title">{t('home.audienceTitle')}</h2>
+              <p>{t('home.audienceBody')}</p>
+            </div>
+          </section>
         </div>
         <div className="home-intro__guardrails" aria-label={t('common.limitations')}>
           <div><ShieldCheck size={22} weight="duotone" /><span>{t('home.disclaimerForecast')}</span></div>

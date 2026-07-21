@@ -1,0 +1,6 @@
+// Carbon 的预编译 CSS 会注入指向 IBM CDN 的完整字体目录。
+// 生产环境保持严格同源 CSP，因此在构建阶段关闭这些外部 @font-face；
+// 应用在 styles.css 中使用跨平台系统字体栈，不依赖第三方字体服务。
+@use '@carbon/styles' with (
+  $css--font-face: false
+);
