@@ -37,7 +37,10 @@ from backend.app.cognition.gateway import (
     validateEvidenceReferences,
 )
 from backend.app.cognition.models import ActionPreference
-from backend.app.cognition.prompts import buildRepairInstruction
+from backend.app.cognition.prompts import (
+    buildRepairInstruction,
+    encodeUntrustedPromptText,
+)
 from backend.app.cognition.zhipu import ZhipuRestGateway
 
 NON_ZHIPU_PROVIDERS: tuple[ProviderId, ...] = (
@@ -447,7 +450,7 @@ class StructuredProviderRestGateway:
             )
             userContent = (
                 f"{request.userContent}\n\n<BEGIN_INVALID_MODEL_OUTPUT>\n"
-                f"{repairContext.invalidContent[:12_000] or '{}'}\n"
+                f"{encodeUntrustedPromptText(repairContext.invalidContent[:12_000]) or '{}'}\n"
                 f"<END_INVALID_MODEL_OUTPUT>\n{repairInstruction}"
             )
 

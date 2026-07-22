@@ -32,6 +32,7 @@ from backend.app.cognition.gateway import (
     ModelPolicy,
     ModelRequest,
     ModelResult,
+    ModelUsage,
     SamplingConfig,
     canonicalHash,
     validateAllowedAction,
@@ -41,6 +42,9 @@ from backend.app.cognition.models import (
     BeliefDecision,
     EventExtractionResult,
     Observation,
+    ResultEvidenceTool,
+    ResultInterpretationAnswer,
+    ResultToolPlan,
     StrictFrozenModel,
 )
 from backend.app.cognition.pricing import ModelCostBudget
@@ -48,11 +52,24 @@ from backend.app.cognition.prompts import (
     EVENT_EXTRACTION_PROMPT,
     HYBRID_BELIEF_PROMPT,
     PROMPT_REGISTRY,
+    RESULT_INTERPRETATION_PROMPT,
+    RESULT_TOOL_PLANNER_PROMPT,
     PromptSpec,
     buildBeliefUserMessage,
     buildEvidenceUserMessage,
+    buildResultInterpretationUserMessage,
+    buildResultPlannerUserMessage,
 )
 from backend.app.cognition.provider_gateways import ProviderGatewayRouter
+from backend.app.cognition.result_interpreter import (
+    DEFAULT_RESULT_TOOLS,
+    ResultInterpretationRun,
+    ResultLanguage,
+    buildResultIndex,
+    executeResultTools,
+    toolActivities,
+    toolResultsPayload,
+)
 
 SourceType = Literal["OFFICIAL", "REPORTING", "ESTIMATE", "USER_PROVIDED"]
 
@@ -157,7 +174,7 @@ class ClosableModelGateway(Protocol):
     async def aclose(self) -> None: ...
 
 
-GatewayFactory = Callable[[ImmutableDecisionCache], ClosableModelGateway]
+GatewayFactory = Callable[[ImmutableDecisionCache | None], ClosableModelGateway]
 ResultValidator = Callable[[ModelResult[Any]], None]
 
 
@@ -196,7 +213,7 @@ INVALID_OUTPUT_CODES = frozenset(
 )
 
 
-def _defaultGatewayFactory(cache: ImmutableDecisionCache) -> ClosableModelGateway:
+def _defaultGatewayFactory(cache: ImmutableDecisionCache | None) -> ClosableModelGateway:
     # Router 仍只接收 cache，以保持测试与现有注入契约；所有端点来自固定目录。
     return ProviderGatewayRouter(cache=cache)
 
@@ -249,6 +266,11 @@ class CognitionService:
 
     def clearConfig(self, sessionId: str) -> bool:
         return self._configStore.clear(sessionId)
+
+    def purgeExpiredCredentials(self) -> int:
+        """主动移除所有已过期的内存 API 密钥，供应用生命周期定时调用。"""
+
+        return self._configStore.purgeExpired()
 
     @staticmethod
     def getModelCatalog(*, includeLegacy: bool = True) -> tuple[ZhipuModelDescriptor, ...]:
@@ -462,6 +484,158 @@ class CognitionService:
             fallback_reason=fallbackReason,
         )
 
+    async def interpretExperimentResult(
+        self,
+        *,
+        sessionId: str,
+        result: dict[str, Any],
+        messages: tuple[dict[str, str], ...],
+        language: ResultLanguage,
+        initial: bool,
+        includeAnalysisSummary: bool,
+    ) -> ResultInterpretationRun:
+        """用会话级 BYOK 对已完成结果进行只读、可引用的解释。"""
+
+        runtime = self._configStore.getRuntimeConfig(sessionId)
+        if not messages or messages[-1].get("role") != "user":
+            raise ValueError("messages must end with a user turn")
+        if language not in {"en", "zh-CN"}:
+            raise ValueError("language must be en or zh-CN")
+        resultHash = canonicalHash(result)
+        plannerResult: ModelResult[ResultToolPlan] | None = None
+
+        if initial:
+            selectedTools = DEFAULT_RESULT_TOOLS
+        else:
+            resultIndex = buildResultIndex(result)
+            latestQuestion = messages[-1]["content"]
+            plannerPayload = {
+                "requested_language": language,
+                "latest_user_question": latestQuestion,
+                # 只给 Planner 最近两轮短上下文，支持“那第二个呢”一类指代追问；
+                # 完整结果仍只能由白名单工具读取。
+                "recent_conversation": list(messages[-4:]),
+                "result_index": resultIndex,
+            }
+            plannerRequest = self._buildRequest(
+                runtime=runtime,
+                sessionId=sessionId,
+                requestId=self._newRequestId("result-plan"),
+                prompt=RESULT_TOOL_PLANNER_PROMPT,
+                userContent=buildResultPlannerUserMessage(plannerPayload),
+                agentConfigHash=canonicalHash(
+                    {
+                        "workflow": RESULT_TOOL_PLANNER_PROMPT.version,
+                        "language": language,
+                    }
+                ),
+                observationHash=canonicalHash(
+                    {
+                        "resultHash": resultHash,
+                        "latestQuestion": latestQuestion,
+                        "resultIndex": resultIndex,
+                    }
+                ),
+                allowedEvidenceIds=frozenset(),
+                maxTokens=2_048,
+            )
+            plannerResult = await self._execute(
+                request=plannerRequest,
+                schema=ResultToolPlan,
+                policy=self._interpretationPolicy(),
+                useDecisionCache=False,
+            )
+            # 即使 Planner 遗漏，解释也必须读取研究边界与局限。
+            selectedTools = tuple(
+                dict.fromkeys(
+                    (
+                        ResultEvidenceTool.OVERVIEW,
+                        ResultEvidenceTool.LIMITATIONS,
+                        *plannerResult.data.tools,
+                    )
+                )
+            )
+
+        toolResults = executeResultTools(result, selectedTools)
+        allowedEvidenceIds = frozenset(item.evidence_id for item in toolResults)
+        answerPayload = {
+            "requested_language": language,
+            "reasoning_summary_requested": includeAnalysisSummary,
+            "result_snapshot_hash": resultHash,
+            "conversation": list(messages),
+            "result_tool_outputs": toolResultsPayload(toolResults),
+        }
+        answerRequest = self._buildRequest(
+            runtime=runtime,
+            sessionId=sessionId,
+            requestId=self._newRequestId("result-answer"),
+            prompt=RESULT_INTERPRETATION_PROMPT,
+            userContent=buildResultInterpretationUserMessage(answerPayload),
+            agentConfigHash=canonicalHash(
+                {
+                    "workflow": RESULT_INTERPRETATION_PROMPT.version,
+                    "language": language,
+                    "includeAnalysisSummary": includeAnalysisSummary,
+                    "tools": [tool.value for tool in selectedTools],
+                }
+            ),
+            observationHash=canonicalHash(answerPayload),
+            allowedEvidenceIds=allowedEvidenceIds,
+            maxTokens=4_096,
+        )
+
+        def validateInterpretation(modelResult: ModelResult[Any]) -> None:
+            answer = modelResult.data
+            if not isinstance(answer, ResultInterpretationAnswer):
+                raise ModelGatewayError(
+                    FailureCode.SCHEMA_INVALID,
+                    "gateway returned the wrong result-interpretation schema",
+                )
+
+        answerResult = await self._execute(
+            request=answerRequest,
+            schema=ResultInterpretationAnswer,
+            policy=self._interpretationPolicy(),
+            resultValidator=validateInterpretation,
+            useDecisionCache=False,
+        )
+        answerResult = replace(
+            answerResult,
+            data=self._normalizeInterpretationAnswer(
+                answerResult.data,
+                language=language,
+                includeAnalysisSummary=includeAnalysisSummary,
+            ),
+        )
+        usage = answerResult.usage
+        latencyMs = answerResult.latencyMs
+        cacheHit = answerResult.cacheHit
+        repairUsed = answerResult.repairUsed
+        if plannerResult is not None:
+            usage = plannerResult.usage.plus(usage)
+            latencyMs += plannerResult.latencyMs
+            cacheHit = plannerResult.cacheHit and cacheHit
+            repairUsed = plannerResult.repairUsed or repairUsed
+
+        return ResultInterpretationRun(
+            interpretation=answerResult.data,
+            result_hash=resultHash,
+            provider=answerResult.provider,
+            model=answerResult.model,
+            tool_activity=toolActivities(toolResults, language),
+            usage=ModelUsage(
+                promptTokens=usage.promptTokens,
+                completionTokens=usage.completionTokens,
+                cachedTokens=usage.cachedTokens,
+            ),
+            latency_ms=latencyMs,
+            model_calls=2 if plannerResult is not None else 1,
+            cache_hit=cacheHit,
+            repair_used=repairUsed,
+            planner_used=plannerResult is not None,
+            prompt_version=RESULT_INTERPRETATION_PROMPT.version,
+        )
+
     def getTelemetry(self) -> CognitionTelemetryView:
         with self._telemetryLock:
             state = self._telemetry
@@ -507,6 +681,7 @@ class CognitionService:
         policy: ModelPolicy,
         resultValidator: ResultValidator | None = None,
         costBudget: ModelCostBudget | None = None,
+        useDecisionCache: bool = True,
     ) -> ModelResult[ModelT]:
         startedAt = self._clock()
         reservation = None
@@ -517,7 +692,9 @@ class CognitionService:
                 self._recordError(error.code, self._elapsedMilliseconds(startedAt))
                 raise
 
-        gateway = self._gatewayFactory(self._decisionCache)
+        # 自由对话不得进入用于实验确定性重放的不可变缓存：其中可能含用户问题，
+        # 且无限唯一输入会挤满全局缓存。端点层另以 clientRequestId 做瞬时单飞。
+        gateway = self._gatewayFactory(self._decisionCache if useDecisionCache else None)
         try:
             try:
                 result = await gateway.generateStructured(request, schema, policy)
@@ -579,6 +756,7 @@ class CognitionService:
         observationHash: str,
         allowedEvidenceIds: frozenset[str],
         allowedActionValues: frozenset[str] = frozenset(),
+        maxTokens: int | None = None,
     ) -> ModelRequest:
         return ModelRequest(
             provider=runtime.provider,
@@ -596,7 +774,7 @@ class CognitionService:
             samplingConfig=SamplingConfig(
                 thinking_enabled=runtime.thinkingEnabled,
                 do_sample=False,
-                max_tokens=runtime.maxTokens,
+                max_tokens=min(runtime.maxTokens, maxTokens or runtime.maxTokens),
             ),
             apiKey=runtime.apiKey,
         )
@@ -622,6 +800,51 @@ class CognitionService:
     def _policy(self, *, allowRuleFallback: bool) -> ModelPolicy:
         return self._modelPolicy.model_copy(
             update={"allow_rule_fallback": allowRuleFallback},
+        )
+
+    def _interpretationPolicy(self) -> ModelPolicy:
+        """限制交互解释的最坏等待与计费尝试，保持在前端 120 秒预算内。"""
+
+        return self._modelPolicy.model_copy(
+            update={
+                "timeout_seconds": min(self._modelPolicy.timeout_seconds, 20.0),
+                "max_transport_attempts": 1,
+                "base_backoff_seconds": 0.0,
+                "allow_rule_fallback": False,
+            }
+        )
+
+    @staticmethod
+    def _normalizeInterpretationAnswer(
+        answer: ResultInterpretationAnswer,
+        *,
+        language: ResultLanguage,
+        includeAnalysisSummary: bool,
+    ) -> ResultInterpretationAnswer:
+        """由服务端固定研究边界，并使“解释摘要”开关具有确定行为。"""
+
+        boundary = (
+            "This is scenario analysis conditional on synthetic assumptions, not a "
+            "prediction and not investment advice."
+            if language == "en"
+            else "这是以合成假设为条件的情景分析，不是预测，也不构成投资建议。"
+        )
+        normalizedAnswer = answer.answer.strip()
+        if boundary not in normalizedAnswer:
+            normalizedAnswer = f"{normalizedAnswer}\n\n{boundary}"
+        analysisSummary = answer.analysis_summary if includeAnalysisSummary else None
+        if includeAnalysisSummary and analysisSummary is None:
+            analysisSummary = (
+                "Reviewable summary unavailable: the explanation still uses only the "
+                "listed result evidence slices."
+                if language == "en"
+                else "未返回可核验的分析摘要；正文仍仅依据所列实验结果证据切片。"
+            )
+        return answer.model_copy(
+            update={
+                "answer": normalizedAnswer,
+                "analysis_summary": analysisSummary,
+            }
         )
 
     @staticmethod

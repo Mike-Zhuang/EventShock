@@ -27,6 +27,8 @@ const CATALOG: LlmCatalog = {
     id: 'zhipu', name: 'Zhipu AI', baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
     documentationUrl: 'https://docs.bigmodel.cn/', pricingUrl: 'https://open.bigmodel.cn/pricing',
     region: 'CN', structuredOutputMode: 'json_object', structuredOutputNote: 'JSON object with local validation.',
+    integrationValidationStatus: 'REAL_PROJECT_KEY_VERIFIED',
+    feedbackIssueUrl: 'https://github.com/Mike-Zhuang/EventShock/issues/new?template=llm-provider-feedback.yml',
     models: [{
       provider: 'zhipu', id: 'glm-5.2', name: 'GLM-5.2', contextTokens: 200_000,
       maxOutputTokens: 131_072, officialMaxOutputTokens: 131_072,
@@ -42,6 +44,8 @@ const CATALOG: LlmCatalog = {
     id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1',
     documentationUrl: 'https://platform.openai.com/docs', pricingUrl: 'https://openai.com/api/pricing/',
     region: 'US', structuredOutputMode: 'json_schema', structuredOutputNote: 'Strict JSON Schema when supported.',
+    integrationValidationStatus: 'CONTRACT_TESTED_COMMUNITY_PREVIEW',
+    feedbackIssueUrl: 'https://github.com/Mike-Zhuang/EventShock/issues/new?template=llm-provider-feedback.yml',
     models: [{
       provider: 'openai', id: 'gpt-economy', name: 'GPT Economy', contextTokens: 128_000,
       maxOutputTokens: 16_384, applicationMaxOutputTokens: 16_384,
@@ -64,6 +68,8 @@ const CATALOG: LlmCatalog = {
     id: 'moonshot', name: 'Moonshot AI / Kimi', baseUrl: 'https://api.moonshot.cn/v1/chat/completions',
     documentationUrl: 'https://platform.kimi.com/docs/models', pricingUrl: 'https://platform.kimi.com/docs/pricing/chat-k3',
     region: 'CN', structuredOutputMode: 'json_schema', structuredOutputNote: 'Native JSON Schema with local validation.',
+    integrationValidationStatus: 'CONTRACT_TESTED_COMMUNITY_PREVIEW',
+    feedbackIssueUrl: 'https://github.com/Mike-Zhuang/EventShock/issues/new?template=llm-provider-feedback.yml',
     models: [{
       provider: 'moonshot', id: 'kimi-k2.6', name: 'Kimi K2.6', contextTokens: 262_144,
       supportsThinking: true, supportsFunctionCalling: true, recommended: false,
@@ -116,6 +122,12 @@ describe('多供应商 AI 配置', () => {
     await user.selectOptions(providerSelect, 'openai');
 
     expect(screen.getByLabelText('Model')).toHaveValue('gpt-recommended');
+    expect(screen.getByText('Community preview: not verified with a real project API key')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open a compatibility issue on GitHub' })).toHaveAttribute(
+      'href',
+      'https://github.com/Mike-Zhuang/EventShock/issues/new?template=llm-provider-feedback.yml',
+    );
+    expect(screen.getByText(/never paste API keys, tokens, full request headers/i)).toBeInTheDocument();
     expect(screen.getByLabelText('OpenAI API Key')).toBeInTheDocument();
     expect(screen.getByText('Native JSON Schema + local validation')).toBeInTheDocument();
     expect(screen.getByLabelText('Maximum output tokens')).toHaveAttribute('max', '32768');
@@ -134,6 +146,13 @@ describe('多供应商 AI 配置', () => {
     expect(screen.getByLabelText('OpenAI API Key')).toHaveValue('');
     expect(localStorageWrite.mock.calls.flat().join(' ')).not.toContain(secret);
     expect(sessionStorageWrite.mock.calls.flat().join(' ')).not.toContain(secret);
+  });
+
+  it('真实项目 Key 已验证的智谱供应商不显示社区预览警告', async () => {
+    render(<I18nProvider><AiConfigurationPage /></I18nProvider>);
+
+    expect(await screen.findByLabelText('Provider')).toHaveValue('zhipu');
+    expect(screen.queryByText('Community preview: not verified with a real project API key')).not.toBeInTheDocument();
   });
 
   it('保留但禁用缺少官方输出上限的模型，并解释关闭原因', async () => {
@@ -179,6 +198,18 @@ describe('多供应商 AI 配置', () => {
     expect(screen.getByText('JSON 对象 + 本地 Schema 校验')).toBeInTheDocument();
     expect(screen.getByText('费用闸门输入上界')).toBeInTheDocument();
     expect(screen.queryByText('JSON object with local validation.')).not.toBeInTheDocument();
+  });
+
+  it('中文界面对未实测供应商显示脱敏反馈警告', async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem('eventshock-language', 'zh-CN');
+    render(<I18nProvider><AiConfigurationPage /></I18nProvider>);
+
+    await user.selectOptions(await screen.findByLabelText('供应商'), 'openai');
+
+    expect(screen.getByText('社区预览：尚未使用真实项目 API Key 验证')).toBeInTheDocument();
+    expect(screen.getByText(/请勿粘贴 API Key、令牌、完整请求头、邮箱或其他个人信息/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '在 GitHub 提交兼容性 Issue' })).toBeInTheDocument();
   });
 
   it('只有供应商、型号、推理设置和输出上限均一致时才视为当前草稿已生效', () => {

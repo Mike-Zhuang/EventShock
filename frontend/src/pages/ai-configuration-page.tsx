@@ -441,6 +441,29 @@ export function AiConfigurationPage() {
               }}
             />
           </div>
+          {selectedProvider?.integrationValidationStatus === 'CONTRACT_TESTED_COMMUNITY_PREVIEW' ? (
+            <div className="provider-preview-warning">
+              <InlineNotification
+                kind="warning"
+                lowContrast
+                hideCloseButton
+                title={isZh
+                  ? '社区预览：尚未使用真实项目 API Key 验证'
+                  : 'Community preview: not verified with a real project API key'}
+                subtitle={isZh
+                  ? '该供应商接入已通过自动化契约测试，但尚未使用真实项目 Key 和账户完成端到端验证；账户区域、模型权限或响应格式仍可能存在差异。欢迎提交脱敏反馈，且请勿粘贴 API Key、令牌、完整请求头、邮箱或其他个人信息。'
+                  : 'This provider integration has passed automated contract tests, but has not completed end-to-end verification with a real project key and account. Account region, model access, or response-shape differences may remain. Please share only redacted feedback—never paste API keys, tokens, full request headers, email addresses, or other personal information.'}
+              />
+              <a
+                className="provider-preview-warning__link"
+                href={selectedProvider.feedbackIssueUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {isZh ? '在 GitHub 提交兼容性 Issue' : 'Open a compatibility issue on GitHub'}
+              </a>
+            </div>
+          ) : null}
           <div className="toggle-with-help">
             {explained('thinkingMode', isZh ? '思考模式' : 'Thinking mode')}
             <Toggle

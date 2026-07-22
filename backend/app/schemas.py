@@ -318,6 +318,56 @@ class LlmConfigRequest(StrictModel):
         return self
 
 
+class ResultInterpretationMessage(StrictModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=4_000)
+
+    @field_validator("content")
+    @classmethod
+    def normalizeMessageContent(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("content must not be blank")
+        if any(ord(character) < 32 and character not in {"\n", "\t"} for character in normalized):
+            raise ValueError("content contains unsupported control characters")
+        return normalized
+
+
+class ResultInterpretationChatRequest(StrictModel):
+    schemaVersion: Literal["1.0.0"] = "1.0.0"
+    conversationId: str = Field(
+        min_length=8,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,79}$",
+    )
+    clientRequestId: str = Field(
+        min_length=8,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,79}$",
+    )
+    mode: Literal["INITIAL", "FOLLOW_UP"]
+    language: Literal["en", "zh-CN"]
+    reasoningSummaryRequested: bool = False
+    messages: list[ResultInterpretationMessage] = Field(min_length=1, max_length=12)
+
+    @model_validator(mode="after")
+    def validateConversation(self) -> ResultInterpretationChatRequest:
+        if sum(len(message.content) for message in self.messages) > 16_000:
+            raise ValueError("conversation content exceeds 16000 characters")
+        expectedRole = "user"
+        for message in self.messages:
+            if message.role != expectedRole:
+                raise ValueError("messages must alternate user and assistant roles")
+            expectedRole = "assistant" if expectedRole == "user" else "user"
+        if self.messages[-1].role != "user":
+            raise ValueError("messages must end with a user message")
+        if self.mode == "INITIAL" and len(self.messages) != 1:
+            raise ValueError("INITIAL mode requires exactly one user message")
+        if self.mode == "FOLLOW_UP" and len(self.messages) < 3:
+            raise ValueError("FOLLOW_UP mode requires at least one completed exchange")
+        return self
+
+
 class EvalRunRequest(StrictModel):
     mode: Literal["CODE_GRADER_SELF_TEST", "LIVE_CONFIGURED_MODEL"] = "CODE_GRADER_SELF_TEST"
     maximumCases: int = Field(default=3, ge=1, le=3)

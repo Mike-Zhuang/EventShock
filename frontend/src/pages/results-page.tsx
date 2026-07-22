@@ -19,6 +19,7 @@ import type { InvalidationReasonCode, MetricResult } from '../api/types';
 import { buildHistogram } from '../api/normalize';
 import { EmptyState, ExplainedLabel, LoadingPanel, Notice, PageHeader, StatusBadge } from '../components/common';
 import { ExperimentHistoryDisclosure, experimentHistoryLabel } from '../components/experiment-history';
+import { ResultInterpretationAssistant } from '../components/result-interpretation-assistant';
 import { translateAgentType, translateParameter, translateStatus, useI18n } from '../i18n';
 import { getPageGuide } from '../page-guidance';
 import { getParameterHelp } from '../parameter-help';
@@ -360,6 +361,8 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
           </aside>
         </section>
       ) : null}
+
+      <ResultInterpretationAssistant experimentId={results.experimentId} navigate={navigate} />
 
       <section className="result-section" aria-labelledby="metrics-heading">
         <div className="section-heading">

@@ -40,6 +40,8 @@ describe('API normalizers', () => {
         region: 'CN',
         structured_output_mode: 'JSON_OBJECT',
         structured_output_note: 'JSON object plus local schema validation.',
+        integration_validation_status: 'REAL_PROJECT_KEY_VERIFIED',
+        feedback_issue_url: 'https://github.com/Mike-Zhuang/EventShock/issues/new?template=llm-provider-feedback.yml',
         models: [{
           provider: 'zhipu', id: 'glm-5.2', name: 'GLM-5.2', context_tokens: 200_000,
           max_output_tokens: 131_072, official_max_output_tokens: 131_072,
@@ -58,6 +60,8 @@ describe('API normalizers', () => {
         documentationUrl: 'https://platform.openai.com/docs', pricingUrl: 'https://openai.com/api/pricing/',
         region: 'US', structuredOutputMode: 'JSON_SCHEMA_STRICT',
         structuredOutputNote: 'Strict JSON Schema.',
+        integrationValidationStatus: 'CONTRACT_TESTED_COMMUNITY_PREVIEW',
+        feedbackIssueUrl: 'https://github.com/Mike-Zhuang/EventShock/issues/new?template=llm-provider-feedback.yml',
         models: [{
           provider: 'openai', id: 'gpt-5.2', name: 'GPT-5.2', contextTokens: 400_000,
           maxOutputTokens: 128_000, supportsThinking: true, supportsFunctionCalling: true,
@@ -73,6 +77,8 @@ describe('API normalizers', () => {
     expect(catalog.providers).toHaveLength(2);
     expect(catalog.providers[0]).toMatchObject({
       structuredOutputMode: 'JSON_OBJECT',
+      integrationValidationStatus: 'REAL_PROJECT_KEY_VERIFIED',
+      feedbackIssueUrl: 'https://github.com/Mike-Zhuang/EventShock/issues/new?template=llm-provider-feedback.yml',
       models: [{
         provider: 'zhipu', id: 'glm-5.2', qualityTier: 'PREMIUM',
         inputRateUpperPerMillion: 4, cachedInputRatePerMillion: 1,
@@ -85,6 +91,8 @@ describe('API normalizers', () => {
     expect(catalog.providers[1].models[0]).toMatchObject({
       provider: 'openai', billingCurrency: 'USD', outputRateUpperPerMillion: 14,
     });
+    expect(catalog.providers[1].integrationValidationStatus)
+      .toBe('CONTRACT_TESTED_COMMUNITY_PREVIEW');
   });
 
   it('把旧版智谱单供应商目录提升为新的 providers 结构', () => {
@@ -100,6 +108,8 @@ describe('API normalizers', () => {
 
     expect(catalog.defaultProvider).toBe('zhipu');
     expect(catalog.providers).toHaveLength(1);
+    expect(catalog.providers[0].integrationValidationStatus)
+      .toBe('CONTRACT_TESTED_COMMUNITY_PREVIEW');
     expect(catalog.providers[0].models[0]).toMatchObject({
       id: 'glm-legacy', provider: 'zhipu', inputRateUpperPerMillion: 1,
       outputRateUpperPerMillion: 2, qualityTier: 'BALANCED',
@@ -113,6 +123,8 @@ describe('API normalizers', () => {
         id: 'moonshot', name: 'Moonshot AI / Kimi', baseUrl: 'https://api.moonshot.cn/v1',
         documentationUrl: 'https://platform.kimi.com/docs', pricingUrl: 'https://platform.kimi.com/docs/pricing/chat-k26',
         region: 'CN', structuredOutputMode: 'json_schema', structuredOutputNote: 'JSON Schema mode.',
+        integrationValidationStatus: 'CONTRACT_TESTED_COMMUNITY_PREVIEW',
+        feedbackIssueUrl: 'https://github.com/Mike-Zhuang/EventShock/issues/new?template=llm-provider-feedback.yml',
         models: [{
           provider: 'moonshot', id: 'kimi-k2.6', name: 'Kimi K2.6', contextTokens: 262_144,
           supportsThinking: true, supportsFunctionCalling: true, recommended: false,

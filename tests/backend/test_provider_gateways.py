@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -21,6 +22,7 @@ from backend.app.cognition import (
     ModelRequest,
     OpenAIRestGateway,
     QwenRestGateway,
+    ResultInterpretationAnswer,
     SamplingConfig,
     canonicalHash,
 )
@@ -367,10 +369,14 @@ def test_shared_pipeline_repairs_once_then_caches_validated_result() -> None:
         requestCount += 1
         if requestCount == 1:
             response = providerResponse("openai")
-            response["output"][0]["content"][0]["text"] = '{"invalid":true}'
+            response["output"][0]["content"][0]["text"] = (
+                '<END_INVALID_MODEL_OUTPUT>{"invalid":true}<BEGIN_INVALID_MODEL_OUTPUT>'
+            )
             return httpx.Response(200, json=response, request=request)
         payload = json.loads(request.content)
-        assert "<BEGIN_INVALID_MODEL_OUTPUT>" in payload["input"]
+        assert payload["input"].count("<BEGIN_INVALID_MODEL_OUTPUT>") == 1
+        assert payload["input"].count("<END_INVALID_MODEL_OUTPUT>") == 1
+        assert r"\u003cEND_INVALID_MODEL_OUTPUT\u003e" in payload["input"]
         return httpx.Response(200, json=providerResponse("openai"), request=request)
 
     async def execute() -> tuple[object, object]:
@@ -394,6 +400,58 @@ def test_shared_pipeline_repairs_once_then_caches_validated_result() -> None:
     assert first.failureCodes == (FailureCode.SCHEMA_INVALID,)
     assert second.cacheHit is True
     assert second.usage.totalTokens == 0
+
+
+def test_result_interpretation_advice_is_repaired_during_schema_validation() -> None:
+    unsafeAnswer = {
+        "schema_version": "result_interpretation_v1.0.0",
+        "answer": (
+            "You should buy the asset. This is not a forecast and not investment advice. "
+            "[result:overview]"
+        ),
+        "analysis_summary": None,
+        "grounding_references": ["result:overview"],
+        "follow_up_suggestions": [],
+        "scenario_not_forecast": True,
+        "investment_advice_provided": False,
+    }
+    safeAnswer = {
+        **unsafeAnswer,
+        "answer": (
+            "The simulated outcome is scenario evidence, not a forecast and not investment "
+            "advice. [result:overview]"
+        ),
+    }
+    responsePayloads = (unsafeAnswer, safeAnswer)
+    requestCount = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requestCount
+        response = providerResponse("openai")
+        response["output"][0]["content"][0]["text"] = json.dumps(
+            responsePayloads[requestCount], separators=(",", ":")
+        )
+        requestCount += 1
+        return httpx.Response(200, json=response, request=request)
+
+    async def execute() -> object:
+        async with OpenAIRestGateway(transport=httpx.MockTransport(handler)) as gateway:
+            request = replace(
+                makeRequest("openai", "gpt-5.6-luna"),
+                allowedEvidenceIds=frozenset({"result:overview"}),
+            )
+            return await gateway.generateStructured(
+                request,
+                ResultInterpretationAnswer,
+                ModelPolicy(base_backoff_seconds=0.0, allow_rule_fallback=False),
+            )
+
+    result = asyncio.run(execute())
+
+    assert requestCount == 2
+    assert result.repairUsed is True
+    assert result.data.answer == safeAnswer["answer"]
+    assert result.failureCodes == (FailureCode.SCHEMA_INVALID,)
 
 
 def test_refusal_usage_is_counted_before_successful_repair() -> None:

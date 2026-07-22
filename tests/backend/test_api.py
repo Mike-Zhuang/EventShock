@@ -9,6 +9,13 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from backend.app.cognition import (
+    ModelUsage,
+    ResultEvidenceTool,
+    ResultInterpretationAnswer,
+    ResultInterpretationRun,
+    ResultToolActivity,
+)
 from backend.app.main import createApp
 from backend.app.replay import replayBundle
 from backend.app.service import _hashJson
@@ -687,6 +694,108 @@ def test_experiment_subresources_and_invalidation_contract(tmp_path: Path) -> No
     assert stored is not None
     assert stored["result"] == persistedResult
     assert stored["checkpoint"] is None
+
+
+def test_result_interpretation_chat_uses_owned_server_result_and_redacted_audit(
+    tmp_path: Path,
+) -> None:
+    experimentId = "exp-interpretation-api"
+    persistedResult = {
+        "experimentId": experimentId,
+        "metricSummaries": {"maxSpreadBps": {"delta": {"median": 1.5}}},
+        "pairedRuns": [{"seed": 101, "delta": {"maxSpreadBps": 1.5}}],
+        "limitations": ["Synthetic scenario analysis only."],
+        "manifest": {"validPairedSeeds": 1},
+    }
+    requestPayload = {
+        "schemaVersion": "1.0.0",
+        "conversationId": "conversation-api-001",
+        "clientRequestId": "request-api-001",
+        "mode": "INITIAL",
+        "language": "zh-CN",
+        "reasoningSummaryRequested": True,
+        "messages": [{"role": "user", "content": "请解释这次结果。"}],
+    }
+    captured: dict[str, object] = {}
+
+    async def fakeInterpretation(**kwargs: object) -> ResultInterpretationRun:
+        captured.update(kwargs)
+        return ResultInterpretationRun(
+            interpretation=ResultInterpretationAnswer(
+                answer="这是有条件的情景分析，不是预测或投资建议。[result:overview]",
+                analysis_summary="核对了实验边界和有效配对数量。",
+                grounding_references=("result:overview",),
+                follow_up_suggestions=("要继续查看配对差异吗？",),
+            ),
+            result_hash=_hashJson(persistedResult),
+            provider="zhipu",
+            model="glm-5.2",
+            tool_activity=(
+                ResultToolActivity(
+                    tool=ResultEvidenceTool.OVERVIEW,
+                    label="实验概览",
+                    item_count=1,
+                    truncated=False,
+                    evidence_id="result:overview",
+                ),
+            ),
+            usage=ModelUsage(promptTokens=100, completionTokens=50, cachedTokens=0),
+            latency_ms=12.5,
+            model_calls=1,
+            cache_hit=False,
+            repair_used=False,
+            planner_used=False,
+            prompt_version="result_interpretation_v1.0.0",
+        )
+
+    with TestClient(createApp(tmp_path)) as client:
+        database = client.app.state.database
+        database.createExperiment(experimentId, SESSION_A, experimentPayload(), None)
+        database.updateExperiment(
+            experimentId,
+            SESSION_A,
+            status="COMPLETED",
+            result_json=persistedResult,
+            progress=1.0,
+            completed_pairs=1,
+            completed_at="2026-07-20T20:00:00+00:00",
+        )
+        missingCredential = client.post(
+            f"/api/v1/experiments/{experimentId}/interpretation-chat",
+            headers={"X-Session-ID": SESSION_A},
+            json=requestPayload,
+        )
+        crossOwner = client.post(
+            f"/api/v1/experiments/{experimentId}/interpretation-chat",
+            headers={"X-Session-ID": SESSION_B},
+            json=requestPayload,
+        )
+        client.app.state.cognitionService.interpretExperimentResult = fakeInterpretation
+        response = client.post(
+            f"/api/v1/experiments/{experimentId}/interpretation-chat",
+            headers={"X-Session-ID": SESSION_A},
+            json=requestPayload,
+        )
+        auditItems = client.get("/api/v1/audit-events", headers={"X-Session-ID": SESSION_A}).json()[
+            "items"
+        ]
+
+    assert missingCredential.status_code == 409
+    assert missingCredential.json()["error"]["code"] == "LLM_CREDENTIAL_NOT_CONFIGURED"
+    assert crossOwner.status_code == 404
+    assert response.status_code == 200
+    body = response.json()
+    assert body["resultHash"] == _hashJson(persistedResult)
+    assert body["message"]["language"] == "zh-CN"
+    assert body["message"]["analysisSummary"] == "核对了实验边界和有效配对数量。"
+    assert body["message"]["groundingReferences"] == ["result:overview"]
+    assert body["message"]["followUpSuggestions"] == ["要继续查看配对差异吗？"]
+    assert captured["result"] == persistedResult
+    assert "apiKey" not in captured
+    auditEvent = next(item for item in auditItems if item["action"] == "INTERPRETATION_GENERATED")
+    auditText = json.dumps(auditEvent, ensure_ascii=False)
+    assert "请解释这次结果" not in auditText
+    assert "核对了实验边界" not in auditText
 
 
 def test_idempotency_key_cannot_be_reused_for_different_payload(tmp_path: Path) -> None:

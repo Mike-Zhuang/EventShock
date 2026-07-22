@@ -109,12 +109,14 @@ class SessionConfigStore:
             apiKey=apiKey,
         )
         with self._lock:
+            self._purgeExpiredLocked(self._clock())
             self._items[sessionId] = credential
         return self._toView(credential)
 
     def getRuntimeConfig(self, sessionId: str) -> RuntimeProviderConfig:
         self._validateSessionId(sessionId)
         with self._lock:
+            self._purgeExpiredLocked(self._clock())
             credential = self._activeCredential(sessionId)
             if credential is None:
                 raise CredentialNotConfiguredError("model credential is not configured")
@@ -129,6 +131,7 @@ class SessionConfigStore:
     def getView(self, sessionId: str) -> SessionProviderConfigView:
         self._validateSessionId(sessionId)
         with self._lock:
+            self._purgeExpiredLocked(self._clock())
             credential = self._activeCredential(sessionId)
             if credential is None:
                 return SessionProviderConfigView(configured=False)
@@ -142,14 +145,19 @@ class SessionConfigStore:
     def purgeExpired(self) -> int:
         now = self._clock()
         with self._lock:
-            expiredSessionIds = [
-                sessionId
-                for sessionId, credential in self._items.items()
-                if credential.expiresAt <= now
-            ]
-            for sessionId in expiredSessionIds:
-                del self._items[sessionId]
-            return len(expiredSessionIds)
+            return self._purgeExpiredLocked(now)
+
+    def _purgeExpiredLocked(self, now: float) -> int:
+        """调用方必须持有锁；每次配置活动都顺带清除其他会话的过期密钥。"""
+
+        expiredSessionIds = [
+            sessionId
+            for sessionId, credential in self._items.items()
+            if credential.expiresAt <= now
+        ]
+        for sessionId in expiredSessionIds:
+            del self._items[sessionId]
+        return len(expiredSessionIds)
 
     def _activeCredential(self, sessionId: str) -> _SessionCredential | None:
         credential = self._items.get(sessionId)

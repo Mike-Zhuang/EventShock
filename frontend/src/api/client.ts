@@ -17,6 +17,7 @@ import {
   normalizeResults,
   normalizeRedTeamRegistry,
   normalizeReleaseGate,
+  normalizeResultInterpretationChatResponse,
   normalizeSavedScenario,
   normalizeSavedScenarios,
   normalizeScenarioDiff,
@@ -54,6 +55,8 @@ import type {
   PromptRegistryItem,
   RedTeamRegistry,
   ReleaseGateView,
+  ResultInterpretationChatInput,
+  ResultInterpretationChatResponse,
   SavedScenario,
   ScenarioDiffResult,
   ScenarioDraft,
@@ -550,6 +553,21 @@ export const api = {
 
   async getResults(experimentId: string): Promise<ExperimentResults> {
     return normalizeResults(await requestJson(`/v1/experiments/${encodeURIComponent(experimentId)}/results`));
+  },
+
+  async chatAboutResults(
+    experimentId: string,
+    input: ResultInterpretationChatInput,
+  ): Promise<ResultInterpretationChatResponse> {
+    return normalizeResultInterpretationChatResponse(await requestJson(
+      `/v1/experiments/${encodeURIComponent(experimentId)}/interpretation-chat`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+        // 推理模型可能需要较长首字节时间，但仍必须有明确的客户端上限。
+        timeoutMs: 120_000,
+      },
+    ));
   },
 
   async exportExperiment(experimentId: string): Promise<Blob> {

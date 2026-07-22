@@ -278,7 +278,12 @@ def test_public_catalog_prompts_config_and_live_connection_are_redacted() -> Non
     assert harness.gateways[0].closed is True
     assert service.getModelCatalog()[0].model_id == "glm-5.2"
     promptViews = service.getPromptRegistry()
-    assert {item.name for item in promptViews} == {"event_extraction", "hybrid_belief"}
+    assert {item.name for item in promptViews} == {
+        "event_extraction",
+        "hybrid_belief",
+        "result_tool_planner",
+        "result_interpretation",
+    }
     assert all(len(item.prompt_hash) == 64 for item in promptViews)
     assert service.getTelemetry().calls == 1
     assert service.clearConfig(SESSION_ID) is True

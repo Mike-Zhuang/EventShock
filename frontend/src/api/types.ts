@@ -296,6 +296,9 @@ export interface EventPackCreateInput {
 
 export type ModelQualityTier = 'ECONOMY' | 'BALANCED' | 'PREMIUM';
 export type ModelPricingStatus = 'VERIFIED_UPPER_BOUND' | 'UNAVAILABLE_FAIL_CLOSED';
+export type ProviderIntegrationValidationStatus =
+  | 'REAL_PROJECT_KEY_VERIFIED'
+  | 'CONTRACT_TESTED_COMMUNITY_PREVIEW';
 
 export interface LlmModelDescriptor {
   provider: LlmProviderId;
@@ -339,6 +342,8 @@ export interface LlmProviderDescriptor {
   region: string;
   structuredOutputMode: string;
   structuredOutputNote: string;
+  integrationValidationStatus: ProviderIntegrationValidationStatus;
+  feedbackIssueUrl: string;
   models: LlmModelDescriptor[];
 }
 
@@ -382,6 +387,64 @@ export interface LlmConfigInput {
   apiKey: string;
   thinkingEnabled: boolean;
   maxTokens: number;
+}
+
+export type ResultInterpretationLanguage = 'en' | 'zh-CN';
+
+export interface ResultInterpretationChatTurn {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface ResultInterpretationChatInput {
+  schemaVersion: '1.0.0';
+  conversationId: string;
+  clientRequestId: string;
+  mode: 'INITIAL' | 'FOLLOW_UP';
+  language: ResultInterpretationLanguage;
+  reasoningSummaryRequested: boolean;
+  messages: ResultInterpretationChatTurn[];
+}
+
+export interface ResultInterpretationToolActivity {
+  tool: string;
+  label: string;
+  itemCount: number;
+  truncated: boolean;
+  evidenceId: string;
+}
+
+export interface ResultInterpretationAssistantMessage {
+  id: string;
+  role: 'assistant';
+  language: ResultInterpretationLanguage;
+  answer: string;
+  analysisSummary?: string;
+  groundingReferences: string[];
+  followUpSuggestions: string[];
+  toolActivity: ResultInterpretationToolActivity[];
+  provider: string;
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+  cachedTokens: number;
+  totalTokens: number;
+  modelCalls: number;
+  cacheHit: boolean;
+  repairUsed: boolean;
+  plannerUsed: boolean;
+  promptVersion: string;
+  latencyMs: number;
+  createdAt: string;
+}
+
+export interface ResultInterpretationChatResponse {
+  schemaVersion: string;
+  conversationId: string;
+  clientRequestId: string;
+  experimentId: string;
+  resultHash: string;
+  message: ResultInterpretationAssistantMessage;
 }
 
 export interface LlmConnectionTest {

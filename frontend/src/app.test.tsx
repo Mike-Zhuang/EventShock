@@ -39,6 +39,7 @@ vi.mock('./api/client', () => ({
     getExperiments: vi.fn(async () => []),
     getExperiment: vi.fn(),
     getResults: vi.fn(),
+    getLlmConfig: vi.fn(async () => ({ configured: false })),
   },
 }));
 
@@ -292,6 +293,10 @@ describe('移动主导航', () => {
     expect(await screen.findByText('Built for')).toBeInTheDocument();
     expect(await screen.findByRole('heading', { name: 'Market event-risk analysts' })).toBeInTheDocument();
     expect(screen.getByText(/asset managers, banks, and exchanges/i)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'GitHub repository' })).toHaveAttribute(
+      'href',
+      'https://github.com/Mike-Zhuang/EventShock',
+    );
   });
 
   it('简体中文首屏明确展示主要目标用户及其工作场景', async () => {
@@ -315,6 +320,10 @@ describe('移动主导航', () => {
 
     expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeInTheDocument();
     expect(screen.getByText('Market event-risk analysts')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'GitHub repository' })).toHaveAttribute(
+      'href',
+      'https://github.com/Mike-Zhuang/EventShock',
+    );
     expect(api.getCases).not.toHaveBeenCalled();
     expect(api.getExperiments).not.toHaveBeenCalled();
   });
