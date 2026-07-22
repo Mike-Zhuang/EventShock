@@ -43,6 +43,10 @@ import type {
   RedTeamDefinition,
   RedTeamRegistry,
   RedTeamResult,
+  ResultInterpretationAssistantMessage,
+  ResultInterpretationChatResponse,
+  ResultInterpretationLanguage,
+  ResultInterpretationToolActivity,
   ReleaseGateDefinition,
   ReleaseGateResult,
   ReleaseGateView,
@@ -1266,6 +1270,115 @@ export function normalizeResults(value: unknown): ExperimentResults {
   };
 }
 
+/**
+ * 结果解释属于付费且面向人的输出，因此拒绝静默填充缺失字段。
+ * 这样后端契约漂移时，界面会明确报错，而不会把不完整回答伪装成成功。
+ */
+export function normalizeResultInterpretationChatResponse(
+  value: unknown,
+): ResultInterpretationChatResponse {
+  if (!isRecord(value)) throw new TypeError('Result interpretation response is not an object.');
+
+  const requireString = (record: JsonRecord, ...keys: string[]): string => {
+    const normalized = asOptionalString(read(record, ...keys))?.trim();
+    if (!normalized) throw new TypeError(`Result interpretation is missing ${keys[0]}.`);
+    return normalized;
+  };
+  const requireCount = (record: JsonRecord, ...keys: string[]): number => {
+    const normalized = asNumber(read(record, ...keys));
+    if (normalized === undefined || !Number.isInteger(normalized) || normalized < 0) {
+      throw new TypeError(`Result interpretation has an invalid ${keys[0]}.`);
+    }
+    return normalized;
+  };
+  const requireNonNegativeNumber = (record: JsonRecord, ...keys: string[]): number => {
+    const normalized = asNumber(read(record, ...keys));
+    if (normalized === undefined || normalized < 0) {
+      throw new TypeError(`Result interpretation has an invalid ${keys[0]}.`);
+    }
+    return normalized;
+  };
+  const requireBoolean = (record: JsonRecord, ...keys: string[]): boolean => {
+    const normalized = asBoolean(read(record, ...keys));
+    if (normalized === undefined) {
+      throw new TypeError(`Result interpretation has an invalid ${keys[0]}.`);
+    }
+    return normalized;
+  };
+  const requireStringList = (record: JsonRecord, ...keys: string[]): string[] => {
+    const raw = read(record, ...keys);
+    if (!Array.isArray(raw) || raw.some((item) => typeof item !== 'string' || item.trim().length === 0)) {
+      throw new TypeError(`Result interpretation has an invalid ${keys[0]}.`);
+    }
+    return raw.map((item) => (item as string).trim());
+  };
+
+  const rawMessage = read(value, 'message');
+  if (!isRecord(rawMessage)) throw new TypeError('Result interpretation message is not an object.');
+  if (read(rawMessage, 'role') !== 'assistant') {
+    throw new TypeError('Result interpretation message role must be assistant.');
+  }
+  const rawLanguage = read(rawMessage, 'language');
+  if (rawLanguage !== 'en' && rawLanguage !== 'zh-CN') {
+    throw new TypeError('Result interpretation message has an invalid language.');
+  }
+  const rawAnalysisSummary = read(rawMessage, 'analysisSummary', 'analysis_summary');
+  if (rawAnalysisSummary !== undefined && rawAnalysisSummary !== null
+    && (typeof rawAnalysisSummary !== 'string' || rawAnalysisSummary.trim().length === 0)) {
+    throw new TypeError('Result interpretation message has an invalid analysisSummary.');
+  }
+  const rawToolActivity = read(rawMessage, 'toolActivity', 'tool_activity');
+  if (!Array.isArray(rawToolActivity)) {
+    throw new TypeError('Result interpretation message has an invalid toolActivity.');
+  }
+  const toolActivity: ResultInterpretationToolActivity[] = rawToolActivity.map((item) => {
+    if (!isRecord(item)) throw new TypeError('Result interpretation tool activity is not an object.');
+    return {
+      tool: requireString(item, 'tool'),
+      label: requireString(item, 'label'),
+      itemCount: requireCount(item, 'itemCount', 'item_count'),
+      truncated: requireBoolean(item, 'truncated'),
+      evidenceId: requireString(item, 'evidenceId', 'evidence_id'),
+    };
+  });
+  const createdAt = requireString(rawMessage, 'createdAt', 'created_at');
+  if (Number.isNaN(Date.parse(createdAt))) {
+    throw new TypeError('Result interpretation message has an invalid createdAt.');
+  }
+  const message: ResultInterpretationAssistantMessage = {
+    id: requireString(rawMessage, 'id'),
+    role: 'assistant',
+    language: rawLanguage as ResultInterpretationLanguage,
+    answer: requireString(rawMessage, 'answer'),
+    analysisSummary: typeof rawAnalysisSummary === 'string' ? rawAnalysisSummary.trim() : undefined,
+    groundingReferences: requireStringList(rawMessage, 'groundingReferences', 'grounding_references'),
+    followUpSuggestions: requireStringList(rawMessage, 'followUpSuggestions', 'follow_up_suggestions'),
+    toolActivity,
+    provider: requireString(rawMessage, 'provider'),
+    model: requireString(rawMessage, 'model'),
+    promptTokens: requireCount(rawMessage, 'promptTokens', 'prompt_tokens'),
+    completionTokens: requireCount(rawMessage, 'completionTokens', 'completion_tokens'),
+    cachedTokens: requireCount(rawMessage, 'cachedTokens', 'cached_tokens'),
+    totalTokens: requireCount(rawMessage, 'totalTokens', 'total_tokens'),
+    modelCalls: requireCount(rawMessage, 'modelCalls', 'model_calls'),
+    cacheHit: requireBoolean(rawMessage, 'cacheHit', 'cache_hit'),
+    repairUsed: requireBoolean(rawMessage, 'repairUsed', 'repair_used'),
+    plannerUsed: requireBoolean(rawMessage, 'plannerUsed', 'planner_used'),
+    promptVersion: requireString(rawMessage, 'promptVersion', 'prompt_version'),
+    latencyMs: requireNonNegativeNumber(rawMessage, 'latencyMs', 'latency_ms'),
+    createdAt,
+  };
+
+  return {
+    schemaVersion: requireString(value, 'schemaVersion', 'schema_version'),
+    conversationId: requireString(value, 'conversationId', 'conversation_id'),
+    clientRequestId: requireString(value, 'clientRequestId', 'client_request_id'),
+    experimentId: requireString(value, 'experimentId', 'experiment_id'),
+    resultHash: requireString(value, 'resultHash', 'result_hash'),
+    message,
+  };
+}
+
 function normalizeValidationItem(value: unknown, passed: boolean, severity: ValidationCheck['severity']): ValidationCheck | null {
   if (!isRecord(value)) return null;
   const code = asString(read(value, 'code'));
@@ -1408,6 +1521,15 @@ export function normalizeLlmCatalog(value: unknown): LlmCatalog {
         'JSON_OBJECT',
       ),
       structuredOutputNote: asString(read(item, 'structuredOutputNote', 'structured_output_note')),
+      integrationValidationStatus: asString(
+        read(item, 'integrationValidationStatus', 'integration_validation_status'),
+      ) === 'REAL_PROJECT_KEY_VERIFIED'
+        ? 'REAL_PROJECT_KEY_VERIFIED' as const
+        : 'CONTRACT_TESTED_COMMUNITY_PREVIEW' as const,
+      feedbackIssueUrl: asString(
+        read(item, 'feedbackIssueUrl', 'feedback_issue_url'),
+        'https://github.com/Mike-Zhuang/EventShock/issues/new?template=llm-provider-feedback.yml',
+      ),
       models: normalizeModels(read(item, 'models'), id),
     }];
   });
@@ -1426,6 +1548,15 @@ export function normalizeLlmCatalog(value: unknown): LlmCatalog {
         'JSON_OBJECT',
       ),
       structuredOutputNote: asString(read(value, 'structuredOutputNote', 'structured_output_note')),
+      integrationValidationStatus: asString(
+        read(value, 'integrationValidationStatus', 'integration_validation_status'),
+      ) === 'REAL_PROJECT_KEY_VERIFIED'
+        ? 'REAL_PROJECT_KEY_VERIFIED'
+        : 'CONTRACT_TESTED_COMMUNITY_PREVIEW',
+      feedbackIssueUrl: asString(
+        read(value, 'feedbackIssueUrl', 'feedback_issue_url'),
+        'https://github.com/Mike-Zhuang/EventShock/issues/new?template=llm-provider-feedback.yml',
+      ),
       models: normalizeModels(read(value, 'models'), legacyProvider),
     });
   }

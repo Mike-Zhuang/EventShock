@@ -35,7 +35,10 @@ from backend.app.cognition.gateway import (
     validateEvidenceReferences,
 )
 from backend.app.cognition.models import ActionPreference
-from backend.app.cognition.prompts import buildRepairInstruction
+from backend.app.cognition.prompts import (
+    buildRepairInstruction,
+    encodeUntrustedPromptText,
+)
 
 RETRYABLE_PROVIDER_CODES = frozenset({"1302", "1305"})
 
@@ -309,7 +312,7 @@ class ZhipuRestGateway:
             {"role": "user", "content": request.userContent},
             {
                 "role": "assistant",
-                "content": invalidContent[:12_000] or "{}",
+                "content": encodeUntrustedPromptText(invalidContent[:12_000]) or "{}",
             },
             {
                 "role": "user",

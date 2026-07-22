@@ -337,7 +337,12 @@ export function AuthenticationPage({
 
       <footer className="auth-footer">
         <p>{t('footer.copyright')}</p>
-        <p>{t('footer.license')}</p>
+        <p>
+          {t('footer.license')}{' '}
+          <a href="https://github.com/Mike-Zhuang/EventShock" target="_blank" rel="noreferrer">
+            {t('footer.github')}
+          </a>
+        </p>
         <p>{t('footer.disclaimer')}</p>
       </footer>
     </div>

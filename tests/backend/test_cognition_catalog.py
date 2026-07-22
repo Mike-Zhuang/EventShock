@@ -58,6 +58,18 @@ def test_provider_catalog_has_joint_keys_and_one_matching_recommendation() -> No
         assert getModel(provider.provider, provider.default_model_id) == recommended[0]
         assert provider.official_docs_url.startswith("https://")
         assert provider.official_pricing_url.startswith("https://")
+        assert provider.feedback_issue_url.startswith(
+            "https://github.com/Mike-Zhuang/EventShock/issues/new"
+        )
+
+    assert getProvider("zhipu").integration_validation_status == (
+        "REAL_PROJECT_KEY_VERIFIED"
+    )
+    assert all(
+        provider.integration_validation_status == "CONTRACT_TESTED_COMMUNITY_PREVIEW"
+        for provider in providers
+        if provider.provider != "zhipu"
+    )
 
 
 def test_legacy_zhipu_models_remain_discoverable_but_mismatches_are_rejected() -> None:

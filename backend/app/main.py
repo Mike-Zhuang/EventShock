@@ -8,7 +8,7 @@ import json
 import re
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -85,6 +85,7 @@ from backend.app.schemas import (
     ExperimentInvalidateRequest,
     ExperimentRequest,
     LlmConfigRequest,
+    ResultInterpretationChatRequest,
     ScenarioDiffRequest,
     ScenarioSaveRequest,
     ScenarioUpdateRequest,
@@ -96,6 +97,12 @@ from backend.app.security import (
     scanEventPackContent,
 )
 from backend.app.service import EventPackService, ExperimentService
+from backend.app.single_flight import (
+    ResultInterpretationSingleFlight,
+    SingleFlightCapacityError,
+    SingleFlightRequestConflictError,
+    canonicalRequestHash,
+)
 from backend.app.study.api_models import StudyDesignPreviewRequest, StudyRunApiRequest
 from backend.app.study.api_service import StudyApiService
 
@@ -118,6 +125,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     settings = loadSettings(dataDir)
     rateLimiter = SlidingWindowRateLimiter()
     runtimeMetrics = RuntimeMetrics()
+    resultInterpretationSingleFlight = ResultInterpretationSingleFlight()
 
     @asynccontextmanager
     async def lifespan(appInstance: FastAPI):
@@ -184,8 +192,27 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         appInstance.state.scenarioService = scenarioService
         appInstance.state.experimentService = experimentService
         appInstance.state.studyService = studyService
-        yield
-        experimentService.shutdown()
+        appInstance.state.resultInterpretationSingleFlight = resultInterpretationSingleFlight
+
+        async def purgeExpiredCredentials() -> None:
+            while True:
+                await asyncio.sleep(60)
+                cognitionService.purgeExpiredCredentials()
+                await resultInterpretationSingleFlight.purgeExpired()
+
+        credentialPurgeTask = asyncio.create_task(
+            purgeExpiredCredentials(),
+            name="purge-expired-llm-credentials",
+        )
+        try:
+            yield
+        finally:
+            credentialPurgeTask.cancel()
+            with suppress(asyncio.CancelledError):
+                await credentialPurgeTask
+            cognitionService.purgeExpiredCredentials()
+            await resultInterpretationSingleFlight.purgeExpired()
+            experimentService.shutdown()
 
     appInstance = FastAPI(
         title="EventShock Lab API",
@@ -583,6 +610,10 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         context = _authContext(request)
         cognition: CognitionService = request.app.state.cognitionService
         cognition.clearConfig(context.authSessionId)
+        singleFlight: ResultInterpretationSingleFlight = (
+            request.app.state.resultInterpretationSingleFlight
+        )
+        await singleFlight.clearPrincipal(context.authSessionId)
         authService.logout(token=request.cookies.get(AUTH_COOKIE_NAME, ""))
         response = Response(status_code=204)
         response.delete_cookie(
@@ -815,6 +846,10 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                     "region": provider.region,
                     "defaultModel": provider.default_model_id,
                     "catalogVerifiedAt": provider.verified_at,
+                    "integrationValidationStatus": (
+                        provider.integration_validation_status
+                    ),
+                    "feedbackIssueUrl": provider.feedback_issue_url,
                     "structuredOutputMode": "/".join(structuredModes),
                     "structuredOutputNote": (
                         "Native JSON Schema is requested and every response is still "
@@ -1589,6 +1624,159 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         service: ExperimentService = request.app.state.experimentService
         return service.getResults(experimentId, _sessionId(sessionId))
 
+    @appInstance.post("/api/v1/experiments/{experimentId}/interpretation-chat")
+    async def interpretExperimentResults(
+        experimentId: str,
+        interpretationRequest: ResultInterpretationChatRequest,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        """用当前登录会话的临时 BYOK 解读服务端持有的权威结果快照。"""
+
+        ownerUserId = _sessionId(sessionId)
+        credentialId = credentialSessionId(request, ownerUserId)
+        experimentService: ExperimentService = request.app.state.experimentService
+        cognition: CognitionService = request.app.state.cognitionService
+        database: Database = request.app.state.database
+        # 先按 owner 读取，防止客户端通过提交结果正文或猜测 ID 跨用户取数。
+        authoritativeResult = experimentService.getResults(experimentId, ownerUserId)
+        requestHash = canonicalRequestHash(
+            {
+                "ownerUserId": ownerUserId,
+                "experimentId": experimentId,
+                "resultHash": canonicalRequestHash(authoritativeResult),
+                "request": interpretationRequest.model_dump(mode="json"),
+            }
+        )
+
+        async def generateInterpretation() -> dict[str, Any]:
+            try:
+                run = await cognition.interpretExperimentResult(
+                    sessionId=credentialId,
+                    result=authoritativeResult,
+                    messages=tuple(
+                        message.model_dump(mode="json")
+                        for message in interpretationRequest.messages
+                    ),
+                    language=interpretationRequest.language,
+                    initial=interpretationRequest.mode == "INITIAL",
+                    includeAnalysisSummary=(
+                        interpretationRequest.reasoningSummaryRequested
+                    ),
+                )
+            except CredentialNotConfiguredError as error:
+                raise ApiError(
+                    "LLM_CREDENTIAL_NOT_CONFIGURED",
+                    409,
+                    "Configure a temporary session API key before asking the result interpreter.",
+                ) from error
+            except ModelGatewayError as error:
+                raise ApiError(error.code.value, 502, str(error)) from error
+            except ValueError as error:
+                raise ApiError(
+                    "RESULT_INTERPRETATION_CONTEXT_INVALID",
+                    422,
+                    str(error),
+                ) from error
+
+            answer = run.interpretation
+            createdAt = datetime.now(UTC).isoformat()
+            messageId = f"interpretation-{uuid.uuid4().hex[:24]}"
+            database.appendAuditEvent(
+                ownerUserId,
+                "RESULT_INTERPRETATION",
+                experimentId,
+                "INTERPRETATION_GENERATED",
+                {
+                    "resultHash": run.result_hash,
+                    "conversationHash": hashlib.sha256(
+                        interpretationRequest.conversationId.encode("utf-8")
+                    ).hexdigest(),
+                    "clientRequestHash": hashlib.sha256(
+                        interpretationRequest.clientRequestId.encode("utf-8")
+                    ).hexdigest(),
+                    "language": interpretationRequest.language,
+                    "mode": interpretationRequest.mode,
+                    "reasoningSummaryRequested": (
+                        interpretationRequest.reasoningSummaryRequested
+                    ),
+                    "provider": run.provider,
+                    "model": run.model,
+                    "modelCalls": run.model_calls,
+                    "promptTokens": run.usage.promptTokens,
+                    "completionTokens": run.usage.completionTokens,
+                    "cachedTokens": run.usage.cachedTokens,
+                    "tools": [activity.tool.value for activity in run.tool_activity],
+                    "truncatedTools": [
+                        activity.tool.value
+                        for activity in run.tool_activity
+                        if activity.truncated
+                    ],
+                },
+            )
+            return {
+                "schemaVersion": "1.0.0",
+                "conversationId": interpretationRequest.conversationId,
+                "clientRequestId": interpretationRequest.clientRequestId,
+                "experimentId": experimentId,
+                "resultHash": run.result_hash,
+                "message": {
+                    "id": messageId,
+                    "role": "assistant",
+                    "language": interpretationRequest.language,
+                    "answer": answer.answer,
+                    "analysisSummary": answer.analysis_summary,
+                    "groundingReferences": list(answer.grounding_references),
+                    "followUpSuggestions": list(answer.follow_up_suggestions),
+                    "toolActivity": [
+                        {
+                            "tool": activity.tool.value,
+                            "label": activity.label,
+                            "itemCount": activity.item_count,
+                            "truncated": activity.truncated,
+                            "evidenceId": activity.evidence_id,
+                        }
+                        for activity in run.tool_activity
+                    ],
+                    "provider": run.provider,
+                    "model": run.model,
+                    "promptTokens": run.usage.promptTokens,
+                    "completionTokens": run.usage.completionTokens,
+                    "cachedTokens": run.usage.cachedTokens,
+                    "totalTokens": run.usage.totalTokens,
+                    "modelCalls": run.model_calls,
+                    "cacheHit": run.cache_hit,
+                    "repairUsed": run.repair_used,
+                    "plannerUsed": run.planner_used,
+                    "promptVersion": run.prompt_version,
+                    "latencyMs": run.latency_ms,
+                    "createdAt": createdAt,
+                },
+            }
+
+        singleFlight: ResultInterpretationSingleFlight = (
+            request.app.state.resultInterpretationSingleFlight
+        )
+        try:
+            return await singleFlight.execute(
+                principalKey=credentialId,
+                clientRequestId=interpretationRequest.clientRequestId,
+                requestHash=requestHash,
+                operation=generateInterpretation,
+            )
+        except SingleFlightRequestConflictError as error:
+            raise ApiError(
+                "CLIENT_REQUEST_ID_REUSED",
+                409,
+                "clientRequestId is already bound to a different recent request.",
+            ) from error
+        except SingleFlightCapacityError as error:
+            raise ApiError(
+                "RESULT_INTERPRETATION_BUSY",
+                503,
+                "Too many result interpretation requests are active. Retry shortly.",
+            ) from error
+
     @appInstance.get("/api/v1/experiments/{experimentId}/runs")
     async def getExperimentRuns(
         experimentId: str,
@@ -1990,9 +2178,13 @@ def _rateLimitRules(request: Request) -> list[RateLimitRule]:
         return rules
     isExperimentCreate = path == "/api/v1/experiments"
     isStudyRun = path == "/api/v1/studies/run"
+    isResultInterpretation = bool(
+        re.fullmatch(r"/api/v1/experiments/[^/]+/interpretation-chat", path)
+    )
     isLimitedWrite = (
         isExperimentCreate
         or isStudyRun
+        or isResultInterpretation
         or any(
             re.fullmatch(pattern, path)
             for pattern in (
@@ -2032,6 +2224,17 @@ def _rateLimitRules(request: Request) -> list[RateLimitRule]:
             (
                 RateLimitRule(key=f"study-run:ip:{clientIp}", limit=2),
                 RateLimitRule(key=f"study-run:session:{sessionDigest}", limit=2),
+            )
+        )
+    if isResultInterpretation:
+        # 解释端点会调用外部付费模型；同时约束出口 IP 与登录会话，降低密钥滥用风险。
+        rules.extend(
+            (
+                RateLimitRule(key=f"result-interpretation:ip:{clientIp}", limit=8),
+                RateLimitRule(
+                    key=f"result-interpretation:session:{sessionDigest}",
+                    limit=8,
+                ),
             )
         )
     return rules

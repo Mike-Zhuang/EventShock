@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal
@@ -9,6 +10,22 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 IDENTIFIER_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$"
+INLINE_RESULT_REFERENCE_PATTERN = re.compile(r"\[(result:[^\]\r\n]*)\]")
+VALID_RESULT_REFERENCE_PATTERN = re.compile(
+    r"^result:[A-Za-z0-9][A-Za-z0-9._:-]{0,72}$"
+)
+PROHIBITED_INVESTMENT_RECOMMENDATION_PATTERNS = (
+    re.compile(
+        r"\b(?:you should|i recommend|we recommend|consider)\s+"
+        r"(?:buy|buying|sell|selling|hold|holding|short|shorting|invest|investing|"
+        r"trade|trading|increase|increasing|decrease|decreasing)\b",
+        flags=re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?<!不)(?:建议|应该|应当|不妨|可以考虑).{0,12}"
+        r"(?:买入|卖出|持有|做多|做空|投资|交易|加仓|减仓)"
+    ),
+)
 
 
 class StrictFrozenModel(BaseModel):
@@ -282,3 +299,93 @@ class EventExtractionResult(StrictFrozenModel):
         return frozenset(
             evidenceId for claim in self.claims for evidenceId in claim.source_evidence_ids
         )
+
+
+class ResultEvidenceTool(StrEnum):
+    """结果解释器可以调用的只读工具；不允许任意路径、网络或数据库查询。"""
+
+    OVERVIEW = "OVERVIEW"
+    METRIC_SUMMARY = "METRIC_SUMMARY"
+    PAIRED_DELTAS = "PAIRED_DELTAS"
+    PATH_SERIES = "PATH_SERIES"
+    TRACE = "TRACE"
+    AGENT_OUTCOMES = "AGENT_OUTCOMES"
+    COGNITION_SUMMARY = "COGNITION_SUMMARY"
+    COGNITION_DECISIONS = "COGNITION_DECISIONS"
+    ANALYSIS_DIAGNOSTICS = "ANALYSIS_DIAGNOSTICS"
+    LIMITATIONS = "LIMITATIONS"
+    MANIFEST = "MANIFEST"
+
+
+class ResultToolPlan(StrictFrozenModel):
+    """追问阶段的结构化只读工具计划。"""
+
+    schema_version: Literal["result_tool_plan_v1.0.0"] = "result_tool_plan_v1.0.0"
+    tools: tuple[ResultEvidenceTool, ...] = Field(min_length=1, max_length=11)
+    plan_summary: str = Field(min_length=1, max_length=400)
+
+    @model_validator(mode="after")
+    def validateUniqueTools(self) -> ResultToolPlan:
+        if len(self.tools) != len(set(self.tools)):
+            raise ValueError("tools must not contain duplicates")
+        return self
+
+
+class ResultInterpretationAnswer(StrictFrozenModel):
+    """面向用户的结果解释；analysis_summary 是可核验摘要，不是隐藏思维链。"""
+
+    schema_version: Literal["result_interpretation_v1.0.0"] = (
+        "result_interpretation_v1.0.0"
+    )
+    answer: str = Field(min_length=1, max_length=12_000)
+    analysis_summary: str | None = Field(default=None, min_length=1, max_length=2_000)
+    grounding_references: tuple[str, ...] = Field(min_length=1, max_length=20)
+    follow_up_suggestions: tuple[str, ...] = Field(default=(), max_length=3)
+    scenario_not_forecast: Literal[True] = True
+    investment_advice_provided: Literal[False] = False
+
+    @model_validator(mode="after")
+    def validateReviewableAnswer(self) -> ResultInterpretationAnswer:
+        if len(self.grounding_references) != len(set(self.grounding_references)):
+            raise ValueError("grounding_references must not contain duplicates")
+        if any(
+            VALID_RESULT_REFERENCE_PATTERN.fullmatch(reference) is None
+            for reference in self.grounding_references
+        ):
+            raise ValueError("grounding_references contains an invalid evidence ID")
+        missingInlineReferences = [
+            reference
+            for reference in self.grounding_references
+            if f"[{reference}]" not in self.answer
+        ]
+        if missingInlineReferences:
+            raise ValueError("every grounding reference must appear inline in answer")
+        citedReferences = set(
+            INLINE_RESULT_REFERENCE_PATTERN.findall(
+                "\n".join(
+                    part for part in (self.answer, self.analysis_summary) if part is not None
+                )
+            )
+        )
+        if citedReferences != set(self.grounding_references):
+            raise ValueError(
+                "inline result references must exactly match grounding_references"
+            )
+        reviewableText = "\n".join(
+            part for part in (self.answer, self.analysis_summary) if part is not None
+        )
+        if any(
+            pattern.search(reviewableText)
+            for pattern in PROHIBITED_INVESTMENT_RECOMMENDATION_PATTERNS
+        ):
+            raise ValueError(
+                "result interpretation must not contain an investment recommendation"
+            )
+        if any(not suggestion.strip() for suggestion in self.follow_up_suggestions):
+            raise ValueError("follow_up_suggestions must not contain blank values")
+        if any(len(suggestion) > 400 for suggestion in self.follow_up_suggestions):
+            raise ValueError("follow_up_suggestions items must not exceed 400 characters")
+        return self
+
+    def evidenceIds(self) -> frozenset[str]:
+        return frozenset(self.grounding_references)

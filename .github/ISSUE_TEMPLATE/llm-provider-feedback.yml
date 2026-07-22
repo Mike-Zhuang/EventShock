@@ -1,0 +1,65 @@
+name: LLM provider compatibility feedback / 模型供应商兼容性反馈
+description: Report a redacted provider integration issue or successful compatibility check.
+title: "[LLM provider] "
+labels:
+  - provider-compatibility
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for testing an EventShock provider integration. / 感谢测试 EventShock 的模型供应商接入。
+
+        **Never include API keys, tokens, authorization headers, account identifiers, email addresses, source documents, or other personal/confidential information.** Redact secrets from logs and screenshots before submitting. / **请勿提交 API Key、令牌、认证请求头、账户标识、邮箱、来源文档或其他个人及机密信息。** 提交前请对日志和截图进行脱敏。
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider / 供应商
+      options:
+        - OpenAI
+        - Anthropic
+        - Google Gemini
+        - DeepSeek
+        - Alibaba Cloud Qwen / 通义千问
+        - Moonshot AI / Kimi
+        - Zhipu AI / 智谱
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model ID / 模型 ID
+      placeholder: e.g. gpt-5.6-terra
+    validations:
+      required: true
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: Outcome / 结果
+      options:
+        - Connection and structured-output test passed / 连接与结构化输出测试通过
+        - Request failed / 请求失败
+        - Response failed local validation / 响应未通过本地校验
+        - Other / 其他
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps / 复现步骤
+      description: Describe the page, action, selected model, and sanitized settings. Do not include the API key.
+      placeholder: Steps to reproduce, expected behavior, and actual behavior / 复现步骤、预期行为与实际行为
+    validations:
+      required: true
+  - type: textarea
+    id: sanitized-error
+    attributes:
+      label: Sanitized error or response metadata / 脱敏错误或响应元数据
+      description: Include only the status code, EventShock failure code, request ID, or redacted excerpts needed to diagnose the issue.
+      render: text
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy confirmation / 隐私确认
+      options:
+        - label: I removed all API keys, tokens, authorization headers, account identifiers, email addresses, and other personal/confidential information. / 我已移除所有 API Key、令牌、认证请求头、账户标识、邮箱及其他个人或机密信息。
+          required: true
