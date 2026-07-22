@@ -37,7 +37,7 @@ EventShock Lab 是一个可复现的事件驱动市场反事实实验室。它�
 - 限价单、部分成交、IOC、价格保护、自成交防护、做市库存偏移、离散事件队列、借券/保证金/强平账本和确定性事件追踪。
 - 六类信息网络、`publishedAt`/`knownAt`/`scheduledAt`/仿真时间隔离、谣言与澄清传播，以及未来信息防泄漏。
 - 17 项风险、流动性、网络、Agent 经济结果、强平和 LLM 指标；同时报告经验区间、配对 bootstrap、效应量、方向一致率与尾部概率。
-- 结果页提供显式触发的 BYOK AI 解释助手：后端按当前用户读取权威结果快照，通过白名单只读工具生成带 `result:*` 引用的中英文解释，并支持多轮追问、折叠的可核验分析摘要、工具活动和来源引用；对话正文不进入账号数据库或审计日志。
+- 结果页提供显式触发的 BYOK AI 解释助手：后端按当前用户读取权威结果快照，通过白名单只读工具生成带 `result:*` 引用的中英文解释，并支持多轮追问、折叠的可核验分析摘要、工具活动和来源引用；POST SSE 只展示固定安全阶段与聚合计数，使用心跳驱动的无活动超时并严格限制缓冲区，结构校验通过后才展示最终回答，不返回私有思维链。中断后的首次恢复复用原请求标识，只有明确终态失败后的新请求才要求费用二次确认。通过结构与证据校验的最终问答按账号和实验保存到 SQLite，用户可跨浏览器恢复或主动删除；API Key、供应商私有推理、未验证流片段与问答正文都不进入审计日志。
 - 可执行的顺序停止规则，以及预注册主指标的负对照、参数恢复 knockout、两水平局部敏感性、精确 sign test 和 Holm 多重比较诊断；这些仍是模型内部诊断，不是外部因果证明。
 - Study Workbench 提供 7 个预注册模板、全因子与有界 Latin hypercube 设计、common seeds、2–4 个主指标、8 类负对照、10 类消融、family-level Holm 校正、探索性 rank-correlation 敏感性和不可变运行历史。Study 只执行受限规模的合成模型内部研究；认知臂使用冻结证据绑定 tape，若干消融是明确标注的最近可执行代理，所有结果都固定返回 `historicalValidityEstablished=false`。
 - Executive Risk Cards、Market Dynamics、Trace Explorer、验证梯度、模型清单、红队定义、发布门与哈希链审计。
@@ -57,7 +57,7 @@ Browser
   -> Caddy (HTTPS, security headers, compression)
   -> BaoTa Nginx (private :18080 reverse proxy and real traffic accounting)
   -> EventShock app (FastAPI API + built React/TypeScript/Carbon assets)
-       -> SQLite account ownership, scenario, audit, experiment and Study state
+       -> SQLite account ownership, scenario, audit, experiment, validated AI chat and Study state
        -> SMTP SSL bilingual verification mail (registration and password reset only)
        -> allowlisted multi-provider structured cognition gateways (optional, BYOK)
        -> deterministic event queue, information network, ledger and order-book core
@@ -198,7 +198,7 @@ requirements*.lock             已验证的生产与开发 Python 依赖锁
 - 当前模型是单标的简化现货订单簿，包含受限借券、保证金和强平代理，但不包含完整期权市场、跨场所路由、清算会员制度或完整交易所规则。
 - 配对差异只描述所选模型假设下的内部机制，不构成现实世界因果效应。
 - 10 个 seeds 仅适合课程 Demo；界面会显示区间、有效样本数和限制，不能把单条路径当作统计结论。
-- 生产环境只收集账号访问所必需的邮箱地址，不收集姓名、身份证件、支付信息、券商凭据、IP 行为画像或私人通信；管理员才能查看邮箱与最小化活动摘要。密码采用带随机盐的 scrypt 摘要，验证码和会话令牌只保存不可逆摘要，任何供应商 API Key 都不进入账号数据库。上传来源的完整原文不持久化，但用于人工审核的候选主张片段会保存到当前账号。确定性扫描器不是反病毒沙箱、完整附件解析器或完整隐私合规系统，用户仍不得上传不可信二进制、受监管个人数据或无权发送给第三方模型的材料。
+- 生产环境只收集账号访问所必需的邮箱地址，不收集姓名、身份证件、支付信息、券商凭据、IP 行为画像或与功能无关的私人通信；管理员才能查看邮箱与最小化活动摘要。用户主动提交给结果解释助手且通过安全校验的最终问答会保存到当前账号，供跨浏览器恢复和删除，因此不得在问题中输入秘密或个人身份信息；删除会移除问答正文，仅保留不含正文的会话标识哈希以阻止旧请求复活。密码采用带随机盐的 scrypt 摘要，验证码和会话令牌只保存不可逆摘要，任何供应商 API Key 都不进入账号数据库。上传来源的完整原文不持久化，但用于人工审核的候选主张片段会保存到当前账号。确定性扫描器不是反病毒沙箱、完整附件解析器或完整隐私合规系统，用户仍不得上传不可信二进制、受监管个人数据或无权发送给第三方模型的材料。
 
 ## 许可证
 

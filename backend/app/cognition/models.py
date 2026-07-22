@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 IDENTIFIER_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$"
 INLINE_RESULT_REFERENCE_PATTERN = re.compile(r"\[(result:[^\]\r\n]*)\]")
@@ -332,6 +332,10 @@ class ResultToolPlan(StrictFrozenModel):
 class ResultInterpretationAnswer(StrictFrozenModel):
     """面向用户的结果解释；analysis_summary 是可核验摘要，不是隐藏思维链。"""
 
+    # 对外只返回规范化后的引用清单，但保留模型最初报告过的 ID，供网关继续执行
+    # allowedEvidenceIds 检查。否则“未内联的未知 ID”会在清理时消失，绕过证据边界。
+    _reported_grounding_references: tuple[str, ...] = PrivateAttr(default=())
+
     schema_version: Literal["result_interpretation_v1.0.0"] = "result_interpretation_v1.0.0"
     answer: str = Field(min_length=1, max_length=12_000)
     analysis_summary: str | None = Field(default=None, min_length=1, max_length=2_000)
@@ -342,30 +346,37 @@ class ResultInterpretationAnswer(StrictFrozenModel):
 
     @model_validator(mode="after")
     def validateReviewableAnswer(self) -> ResultInterpretationAnswer:
-        if len(self.grounding_references) != len(set(self.grounding_references)):
-            raise ValueError("grounding_references must not contain duplicates")
         if any(
             VALID_RESULT_REFERENCE_PATTERN.fullmatch(reference) is None
             for reference in self.grounding_references
         ):
             raise ValueError("grounding_references contains an invalid evidence ID")
-        missingInlineReferences = [
-            reference
-            for reference in self.grounding_references
-            if f"[{reference}]" not in self.answer
-        ]
-        if missingInlineReferences:
-            raise ValueError("every grounding reference must appear inline in answer")
-        citedReferences = set(
-            INLINE_RESULT_REFERENCE_PATTERN.findall(
-                "\n".join(part for part in (self.answer, self.analysis_summary) if part is not None)
-            )
-        )
-        if citedReferences != set(self.grounding_references):
-            raise ValueError("inline result references must exactly match grounding_references")
+        reportedReferences = tuple(dict.fromkeys(self.grounding_references))
         reviewableText = "\n".join(
             part for part in (self.answer, self.analysis_summary) if part is not None
         )
+        citedReferencesInOrder = tuple(
+            dict.fromkeys(INLINE_RESULT_REFERENCE_PATTERN.findall(reviewableText))
+        )
+        if not citedReferencesInOrder:
+            raise ValueError("result interpretation must contain at least one inline reference")
+        if any(
+            VALID_RESULT_REFERENCE_PATTERN.fullmatch(reference) is None
+            for reference in citedReferencesInOrder
+        ):
+            raise ValueError("result interpretation contains an invalid inline evidence ID")
+
+        # 只清理模型清单中没有实际出现在正文或可核验摘要里的合法冗余项。
+        # 绝不根据正文自动补写清单，否则缺失引用的坏响应会被静默接受。
+        citedReferenceSet = set(citedReferencesInOrder)
+        normalizedReferences = tuple(
+            reference for reference in reportedReferences if reference in citedReferenceSet
+        )
+        if citedReferenceSet != set(normalizedReferences):
+            raise ValueError("inline result references must exactly match grounding_references")
+
+        object.__setattr__(self, "_reported_grounding_references", reportedReferences)
+        object.__setattr__(self, "grounding_references", normalizedReferences)
         if any(
             pattern.search(reviewableText)
             for pattern in PROHIBITED_INVESTMENT_RECOMMENDATION_PATTERNS
@@ -378,4 +389,5 @@ class ResultInterpretationAnswer(StrictFrozenModel):
         return self
 
     def evidenceIds(self) -> frozenset[str]:
-        return frozenset(self.grounding_references)
+        # 使用模型原始报告集合执行 allowlist 校验；规范化不能掩盖未知证据 ID。
+        return frozenset(self._reported_grounding_references or self.grounding_references)

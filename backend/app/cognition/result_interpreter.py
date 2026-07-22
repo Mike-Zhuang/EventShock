@@ -64,11 +64,18 @@ class ResultInterpretationRun(StrictFrozenModel):
     tool_activity: tuple[ResultToolActivity, ...]
     usage: ModelUsage
     latency_ms: float = Field(ge=0.0)
-    model_calls: int = Field(ge=1, le=2)
+    # Planner、答案及各自至多一次结构修复，最坏四次真实供应商请求。
+    model_calls: int = Field(ge=1, le=4)
     cache_hit: bool
     repair_used: bool
     planner_used: bool
     prompt_version: str
+    planner_fallback_used: bool = False
+    thinking_enabled: bool = False
+    streamed: bool = False
+    transport_attempts: int = Field(default=0, ge=0)
+    uncertain_billable_attempts: int = Field(default=0, ge=0)
+    failure_codes: tuple[str, ...] = ()
 
 
 def buildResultIndex(result: Mapping[str, Any]) -> dict[str, Any]:

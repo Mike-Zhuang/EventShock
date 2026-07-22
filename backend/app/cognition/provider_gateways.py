@@ -41,6 +41,13 @@ from backend.app.cognition.prompts import (
     buildRepairInstruction,
     encodeUntrustedPromptText,
 )
+from backend.app.cognition.streaming import (
+    ModelStreamProgress,
+    ModelStreamStage,
+    ProviderStreamAccumulator,
+    emitModelStreamProgress,
+    iterSseEvents,
+)
 from backend.app.cognition.zhipu import ZhipuRestGateway
 
 NON_ZHIPU_PROVIDERS: tuple[ProviderId, ...] = (
@@ -288,12 +295,21 @@ class StructuredProviderRestGateway:
                 payload=self._buildPayload(request, schema),
                 request=request,
                 policy=policy,
+                repair=False,
             )
             totalAttempts += attempts
             uncertainBillableAttempts += uncertainAttempts
             # 200 响应即可能产生费用；先登记 usage，再处理拒答、截断或坏 JSON。
             totalUsage = totalUsage.plus(self._usageFromBillableBody(body))
             rawContent = self._contentFromBody(body)
+            await emitModelStreamProgress(
+                request.streamObserver,
+                ModelStreamProgress(
+                    stage=ModelStreamStage.VALIDATING,
+                    elapsedMs=self._elapsedMilliseconds(startedAt),
+                    attempt=attempts,
+                ),
+            )
             data = self._validateContent(rawContent, schema, request)
             responseHash = hashlib.sha256(rawBody).hexdigest()
         except ModelGatewayError as error:
@@ -304,6 +320,15 @@ class StructuredProviderRestGateway:
 
         if data is None and lastError is not None and self._isRepairable(lastError):
             repairUsed = True
+            await emitModelStreamProgress(
+                request.streamObserver,
+                ModelStreamProgress(
+                    stage=ModelStreamStage.REPAIRING,
+                    elapsedMs=self._elapsedMilliseconds(startedAt),
+                    attempt=max(1, totalAttempts + 1),
+                    repair=True,
+                ),
+            )
             try:
                 body, rawBody, attempts, uncertainAttempts = await self._postWithRetry(
                     payload=self._buildPayload(
@@ -313,11 +338,21 @@ class StructuredProviderRestGateway:
                     ),
                     request=request,
                     policy=policy,
+                    repair=True,
                 )
                 totalAttempts += attempts
                 uncertainBillableAttempts += uncertainAttempts
                 totalUsage = totalUsage.plus(self._usageFromBillableBody(body))
                 repairedContent = self._contentFromBody(body)
+                await emitModelStreamProgress(
+                    request.streamObserver,
+                    ModelStreamProgress(
+                        stage=ModelStreamStage.VALIDATING,
+                        elapsedMs=self._elapsedMilliseconds(startedAt),
+                        attempt=attempts,
+                        repair=True,
+                    ),
+                )
                 data = self._validateContent(repairedContent, schema, request)
                 responseHash = hashlib.sha256(rawBody).hexdigest()
                 lastError = None
@@ -334,6 +369,9 @@ class StructuredProviderRestGateway:
                     "model did not produce a validated result",
                 )
             if not policy.allow_rule_fallback:
+                lastError.attempts = max(lastError.attempts, totalAttempts)
+                lastError.uncertainBillableAttempts = uncertainBillableAttempts
+                lastError.repairUsed = repairUsed
                 raise lastError
             data = buildRuleFallback(schema, lastError.code)
             responseHash = hashlib.sha256(canonicalModelBytes(data)).hexdigest()
@@ -442,6 +480,9 @@ class StructuredProviderRestGateway:
     ) -> dict[str, Any]:
         jsonSchema = _transportSchema(self._provider, schema)
         userContent = request.userContent
+        # 首轮启用流式；修复轮聚焦一次性重建完整 JSON，不把半截修复结果当作
+        # 可展示内容。无论是否流式，落地后都执行同一套严格本地校验。
+        streamEnabled = request.streamResponse and repairContext is None
         if repairContext is not None:
             repairInstruction = buildRepairInstruction(
                 validationCode=repairContext.error.code.value,
@@ -461,6 +502,7 @@ class StructuredProviderRestGateway:
                 "input": userContent,
                 "max_output_tokens": request.samplingConfig.max_tokens,
                 "store": False,
+                "stream": streamEnabled,
                 "text": {
                     "format": {
                         "type": "json_schema",
@@ -482,6 +524,7 @@ class StructuredProviderRestGateway:
                 "system": request.systemPrompt,
                 "messages": [{"role": "user", "content": userContent}],
                 "max_tokens": request.samplingConfig.max_tokens,
+                "stream": streamEnabled,
                 "output_config": {"format": {"type": "json_schema", "schema": jsonSchema}},
             }
             if request.samplingConfig.thinking_enabled:
@@ -511,7 +554,7 @@ class StructuredProviderRestGateway:
                 "system_instruction": request.systemPrompt,
                 "input": userContent,
                 "store": False,
-                "stream": False,
+                "stream": streamEnabled,
                 "generation_config": generationConfig,
                 "response_format": {
                     "type": "text",
@@ -528,7 +571,7 @@ class StructuredProviderRestGateway:
             payload = {
                 "model": request.model,
                 "messages": messages,
-                "stream": False,
+                "stream": streamEnabled,
                 "max_completion_tokens": request.samplingConfig.max_tokens,
                 "response_format": {
                     "type": "json_schema",
@@ -545,12 +588,14 @@ class StructuredProviderRestGateway:
                     request.samplingConfig.reasoning_effort,
                 ),
             }
+            if streamEnabled:
+                payload["stream_options"] = {"include_usage": True}
             return payload
 
         payload = {
             "model": request.model,
             "messages": messages,
-            "stream": False,
+            "stream": streamEnabled,
             "max_tokens": request.samplingConfig.max_tokens,
             "response_format": {"type": "json_object"},
         }
@@ -564,6 +609,8 @@ class StructuredProviderRestGateway:
                 )
         elif self._provider == "alibaba":
             payload["enable_thinking"] = request.samplingConfig.thinking_enabled
+        if streamEnabled:
+            payload["stream_options"] = {"include_usage": True}
         return payload
 
     def _headers(self, apiKey: str) -> dict[str, str]:
@@ -587,20 +634,34 @@ class StructuredProviderRestGateway:
         payload: dict[str, Any],
         request: ModelRequest,
         policy: ModelPolicy,
+        repair: bool,
     ) -> tuple[dict[str, Any], bytes, int, int]:
         lastError: ModelGatewayError | None = None
         uncertainAttempts = 0
         for attemptIndex in range(policy.max_transport_attempts):
             attemptNumber = attemptIndex + 1
             try:
-                response = await self._client.post(
-                    self._endpoint,
-                    headers=self._headers(request.apiKey),
-                    json=payload,
-                    timeout=policy.timeout_seconds,
-                    follow_redirects=False,
-                )
-            except httpx.TimeoutException as error:
+                if payload.get("stream") is True:
+                    statusCode, responseHeaders, body, rawBody = await self._postStreaming(
+                        payload=payload,
+                        request=request,
+                        policy=policy,
+                        attempt=attemptNumber,
+                        repair=repair,
+                    )
+                else:
+                    response = await self._client.post(
+                        self._endpoint,
+                        headers=self._headers(request.apiKey),
+                        json=payload,
+                        timeout=self._httpxTimeout(policy),
+                        follow_redirects=False,
+                    )
+                    statusCode = response.status_code
+                    responseHeaders = response.headers
+                    body = self._decodeBody(response, request.apiKey)
+                    rawBody = response.content
+            except (httpx.TimeoutException, TimeoutError) as error:
                 uncertainAttempts += 1
                 lastError = ModelGatewayError(
                     FailureCode.MODEL_TIMEOUT,
@@ -626,26 +687,49 @@ class StructuredProviderRestGateway:
                     continue
                 self._recordUncertainAttempts(lastError, uncertainAttempts)
                 raise lastError from error
+            except ModelGatewayError as error:
+                if error.httpStatus == 200:
+                    uncertainAttempts += 1
+                error.attempts = attemptNumber
+                if error.retryable and attemptNumber < policy.max_transport_attempts:
+                    await self._backoff(policy, attemptIndex, None)
+                    continue
+                self._recordUncertainAttempts(error, uncertainAttempts)
+                raise
 
             try:
-                body = self._decodeBody(response)
+                if not isinstance(body, dict):
+                    raise ModelGatewayError(
+                        FailureCode.MODEL_RESPONSE_INVALID,
+                        "provider response root must be an object",
+                        retryable=statusCode >= 500,
+                        httpStatus=statusCode,
+                    )
             except ModelGatewayError as error:
-                if response.status_code == 200:
+                if statusCode == 200:
                     # 成功状态但响应无法解码时无法取得 usage，也无法证明未计费。
                     uncertainAttempts += 1
                 error.attempts = attemptNumber
                 if error.retryable and attemptNumber < policy.max_transport_attempts:
-                    await self._backoff(policy, attemptIndex, response.headers.get("Retry-After"))
+                    await self._backoff(
+                        policy,
+                        attemptIndex,
+                        responseHeaders.get("Retry-After"),
+                    )
                     continue
                 self._recordUncertainAttempts(error, uncertainAttempts)
                 raise
-            if response.status_code == 200:
-                return body, response.content, attemptNumber, uncertainAttempts
+            if statusCode == 200:
+                return body, rawBody, attemptNumber, uncertainAttempts
 
-            lastError = self._classifyError(response.status_code, body, request.apiKey)
+            lastError = self._classifyError(statusCode, body, request.apiKey)
             lastError.attempts = attemptNumber
             if lastError.retryable and attemptNumber < policy.max_transport_attempts:
-                await self._backoff(policy, attemptIndex, response.headers.get("Retry-After"))
+                await self._backoff(
+                    policy,
+                    attemptIndex,
+                    responseHeaders.get("Retry-After"),
+                )
                 continue
             self._recordUncertainAttempts(lastError, uncertainAttempts)
             raise lastError
@@ -657,6 +741,105 @@ class StructuredProviderRestGateway:
             )
         self._recordUncertainAttempts(lastError, uncertainAttempts)
         raise lastError
+
+    async def _postStreaming(
+        self,
+        *,
+        payload: dict[str, Any],
+        request: ModelRequest,
+        policy: ModelPolicy,
+        attempt: int,
+        repair: bool,
+    ) -> tuple[int, httpx.Headers, dict[str, Any], bytes]:
+        """消费供应商 SSE；只向调用方公开阶段和片段计数。"""
+
+        accumulator = ProviderStreamAccumulator(self._provider)
+        startedAt = self._clock()
+        headers = {**self._headers(request.apiKey), "Accept": "text/event-stream"}
+        async with asyncio.timeout(policy.timeout_seconds):
+            async with self._client.stream(
+                "POST",
+                self._endpoint,
+                headers=headers,
+                json=payload,
+                timeout=self._httpxTimeout(policy),
+                follow_redirects=False,
+            ) as response:
+                if response.status_code != 200:
+                    rawBody = await response.aread()
+                    body = self._decodeRawBody(
+                        rawBody,
+                        response.status_code,
+                        request.apiKey,
+                    )
+                    return response.status_code, response.headers, body, rawBody
+
+                contentType = response.headers.get("content-type", "").lower()
+                if "text/event-stream" not in contentType:
+                    rawBody = await response.aread()
+                    body = self._decodeRawBody(
+                        rawBody,
+                        response.status_code,
+                        request.apiKey,
+                    )
+                    return response.status_code, response.headers, body, rawBody
+
+                try:
+                    async for event in iterSseEvents(response):
+                        previousReasoning = accumulator.reasoningChunkCount
+                        accumulator.accept(event)
+                        if (
+                            accumulator.chunkCount == 1
+                            or accumulator.chunkCount % 8 == 0
+                            or accumulator.reasoningChunkCount > previousReasoning
+                        ):
+                            stage = (
+                                ModelStreamStage.REASONING
+                                if accumulator.reasoningChunkCount > previousReasoning
+                                else ModelStreamStage.GENERATING
+                            )
+                            await emitModelStreamProgress(
+                                request.streamObserver,
+                                ModelStreamProgress(
+                                    stage=stage,
+                                    elapsedMs=self._elapsedMilliseconds(startedAt),
+                                    chunkCount=accumulator.chunkCount,
+                                    answerChunkCount=accumulator.answerChunkCount,
+                                    reasoningChunkCount=accumulator.reasoningChunkCount,
+                                    attempt=attempt,
+                                    repair=repair,
+                                ),
+                            )
+                except ValueError as error:
+                    raise ModelGatewayError(
+                        FailureCode.MODEL_RESPONSE_INVALID,
+                        str(error),
+                        httpStatus=response.status_code,
+                    ) from error
+                try:
+                    body = accumulator.buildBody()
+                except ValueError as error:
+                    raise ModelGatewayError(
+                        FailureCode.MODEL_RESPONSE_INVALID,
+                        str(error),
+                        httpStatus=response.status_code,
+                    ) from error
+                rawBody = json.dumps(
+                    body,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                return response.status_code, response.headers, body, rawBody
+
+    @staticmethod
+    def _httpxTimeout(policy: ModelPolicy) -> httpx.Timeout:
+        return httpx.Timeout(
+            policy.timeout_seconds,
+            connect=min(10.0, policy.timeout_seconds),
+            write=min(30.0, policy.timeout_seconds),
+            pool=min(10.0, policy.timeout_seconds),
+        )
 
     @staticmethod
     def _recordUncertainAttempts(error: ModelGatewayError, attempts: int) -> None:
@@ -685,23 +868,32 @@ class StructuredProviderRestGateway:
             delay = policy.base_backoff_seconds * (2**attemptIndex) * jitterMultiplier
         await self._sleeper(delay)
 
-    @staticmethod
-    def _decodeBody(response: httpx.Response) -> dict[str, Any]:
+    def _decodeBody(self, response: httpx.Response, apiKey: str) -> dict[str, Any]:
+        return self._decodeRawBody(response.content, response.status_code, apiKey)
+
+    def _decodeRawBody(
+        self,
+        rawBody: bytes,
+        statusCode: int,
+        apiKey: str,
+    ) -> dict[str, Any]:
         try:
-            body = response.json()
-        except json.JSONDecodeError as error:
+            body = json.loads(rawBody)
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            if statusCode != 200:
+                raise self._classifyError(statusCode, {}, apiKey) from error
             raise ModelGatewayError(
                 FailureCode.MODEL_RESPONSE_INVALID,
                 "provider returned non-JSON response",
-                retryable=response.status_code >= 500,
-                httpStatus=response.status_code,
+                httpStatus=statusCode,
             ) from error
         if not isinstance(body, dict):
+            if statusCode != 200:
+                raise self._classifyError(statusCode, {}, apiKey)
             raise ModelGatewayError(
                 FailureCode.MODEL_RESPONSE_INVALID,
                 "provider response root must be an object",
-                retryable=response.status_code >= 500,
-                httpStatus=response.status_code,
+                httpStatus=statusCode,
             )
         return body
 
@@ -812,6 +1004,11 @@ class StructuredProviderRestGateway:
                 raise ModelGatewayError(
                     code, f"provider response was incomplete: {reason or 'unknown'}"
                 )
+            if status in {"failed", "cancelled"}:
+                raise ModelGatewayError(
+                    FailureCode.MODEL_RESPONSE_INVALID,
+                    f"provider response status was {status}",
+                )
             outputText = body.get("output_text")
             if isinstance(outputText, str) and outputText.strip():
                 return outputText
@@ -829,13 +1026,31 @@ class StructuredProviderRestGateway:
                     FailureCode.REFUSAL if stopReason == "refusal" else FailureCode.CONTENT_FILTERED
                 )
                 raise ModelGatewayError(code, f"provider stopped with {stopReason}")
+            if stopReason != "end_turn":
+                raise ModelGatewayError(
+                    FailureCode.MODEL_RESPONSE_INVALID,
+                    "provider returned an unsupported stop reason",
+                )
             return self._textFromBlocks(body.get("content"))
 
         if self._provider == "google":
             status = body.get("status")
             if status == "incomplete":
+                finishReason = body.get("finish_reason")
+                filteredReasons = {
+                    "SAFETY",
+                    "BLOCKLIST",
+                    "PROHIBITED_CONTENT",
+                    "IMAGE_SAFETY",
+                    "RECITATION",
+                }
+                code = (
+                    FailureCode.CONTENT_FILTERED
+                    if finishReason in filteredReasons
+                    else FailureCode.MODEL_RESPONSE_INVALID
+                )
                 raise ModelGatewayError(
-                    FailureCode.MODEL_RESPONSE_INVALID,
+                    code,
                     "provider returned an incomplete interaction",
                 )
             if status in {"failed", "cancelled"}:
@@ -853,7 +1068,10 @@ class StructuredProviderRestGateway:
                 joined = "".join(texts).strip()
                 if joined:
                     return joined
-            raise ModelGatewayError(FailureCode.REFUSAL, "model returned no structured content")
+            raise ModelGatewayError(
+                FailureCode.MODEL_RESPONSE_INVALID,
+                "model returned no structured content",
+            )
 
         choices = body.get("choices")
         if not isinstance(choices, list) or not choices:
@@ -881,6 +1099,11 @@ class StructuredProviderRestGateway:
                 "provider stopped because inference capacity was unavailable",
                 retryable=True,
             )
+        if finishReason != "stop":
+            raise ModelGatewayError(
+                FailureCode.MODEL_RESPONSE_INVALID,
+                "provider returned an unsupported finish reason",
+            )
         message = firstChoice.get("message")
         if not isinstance(message, dict):
             raise ModelGatewayError(
@@ -892,13 +1115,19 @@ class StructuredProviderRestGateway:
             raise ModelGatewayError(FailureCode.REFUSAL, "model refused structured output")
         content = message.get("content")
         if not isinstance(content, str) or not content.strip():
-            raise ModelGatewayError(FailureCode.REFUSAL, "model returned no structured content")
+            raise ModelGatewayError(
+                FailureCode.MODEL_RESPONSE_INVALID,
+                "model returned no structured content",
+            )
         return content
 
     @staticmethod
     def _textFromBlocks(value: object, *, containerType: str | None = None) -> str:
         if not isinstance(value, list):
-            raise ModelGatewayError(FailureCode.REFUSAL, "model returned no structured content")
+            raise ModelGatewayError(
+                FailureCode.MODEL_RESPONSE_INVALID,
+                "model returned no structured content",
+            )
         texts: list[str] = []
         for item in value:
             if not isinstance(item, dict):
@@ -917,7 +1146,10 @@ class StructuredProviderRestGateway:
                     texts.append(text)
         joined = "".join(texts).strip()
         if not joined:
-            raise ModelGatewayError(FailureCode.REFUSAL, "model returned no structured content")
+            raise ModelGatewayError(
+                FailureCode.MODEL_RESPONSE_INVALID,
+                "model returned no structured content",
+            )
         return joined
 
     @staticmethod
@@ -1093,7 +1325,6 @@ class StructuredProviderRestGateway:
             FailureCode.EVIDENCE_ID_UNKNOWN,
             FailureCode.ACTION_NOT_ALLOWED,
             FailureCode.MODEL_RESPONSE_INVALID,
-            FailureCode.REFUSAL,
         }
 
     def _elapsedMilliseconds(self, startedAt: float) -> float:

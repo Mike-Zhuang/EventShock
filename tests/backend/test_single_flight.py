@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from backend.app.errors import ApiError
 from backend.app.single_flight import (
     ResultInterpretationSingleFlight,
     SingleFlightRequestConflictError,
@@ -110,6 +111,153 @@ def test_completed_idempotency_response_expires() -> None:
         assert await singleFlight.purgeExpired() == 1
         assert singleFlight.completedCount == 0
         assert await singleFlight.execute(**arguments) == 2
+        assert callCount == 2
+
+    asyncio.run(exercise())
+
+
+def test_completed_failure_is_replayed_without_reexecuting_operation() -> None:
+    async def exercise() -> None:
+        singleFlight = ResultInterpretationSingleFlight()
+        callCount = 0
+        providerError = RuntimeError("provider timeout after uncertain billing")
+
+        async def operation() -> None:
+            nonlocal callCount
+            callCount += 1
+            raise providerError
+
+        arguments = {
+            "principalKey": "session-a",
+            "clientRequestId": "request-failed",
+            "requestHash": "hash-a",
+            "operation": operation,
+        }
+        with pytest.raises(RuntimeError) as firstError:
+            await singleFlight.execute(**arguments)
+        with pytest.raises(RuntimeError) as replayedError:
+            await singleFlight.execute(**arguments)
+
+        assert firstError.value is providerError
+        assert replayedError.value is not providerError
+        assert type(replayedError.value) is type(providerError)
+        assert replayedError.value.args == providerError.args
+        assert callCount == 1
+        assert singleFlight.activeCount == 0
+        assert singleFlight.completedCount == 1
+
+    asyncio.run(exercise())
+
+
+def test_completed_failure_new_id_reexecutes_and_payload_conflict_is_rejected() -> None:
+    async def exercise() -> None:
+        singleFlight = ResultInterpretationSingleFlight()
+        callCount = 0
+
+        async def operation() -> None:
+            nonlocal callCount
+            callCount += 1
+            raise RuntimeError(f"provider failure {callCount}")
+
+        with pytest.raises(RuntimeError, match="provider failure 1"):
+            await singleFlight.execute(
+                principalKey="session-a",
+                clientRequestId="request-failed",
+                requestHash="hash-a",
+                operation=operation,
+            )
+        with pytest.raises(SingleFlightRequestConflictError):
+            await singleFlight.execute(
+                principalKey="session-a",
+                clientRequestId="request-failed",
+                requestHash="hash-b",
+                operation=operation,
+            )
+        with pytest.raises(RuntimeError, match="provider failure 2"):
+            await singleFlight.execute(
+                principalKey="session-a",
+                clientRequestId="request-new",
+                requestHash="hash-a",
+                operation=operation,
+            )
+
+        assert callCount == 2
+
+    asyncio.run(exercise())
+
+
+def test_completed_api_error_replay_preserves_public_contract() -> None:
+    async def exercise() -> None:
+        singleFlight = ResultInterpretationSingleFlight()
+        callCount = 0
+
+        async def operation() -> None:
+            nonlocal callCount
+            callCount += 1
+            raise ApiError(
+                "MODEL_TIMEOUT",
+                504,
+                "The model provider did not finish within the bounded time.",
+                details={
+                    "retryable": True,
+                    "uncertainBillableAttempts": 1,
+                },
+            )
+
+        arguments = {
+            "principalKey": "session-a",
+            "clientRequestId": "request-api-error",
+            "requestHash": "hash-a",
+            "operation": operation,
+        }
+        with pytest.raises(ApiError) as firstError:
+            await singleFlight.execute(**arguments)
+        with pytest.raises(ApiError) as replayedError:
+            await singleFlight.execute(**arguments)
+
+        assert replayedError.value is not firstError.value
+        assert replayedError.value.code == "MODEL_TIMEOUT"
+        assert replayedError.value.statusCode == 504
+        assert replayedError.value.message == firstError.value.message
+        assert replayedError.value.details == {
+            "retryable": True,
+            "uncertainBillableAttempts": 1,
+        }
+        assert callCount == 1
+
+    asyncio.run(exercise())
+
+
+def test_completed_failure_can_retry_after_ttl() -> None:
+    async def exercise() -> None:
+        now = [1_000.0]
+        singleFlight = ResultInterpretationSingleFlight(
+            completedTtlSeconds=30,
+            clock=lambda: now[0],
+        )
+        callCount = 0
+
+        async def operation() -> None:
+            nonlocal callCount
+            callCount += 1
+            raise RuntimeError(f"provider failure {callCount}")
+
+        arguments = {
+            "principalKey": "session-a",
+            "clientRequestId": "request-expiring-failure",
+            "requestHash": "hash-a",
+            "operation": operation,
+        }
+        with pytest.raises(RuntimeError, match="provider failure 1"):
+            await singleFlight.execute(**arguments)
+        with pytest.raises(RuntimeError, match="provider failure 1"):
+            await singleFlight.execute(**arguments)
+        assert callCount == 1
+
+        now[0] += 31
+        assert await singleFlight.purgeExpired() == 1
+        with pytest.raises(RuntimeError, match="provider failure 2"):
+            await singleFlight.execute(**arguments)
         assert callCount == 2
 
     asyncio.run(exercise())

@@ -248,7 +248,8 @@ _SENSITIVE_PATTERNS = (
         re.compile(
             r"(?:api[\s_-]*(?:key|密钥)|access[\s_-]*token|auth[\s_-]*token|"
             r"authorization|访问令牌|鉴权令牌|密钥)"
-            r"\s*(?:is|是|[:=])\s*(?:bearer\s+)?[\"']?([a-z0-9_./+=-]{8,256})",
+            r"\s*(?:(?:is|是)\s*[:=]?|[:=])\s*"
+            r"(?:bearer\s+)?[\"']?([a-z0-9_./+=-]{8,256})",
             re.IGNORECASE,
         ),
         "secret",
@@ -270,7 +271,8 @@ _SENSITIVE_PATTERNS = (
         "PASSWORD_VALUE",
         FindingSeverity.CRITICAL,
         re.compile(
-            r"(?:password|passwd|pwd|密码|口令)\s*(?:is|是|[:=])\s*[\"']?([^\s\"';&]{4,128})",
+            r"(?:password|passwd|pwd|密码|口令)\s*"
+            r"(?:(?:is|是)\s*[:=]?|[:=])\s*[\"']?([^\s\"';&]{4,128})",
             re.IGNORECASE,
         ),
         "secret",

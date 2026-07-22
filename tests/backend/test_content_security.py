@@ -98,6 +98,16 @@ def test_secrets_and_pii_are_never_echoed_in_structured_result() -> None:
     assert all(finding.redactedExcerpt.startswith("[REDACTED:") for finding in result.findings)
 
 
+def test_chinese_secret_labels_with_copula_and_colon_are_detected() -> None:
+    result = scanTextContent(
+        "API 密钥是: sk-superSecretToken0123456789，密码是: CorrectHorseBatteryStaple!",
+        locale="zh-CN",
+    )
+
+    assert {"API_KEY_OR_TOKEN", "PASSWORD_VALUE"}.issubset(findingCodes(result))
+    assert result.decision is ContentPolicyDecision.BLOCK
+
+
 def test_binary_nul_control_and_executable_content_are_fail_closed() -> None:
     binary = scanTextContent(b"\x7fELF\x00\xffpayload")
     active = scanTextContent("ok\x00\x07<script>fetch('/secret')</script>")

@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
+import logging
 import re
 import time
 import uuid
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, Query, Request
@@ -52,6 +54,7 @@ from backend.app.cognition import (
     CredentialNotConfiguredError,
     EvalSample,
     ExternalEvidenceSource,
+    FailureCode,
     ModelGatewayError,
 )
 from backend.app.cognition.catalog import (
@@ -66,8 +69,13 @@ from backend.app.cognition.golden_suite import (
     codeGraderSelfTestSamples,
 )
 from backend.app.cognition.pricing import getTokenPrice
+from backend.app.cognition.streaming import ModelStreamObserver, ModelStreamProgress
 from backend.app.config import loadSettings
-from backend.app.database import Database
+from backend.app.database import (
+    Database,
+    ResultInterpretationConversationDeletedError,
+    ResultInterpretationRequestConflictError,
+)
 from backend.app.errors import ApiError
 from backend.app.governance.redteam import RED_TEAM_CASES, scoreRedTeamSuite
 from backend.app.governance.registry import inventoryHash, inventorySnapshot
@@ -95,6 +103,7 @@ from backend.app.security import (
     ContentPolicyDecision,
     redactReviewableText,
     scanEventPackContent,
+    scanTextContent,
 )
 from backend.app.service import EventPackService, ExperimentService
 from backend.app.single_flight import (
@@ -105,6 +114,8 @@ from backend.app.single_flight import (
 )
 from backend.app.study.api_models import StudyDesignPreviewRequest, StudyRunApiRequest
 from backend.app.study.api_service import StudyApiService
+
+LOGGER = logging.getLogger(__name__)
 
 SESSION_PATTERN = re.compile(r"^[A-Za-z0-9._-]{12,128}$")
 IDEMPOTENCY_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
@@ -119,6 +130,152 @@ PUBLIC_AUTH_PATHS = frozenset(
         "/api/v1/auth/password-reset",
     }
 )
+
+MODEL_ERROR_PUBLIC_MESSAGES: dict[FailureCode, str] = {
+    FailureCode.MODEL_TIMEOUT: "The model provider did not finish within the bounded time.",
+    FailureCode.MODEL_TRANSPORT_ERROR: "The model provider connection failed temporarily.",
+    FailureCode.MODEL_AUTHENTICATION_ERROR: "The model provider rejected the temporary API key.",
+    FailureCode.MODEL_PERMISSION_ERROR: "The selected model is not available to this API key.",
+    FailureCode.MODEL_RATE_LIMITED: "The model provider rate limit was reached.",
+    FailureCode.MODEL_OVERLOADED: "The model provider is temporarily overloaded.",
+    FailureCode.MODEL_QUOTA_EXHAUSTED: "The model provider quota is exhausted.",
+    FailureCode.MODEL_REQUEST_INVALID: "The model provider rejected this structured request.",
+    FailureCode.MODEL_RESPONSE_INVALID: "The model provider returned an unusable response.",
+    FailureCode.MODEL_USAGE_MISSING: "The provider response omitted required usage metadata.",
+    FailureCode.SCHEMA_INVALID: "The model response did not pass the required result schema.",
+    FailureCode.REFUSAL: "The model declined to produce a result explanation.",
+    FailureCode.CONTENT_FILTERED: "The model provider filtered the result explanation.",
+    FailureCode.EVIDENCE_ID_UNKNOWN: "The model cited evidence outside the approved result slices.",
+    FailureCode.ACTION_NOT_ALLOWED: "The model response crossed an allowed-action boundary.",
+}
+
+RESULT_INTERPRETATION_PRIVATE_INPUT_CODES = frozenset(
+    {
+        "PRIVATE_KEY_MATERIAL",
+        "API_KEY_OR_TOKEN",
+        "PASSWORD_VALUE",
+        "URL_EMBEDDED_CREDENTIAL",
+        "EMAIL_ADDRESS",
+        "US_SOCIAL_SECURITY_NUMBER",
+        "PHONE_NUMBER",
+        "PAYMENT_CARD_NUMBER",
+    }
+)
+
+
+def _modelGatewayStatusCode(error: ModelGatewayError) -> int:
+    if error.code == FailureCode.MODEL_TIMEOUT:
+        return 504
+    if error.code in {FailureCode.MODEL_TRANSPORT_ERROR, FailureCode.MODEL_OVERLOADED}:
+        return 503
+    if error.code == FailureCode.MODEL_RATE_LIMITED:
+        return 429
+    if error.code in {
+        FailureCode.MODEL_AUTHENTICATION_ERROR,
+        FailureCode.MODEL_PERMISSION_ERROR,
+        FailureCode.MODEL_QUOTA_EXHAUSTED,
+        FailureCode.MODEL_REQUEST_INVALID,
+    }:
+        return 422
+    return 502
+
+
+def _modelGatewayApiError(error: ModelGatewayError) -> ApiError:
+    return ApiError(
+        error.code.value,
+        _modelGatewayStatusCode(error),
+        MODEL_ERROR_PUBLIC_MESSAGES.get(
+            error.code,
+            "The model response could not be used safely.",
+        ),
+        details={
+            "retryable": error.retryable,
+            "providerAttempts": max(0, error.attempts),
+            "uncertainBillableAttempts": max(0, error.uncertainBillableAttempts),
+            "repairUsed": error.repairUsed,
+        },
+    )
+
+
+def _sseFrame(event: str, payload: dict[str, Any]) -> str:
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"event: {event}\ndata: {serialized}\n\n"
+
+
+def _appendResultInterpretationAuditSafely(
+    database: Database,
+    *,
+    ownerUserId: str,
+    experimentId: str,
+    action: str,
+    metadata: dict[str, Any],
+    traceId: str | None,
+) -> bool:
+    """尽力写入解释审计，但绝不因审计存储故障丢弃已计费的模型终态。"""
+
+    try:
+        database.appendAuditEvent(
+            ownerUserId,
+            "RESULT_INTERPRETATION",
+            experimentId,
+            action,
+            metadata,
+        )
+    except Exception as error:
+        # 不能记录异常正文：数据库驱动或意外上游异常可能包含路径、SQL 或凭据。
+        LOGGER.error(
+            "Result interpretation audit write failed: traceId=%s action=%s errorType=%s",
+            traceId or "unavailable",
+            action,
+            type(error).__name__,
+        )
+        return False
+    return True
+
+
+def _safeResultInterpretationErrorDetails(error: ApiError) -> dict[str, object]:
+    """仅公开结果解释协议定义过的标量错误字段。"""
+
+    details: dict[str, object] = {}
+    for fieldName in ("retryable", "repairUsed"):
+        value = error.details.get(fieldName)
+        if isinstance(value, bool):
+            details[fieldName] = value
+    for fieldName in ("providerAttempts", "uncertainBillableAttempts"):
+        value = error.details.get(fieldName)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            details[fieldName] = value
+    return details
+
+
+def _validateResultInterpretationPrivateInput(
+    interpretationRequest: ResultInterpretationChatRequest,
+) -> None:
+    """在任何外部模型调用前阻断凭据和个人身份信息。"""
+
+    for message in interpretationRequest.messages:
+        findingCodes = {
+            finding.code
+            for finding in scanTextContent(
+                message.content,
+                field="resultInterpretationMessage",
+            ).findings
+        }
+        if findingCodes & RESULT_INTERPRETATION_PRIVATE_INPUT_CODES:
+            raise ApiError(
+                "RESULT_INTERPRETATION_PRIVATE_INPUT",
+                422,
+                (
+                    "Remove API keys, credentials, and personally identifying information "
+                    "before asking the model."
+                ),
+                details={"retryable": False},
+            )
 
 
 def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> FastAPI:
@@ -229,31 +386,6 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         traceId = request.headers.get("X-Trace-ID") or f"http-{uuid.uuid4().hex}"
         request.state.traceId = traceId[:128]
         request.state.authContext = None
-        try:
-            rateLimitRules = _rateLimitRules(request)
-            if rateLimitRules:
-                rateLimiter.check(rateLimitRules)
-        except RateLimitExceeded as error:
-            response = JSONResponse(
-                status_code=429,
-                content={
-                    "error": {
-                        "code": "RATE_LIMIT_EXCEEDED",
-                        "message": "Too many write requests. Retry later.",
-                        "traceId": request.state.traceId,
-                    }
-                },
-                headers={
-                    "Retry-After": str(error.retryAfterSeconds),
-                    "Cache-Control": "no-store",
-                },
-            )
-            _addSecurityHeaders(response, request.state.traceId)
-            runtimeMetrics.record(
-                durationMs=(time.perf_counter() - requestStartedAt) * 1_000,
-                statusCode=response.status_code,
-            )
-            return response
         if settings.authenticationRequired and _authenticationProtected(request):
             authService: AuthService = request.app.state.authService
             rawToken = request.cookies.get(AUTH_COOKIE_NAME, "")
@@ -309,6 +441,34 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                     statusCode=response.status_code,
                 )
                 return response
+
+        # 生产保护路由必须先完成认证和 CSRF 校验。否则匿名请求可以提前消耗
+        # 付费写接口的共享额度，并让同一校园 NAT 下的真实用户被拒绝。
+        try:
+            rateLimitRules = _rateLimitRules(request)
+            if rateLimitRules:
+                rateLimiter.check(rateLimitRules)
+        except RateLimitExceeded as error:
+            response = JSONResponse(
+                status_code=429,
+                content={
+                    "error": {
+                        "code": "RATE_LIMIT_EXCEEDED",
+                        "message": "Too many write requests. Retry later.",
+                        "traceId": request.state.traceId,
+                    }
+                },
+                headers={
+                    "Retry-After": str(error.retryAfterSeconds),
+                    "Cache-Control": "no-store",
+                },
+            )
+            _addSecurityHeaders(response, request.state.traceId)
+            runtimeMetrics.record(
+                durationMs=(time.perf_counter() - requestStartedAt) * 1_000,
+                statusCode=response.status_code,
+            )
+            return response
         response = await callNext(request)
         if request.url.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
@@ -350,6 +510,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                     "code": error.code,
                     "message": error.message,
                     "traceId": getattr(request.state, "traceId", None),
+                    **error.details,
                 }
             },
         )
@@ -614,6 +775,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             request.app.state.resultInterpretationSingleFlight
         )
         await singleFlight.clearPrincipal(context.authSessionId)
+        await singleFlight.clearPrincipal(context.userId)
         authService.logout(token=request.cookies.get(AUTH_COOKIE_NAME, ""))
         response = Response(status_code=204)
         response.delete_cookie(
@@ -971,7 +1133,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 "Configure a session API key before testing the model connection.",
             ) from error
         except ModelGatewayError as error:
-            raise ApiError(error.code.value, 502, str(error)) from error
+            raise _modelGatewayApiError(error) from error
         return {
             "ok": True,
             "provider": result.provider,
@@ -1028,7 +1190,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                         "The session credential expired before the evaluation completed.",
                     ) from error
                 except ModelGatewayError as error:
-                    raise ApiError(error.code.value, 502, str(error)) from error
+                    raise _modelGatewayApiError(error) from error
                 liveSamples.append(EvalSample(case=case, rawDecision=modelRun.decision))
                 modelRuns.append(
                     {
@@ -1622,20 +1784,380 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         service: ExperimentService = request.app.state.experimentService
         return service.getResults(experimentId, _sessionId(sessionId))
 
-    @appInstance.post("/api/v1/experiments/{experimentId}/interpretation-chat")
-    async def interpretExperimentResults(
+    def validatePersistedInterpretationConversation(
+        *,
+        database: Database,
+        ownerUserId: str,
+        experimentId: str,
+        interpretationRequest: ResultInterpretationChatRequest,
+    ) -> None:
+        """把客户端追问历史绑定到服务器终态，拒绝伪造或分叉上下文。"""
+
+        conversation = database.getResultInterpretationConversation(
+            ownerUserId=ownerUserId,
+            experimentId=experimentId,
+            conversationId=interpretationRequest.conversationId,
+        )
+        if interpretationRequest.mode == "INITIAL":
+            if conversation is not None:
+                raise ApiError(
+                    "RESULT_INTERPRETATION_CONVERSATION_CONFLICT",
+                    409,
+                    "This conversation already contains a completed exchange.",
+                    details={"retryable": False},
+                )
+            return
+        if conversation is None:
+            raise ApiError(
+                "RESULT_INTERPRETATION_CONVERSATION_NOT_FOUND",
+                409,
+                "Start a new result interpretation before sending a follow-up.",
+                details={"retryable": False},
+            )
+
+        persistedTurns: list[dict[str, str]] = []
+        for exchange in conversation["exchanges"]:
+            persistedTurns.extend(
+                (
+                    {"role": "user", "content": exchange["userMessage"]},
+                    {
+                        "role": "assistant",
+                        "content": exchange["assistantMessage"]["answer"],
+                    },
+                )
+            )
+        submittedPriorTurns = [
+            message.model_dump(mode="json") for message in interpretationRequest.messages[:-1]
+        ]
+        if (
+            len(submittedPriorTurns) > len(persistedTurns)
+            or persistedTurns[-len(submittedPriorTurns) :] != submittedPriorTurns
+        ):
+            raise ApiError(
+                "RESULT_INTERPRETATION_CONVERSATION_MISMATCH",
+                409,
+                "The submitted conversation does not match the saved server history.",
+                details={"retryable": False},
+            )
+
+    def ensureInterpretationConversationNotDeleted(
+        *,
+        database: Database,
+        ownerUserId: str,
+        experimentId: str,
+        conversationId: str,
+    ) -> None:
+        """在缓存命中和供应商调用前阻断已删除会话的任何旧请求。"""
+
+        if database.isResultInterpretationConversationDeleted(
+            ownerUserId=ownerUserId,
+            experimentId=experimentId,
+            conversationId=conversationId,
+        ):
+            raise ApiError(
+                "RESULT_INTERPRETATION_CONVERSATION_DELETED",
+                410,
+                "This result interpretation conversation was deleted and cannot be reused.",
+                details={"retryable": False},
+            )
+
+    async def generateResultInterpretation(
+        *,
         experimentId: str,
         interpretationRequest: ResultInterpretationChatRequest,
         request: Request,
-        sessionId: str = Depends(requireOwner),
+        ownerUserId: str,
+        credentialId: str,
+        authoritativeResult: dict[str, Any],
+        requestHash: str,
+        progressObserver: ModelStreamObserver | None = None,
     ) -> dict[str, Any]:
-        """用当前登录会话的临时 BYOK 解读服务端持有的权威结果快照。"""
+        """执行一次可单飞复用的解释，并只持久化严格验证后的完整问答。"""
 
-        ownerUserId = _sessionId(sessionId)
-        credentialId = credentialSessionId(request, ownerUserId)
-        experimentService: ExperimentService = request.app.state.experimentService
         cognition: CognitionService = request.app.state.cognitionService
         database: Database = request.app.state.database
+        resultHash = canonicalRequestHash(authoritativeResult)
+        conversationHash = hashlib.sha256(
+            interpretationRequest.conversationId.encode("utf-8")
+        ).hexdigest()
+        clientRequestHash = hashlib.sha256(
+            interpretationRequest.clientRequestId.encode("utf-8")
+        ).hexdigest()
+
+        # 该检查必须在单飞 operation 内再执行一次：请求可能在排队期间被另一个
+        # 浏览器删除。数据库保存层还有第三道事务内检查，覆盖多进程竞争。
+        ensureInterpretationConversationNotDeleted(
+            database=database,
+            ownerUserId=ownerUserId,
+            experimentId=experimentId,
+            conversationId=interpretationRequest.conversationId,
+        )
+
+        # 持久化终态是跨进程、跨重启的第二层幂等保护。它必须先于读取临时
+        # API Key，使用户即使没有重新填写 Key，也能恢复已经完成的回答。
+        try:
+            persistedExchange = database.getResultInterpretationExchangeByRequest(
+                ownerUserId=ownerUserId,
+                experimentId=experimentId,
+                clientRequestId=interpretationRequest.clientRequestId,
+                requestHash=requestHash,
+            )
+        except ResultInterpretationRequestConflictError as error:
+            raise ApiError(
+                "CLIENT_REQUEST_ID_REUSED",
+                409,
+                "clientRequestId is already bound to a different persisted request.",
+                details={"retryable": False},
+            ) from error
+        if persistedExchange is not None:
+            _appendResultInterpretationAuditSafely(
+                database,
+                ownerUserId=ownerUserId,
+                experimentId=experimentId,
+                action="INTERPRETATION_REPLAYED",
+                metadata={
+                    "resultHash": resultHash,
+                    "conversationHash": conversationHash,
+                    "clientRequestHash": clientRequestHash,
+                    "historyPersisted": True,
+                    "providerCallMade": False,
+                },
+                traceId=getattr(request.state, "traceId", None),
+            )
+            return {
+                "schemaVersion": "1.0.0",
+                "conversationId": persistedExchange["conversationId"],
+                "clientRequestId": persistedExchange["clientRequestId"],
+                "experimentId": experimentId,
+                "resultHash": resultHash,
+                "historyPersisted": True,
+                "message": persistedExchange["assistantMessage"],
+            }
+
+        validatePersistedInterpretationConversation(
+            database=database,
+            ownerUserId=ownerUserId,
+            experimentId=experimentId,
+            interpretationRequest=interpretationRequest,
+        )
+        config = cognition.getConfig(credentialId)
+        try:
+            run = await cognition.interpretExperimentResult(
+                sessionId=credentialId,
+                result=authoritativeResult,
+                messages=tuple(
+                    message.model_dump(mode="json") for message in interpretationRequest.messages
+                ),
+                language=interpretationRequest.language,
+                initial=interpretationRequest.mode == "INITIAL",
+                includeAnalysisSummary=interpretationRequest.reasoningSummaryRequested,
+                progressObserver=progressObserver,
+            )
+        except CredentialNotConfiguredError as error:
+            raise ApiError(
+                "LLM_CREDENTIAL_NOT_CONFIGURED",
+                409,
+                "Configure a temporary session API key before asking the result interpreter.",
+                details={"retryable": False},
+            ) from error
+        except ModelGatewayError as error:
+            _appendResultInterpretationAuditSafely(
+                database,
+                ownerUserId=ownerUserId,
+                experimentId=experimentId,
+                action="INTERPRETATION_FAILED",
+                metadata={
+                    "resultHash": resultHash,
+                    "conversationHash": conversationHash,
+                    "clientRequestHash": clientRequestHash,
+                    "language": interpretationRequest.language,
+                    "mode": interpretationRequest.mode,
+                    "reasoningSummaryRequested": (interpretationRequest.reasoningSummaryRequested),
+                    "provider": config.provider,
+                    "model": config.model,
+                    "thinkingEnabled": config.thinking_enabled,
+                    "failureCode": error.code.value,
+                    "retryable": error.retryable,
+                    "providerAttempts": max(0, error.attempts),
+                    "uncertainBillableAttempts": max(
+                        0,
+                        error.uncertainBillableAttempts,
+                    ),
+                    "repairUsed": error.repairUsed,
+                },
+                traceId=getattr(request.state, "traceId", None),
+            )
+            raise _modelGatewayApiError(error) from error
+        except ValueError as error:
+            raise ApiError(
+                "RESULT_INTERPRETATION_CONTEXT_INVALID",
+                422,
+                "The result interpretation context was invalid.",
+                details={"retryable": False},
+            ) from error
+        except Exception as error:
+            # 上游未知异常只按类型记录；正文可能包含供应商响应或请求对象。
+            LOGGER.error(
+                "Unexpected result interpretation failure: traceId=%s errorType=%s",
+                getattr(request.state, "traceId", "unavailable"),
+                type(error).__name__,
+            )
+            raise ApiError(
+                "RESULT_INTERPRETATION_INTERNAL_ERROR",
+                500,
+                "The result interpretation could not be completed safely.",
+                details={
+                    "retryable": True,
+                    # 未知异常可能发生在供应商已接收请求之后，保守提示计费不确定性。
+                    "uncertainBillableAttempts": 1,
+                },
+            ) from error
+
+        answer = run.interpretation
+        createdAt = datetime.now(UTC).isoformat()
+        messageId = f"interpretation-{uuid.uuid4().hex[:24]}"
+        response: dict[str, Any] = {
+            "schemaVersion": "1.0.0",
+            "conversationId": interpretationRequest.conversationId,
+            "clientRequestId": interpretationRequest.clientRequestId,
+            "experimentId": experimentId,
+            "resultHash": run.result_hash,
+            "historyPersisted": False,
+            "message": {
+                "id": messageId,
+                "role": "assistant",
+                "language": interpretationRequest.language,
+                "answer": answer.answer,
+                "analysisSummary": answer.analysis_summary,
+                "groundingReferences": list(answer.grounding_references),
+                "followUpSuggestions": list(answer.follow_up_suggestions),
+                "toolActivity": [
+                    {
+                        "tool": activity.tool.value,
+                        "label": activity.label,
+                        "itemCount": activity.item_count,
+                        "truncated": activity.truncated,
+                        "evidenceId": activity.evidence_id,
+                    }
+                    for activity in run.tool_activity
+                ],
+                "provider": run.provider,
+                "model": run.model,
+                "thinkingEnabled": run.thinking_enabled,
+                "streamed": run.streamed,
+                "promptTokens": run.usage.promptTokens,
+                "completionTokens": run.usage.completionTokens,
+                "cachedTokens": run.usage.cachedTokens,
+                "totalTokens": run.usage.totalTokens,
+                "modelCalls": run.model_calls,
+                "transportAttempts": run.transport_attempts,
+                "uncertainBillableAttempts": run.uncertain_billable_attempts,
+                "cacheHit": run.cache_hit,
+                "repairUsed": run.repair_used,
+                "plannerUsed": run.planner_used,
+                "plannerFallbackUsed": run.planner_fallback_used,
+                "failureCodes": list(run.failure_codes),
+                "promptVersion": run.prompt_version,
+                "latencyMs": run.latency_ms,
+                "createdAt": createdAt,
+            },
+        }
+
+        historyPersisted = False
+        try:
+            persistedExchange, historyCreated = database.saveResultInterpretationExchange(
+                ownerUserId=ownerUserId,
+                experimentId=experimentId,
+                conversationId=interpretationRequest.conversationId,
+                clientRequestId=interpretationRequest.clientRequestId,
+                requestHash=requestHash,
+                language=interpretationRequest.language,
+                userMessage=interpretationRequest.messages[-1].content,
+                assistantMessage=response["message"],
+            )
+            historyPersisted = True
+            # 极少数多进程竞争中，另一个进程可能已经先写入同一幂等结果。
+            # 这时必须返回数据库中的首次终态，不能让同一请求 ID 看到两份回答。
+            if not historyCreated:
+                response["message"] = persistedExchange["assistantMessage"]
+        except ResultInterpretationRequestConflictError as error:
+            raise ApiError(
+                "CLIENT_REQUEST_ID_REUSED",
+                409,
+                "clientRequestId is already bound to a different persisted request.",
+                details={
+                    "retryable": False,
+                    "providerAttempts": max(0, run.transport_attempts),
+                },
+            ) from error
+        except ResultInterpretationConversationDeletedError:
+            # 另一个进程可能在模型运行期间完成删除。此时回答仍可交付给当前
+            # 等待者，但绝不重新写入服务器历史。
+            historyPersisted = False
+        except Exception as error:
+            # 用户可能误把凭据粘贴进问题，或数据库暂时不可写。无论哪种情况，
+            # 都不能因为持久化失败而丢弃已经验证且可能已经计费的模型终态。
+            LOGGER.error(
+                "Result interpretation history write failed: traceId=%s errorType=%s",
+                getattr(request.state, "traceId", "unavailable"),
+                type(error).__name__,
+            )
+        response["historyPersisted"] = historyPersisted
+
+        _appendResultInterpretationAuditSafely(
+            database,
+            ownerUserId=ownerUserId,
+            experimentId=experimentId,
+            action="INTERPRETATION_GENERATED",
+            metadata={
+                "resultHash": run.result_hash,
+                "conversationHash": conversationHash,
+                "clientRequestHash": clientRequestHash,
+                "language": interpretationRequest.language,
+                "mode": interpretationRequest.mode,
+                "reasoningSummaryRequested": interpretationRequest.reasoningSummaryRequested,
+                "provider": run.provider,
+                "model": run.model,
+                "thinkingEnabled": run.thinking_enabled,
+                "streamed": run.streamed,
+                "modelCalls": run.model_calls,
+                "transportAttempts": run.transport_attempts,
+                "uncertainBillableAttempts": run.uncertain_billable_attempts,
+                "repairUsed": run.repair_used,
+                "plannerFallbackUsed": run.planner_fallback_used,
+                "failureCodes": list(run.failure_codes),
+                "promptTokens": run.usage.promptTokens,
+                "completionTokens": run.usage.completionTokens,
+                "cachedTokens": run.usage.cachedTokens,
+                "tools": [activity.tool.value for activity in run.tool_activity],
+                "truncatedTools": [
+                    activity.tool.value for activity in run.tool_activity if activity.truncated
+                ],
+                "historyPersisted": historyPersisted,
+            },
+            traceId=getattr(request.state, "traceId", None),
+        )
+        return response
+
+    def resultInterpretationContext(
+        *,
+        experimentId: str,
+        interpretationRequest: ResultInterpretationChatRequest,
+        request: Request,
+        sessionId: str,
+    ) -> tuple[str, str, dict[str, Any], str]:
+        _validateResultInterpretationPrivateInput(interpretationRequest)
+        ownerUserId = _sessionId(sessionId)
+        credentialId = credentialSessionId(request, ownerUserId)
+        database: Database = request.app.state.database
+        # 放在单飞缓存查找之前，避免删除后的一分钟完成态缓存谎报仍已持久化。
+        ensureInterpretationConversationNotDeleted(
+            database=database,
+            ownerUserId=ownerUserId,
+            experimentId=experimentId,
+            conversationId=interpretationRequest.conversationId,
+        )
+        experimentService: ExperimentService = request.app.state.experimentService
         # 先按 owner 读取，防止客户端通过提交结果正文或猜测 ID 跨用户取数。
         authoritativeResult = experimentService.getResults(experimentId, ownerUserId)
         requestHash = canonicalRequestHash(
@@ -1646,112 +2168,41 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 "request": interpretationRequest.model_dump(mode="json"),
             }
         )
+        return ownerUserId, credentialId, authoritativeResult, requestHash
 
-        async def generateInterpretation() -> dict[str, Any]:
-            try:
-                run = await cognition.interpretExperimentResult(
-                    sessionId=credentialId,
-                    result=authoritativeResult,
-                    messages=tuple(
-                        message.model_dump(mode="json")
-                        for message in interpretationRequest.messages
-                    ),
-                    language=interpretationRequest.language,
-                    initial=interpretationRequest.mode == "INITIAL",
-                    includeAnalysisSummary=(interpretationRequest.reasoningSummaryRequested),
-                )
-            except CredentialNotConfiguredError as error:
-                raise ApiError(
-                    "LLM_CREDENTIAL_NOT_CONFIGURED",
-                    409,
-                    "Configure a temporary session API key before asking the result interpreter.",
-                ) from error
-            except ModelGatewayError as error:
-                raise ApiError(error.code.value, 502, str(error)) from error
-            except ValueError as error:
-                raise ApiError(
-                    "RESULT_INTERPRETATION_CONTEXT_INVALID",
-                    422,
-                    str(error),
-                ) from error
+    @appInstance.post("/api/v1/experiments/{experimentId}/interpretation-chat")
+    async def interpretExperimentResults(
+        experimentId: str,
+        interpretationRequest: ResultInterpretationChatRequest,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        """兼容端点：上游仍流式接收，浏览器在最终严格校验后一次取得 JSON。"""
 
-            answer = run.interpretation
-            createdAt = datetime.now(UTC).isoformat()
-            messageId = f"interpretation-{uuid.uuid4().hex[:24]}"
-            database.appendAuditEvent(
-                ownerUserId,
-                "RESULT_INTERPRETATION",
-                experimentId,
-                "INTERPRETATION_GENERATED",
-                {
-                    "resultHash": run.result_hash,
-                    "conversationHash": hashlib.sha256(
-                        interpretationRequest.conversationId.encode("utf-8")
-                    ).hexdigest(),
-                    "clientRequestHash": hashlib.sha256(
-                        interpretationRequest.clientRequestId.encode("utf-8")
-                    ).hexdigest(),
-                    "language": interpretationRequest.language,
-                    "mode": interpretationRequest.mode,
-                    "reasoningSummaryRequested": (interpretationRequest.reasoningSummaryRequested),
-                    "provider": run.provider,
-                    "model": run.model,
-                    "modelCalls": run.model_calls,
-                    "promptTokens": run.usage.promptTokens,
-                    "completionTokens": run.usage.completionTokens,
-                    "cachedTokens": run.usage.cachedTokens,
-                    "tools": [activity.tool.value for activity in run.tool_activity],
-                    "truncatedTools": [
-                        activity.tool.value for activity in run.tool_activity if activity.truncated
-                    ],
-                },
-            )
-            return {
-                "schemaVersion": "1.0.0",
-                "conversationId": interpretationRequest.conversationId,
-                "clientRequestId": interpretationRequest.clientRequestId,
-                "experimentId": experimentId,
-                "resultHash": run.result_hash,
-                "message": {
-                    "id": messageId,
-                    "role": "assistant",
-                    "language": interpretationRequest.language,
-                    "answer": answer.answer,
-                    "analysisSummary": answer.analysis_summary,
-                    "groundingReferences": list(answer.grounding_references),
-                    "followUpSuggestions": list(answer.follow_up_suggestions),
-                    "toolActivity": [
-                        {
-                            "tool": activity.tool.value,
-                            "label": activity.label,
-                            "itemCount": activity.item_count,
-                            "truncated": activity.truncated,
-                            "evidenceId": activity.evidence_id,
-                        }
-                        for activity in run.tool_activity
-                    ],
-                    "provider": run.provider,
-                    "model": run.model,
-                    "promptTokens": run.usage.promptTokens,
-                    "completionTokens": run.usage.completionTokens,
-                    "cachedTokens": run.usage.cachedTokens,
-                    "totalTokens": run.usage.totalTokens,
-                    "modelCalls": run.model_calls,
-                    "cacheHit": run.cache_hit,
-                    "repairUsed": run.repair_used,
-                    "plannerUsed": run.planner_used,
-                    "promptVersion": run.prompt_version,
-                    "latencyMs": run.latency_ms,
-                    "createdAt": createdAt,
-                },
-            }
-
+        ownerUserId, credentialId, authoritativeResult, requestHash = resultInterpretationContext(
+            experimentId=experimentId,
+            interpretationRequest=interpretationRequest,
+            request=request,
+            sessionId=sessionId,
+        )
         singleFlight: ResultInterpretationSingleFlight = (
             request.app.state.resultInterpretationSingleFlight
         )
+
+        async def generateInterpretation() -> dict[str, Any]:
+            return await generateResultInterpretation(
+                experimentId=experimentId,
+                interpretationRequest=interpretationRequest,
+                request=request,
+                ownerUserId=ownerUserId,
+                credentialId=credentialId,
+                authoritativeResult=authoritativeResult,
+                requestHash=requestHash,
+            )
+
         try:
             return await singleFlight.execute(
-                principalKey=credentialId,
+                principalKey=ownerUserId,
                 clientRequestId=interpretationRequest.clientRequestId,
                 requestHash=requestHash,
                 operation=generateInterpretation,
@@ -1767,6 +2218,337 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 "RESULT_INTERPRETATION_BUSY",
                 503,
                 "Too many result interpretation requests are active. Retry shortly.",
+            ) from error
+
+    @appInstance.post("/api/v1/experiments/{experimentId}/interpretation-chat/stream")
+    async def streamExperimentResultInterpretation(
+        experimentId: str,
+        interpretationRequest: ResultInterpretationChatRequest,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> StreamingResponse:
+        """以 SSE 推送安全阶段、片段计数和最终已验证结构化回答。"""
+
+        ownerUserId, credentialId, authoritativeResult, requestHash = resultInterpretationContext(
+            experimentId=experimentId,
+            interpretationRequest=interpretationRequest,
+            request=request,
+            sessionId=sessionId,
+        )
+        singleFlight: ResultInterpretationSingleFlight = (
+            request.app.state.resultInterpretationSingleFlight
+        )
+        progressQueue: asyncio.Queue[ModelStreamProgress] = asyncio.Queue(maxsize=64)
+
+        async def observeProgress(progress: ModelStreamProgress) -> None:
+            if progressQueue.full():
+                with suppress(asyncio.QueueEmpty):
+                    progressQueue.get_nowait()
+            progressQueue.put_nowait(progress)
+
+        async def generateInterpretation() -> dict[str, Any]:
+            return await generateResultInterpretation(
+                experimentId=experimentId,
+                interpretationRequest=interpretationRequest,
+                request=request,
+                ownerUserId=ownerUserId,
+                credentialId=credentialId,
+                authoritativeResult=authoritativeResult,
+                requestHash=requestHash,
+                progressObserver=observeProgress,
+            )
+
+        async def eventStream():
+            startedAt = time.perf_counter()
+            currentStage = "PREPARING"
+            executionTask: asyncio.Task[dict[str, Any]] | None = None
+            progressTask: asyncio.Task[ModelStreamProgress] | None = None
+            terminalRecorded = False
+
+            def recordTerminal(outcome: Literal["success", "error", "cancelled"]) -> None:
+                nonlocal terminalRecorded
+                if terminalRecorded:
+                    return
+                runtimeMetrics.recordSseTerminal(
+                    durationMs=(time.perf_counter() - startedAt) * 1_000,
+                    outcome=outcome,
+                )
+                terminalRecorded = True
+
+            try:
+                yield _sseFrame(
+                    "status",
+                    {
+                        "schemaVersion": "1.0.0",
+                        "stage": currentStage,
+                        "elapsedMs": 0,
+                    },
+                )
+                executionTask = asyncio.create_task(
+                    singleFlight.execute(
+                        principalKey=ownerUserId,
+                        clientRequestId=interpretationRequest.clientRequestId,
+                        requestHash=requestHash,
+                        operation=generateInterpretation,
+                    ),
+                    name=(
+                        f"result-interpretation-stream:{interpretationRequest.clientRequestId[:32]}"
+                    ),
+                )
+                while not executionTask.done():
+                    progressTask = asyncio.create_task(progressQueue.get())
+                    done, _pending = await asyncio.wait(
+                        {executionTask, progressTask},
+                        timeout=2.0,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if progressTask in done:
+                        progress = progressTask.result()
+                        currentStage = progress.stage.value
+                        yield _sseFrame(
+                            "progress",
+                            {
+                                "schemaVersion": "1.0.0",
+                                "stage": currentStage,
+                                "elapsedMs": round(
+                                    (time.perf_counter() - startedAt) * 1_000,
+                                    3,
+                                ),
+                                "chunkCount": progress.chunkCount,
+                                "answerChunkCount": progress.answerChunkCount,
+                                "reasoningChunkCount": progress.reasoningChunkCount,
+                                "attempt": progress.attempt,
+                                "repair": progress.repair,
+                            },
+                        )
+                    else:
+                        progressTask.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await progressTask
+                    if executionTask not in done and progressTask not in done:
+                        yield _sseFrame(
+                            "status",
+                            {
+                                "schemaVersion": "1.0.0",
+                                "stage": currentStage,
+                                "elapsedMs": round(
+                                    (time.perf_counter() - startedAt) * 1_000,
+                                    3,
+                                ),
+                            },
+                        )
+                response = await executionTask
+                recordTerminal("success")
+                yield _sseFrame("final", response)
+            except (SingleFlightRequestConflictError, SingleFlightCapacityError) as error:
+                code = (
+                    "CLIENT_REQUEST_ID_REUSED"
+                    if isinstance(error, SingleFlightRequestConflictError)
+                    else "RESULT_INTERPRETATION_BUSY"
+                )
+                statusCode = 409 if isinstance(error, SingleFlightRequestConflictError) else 503
+                recordTerminal("error")
+                yield _sseFrame(
+                    "error",
+                    {
+                        "schemaVersion": "1.0.0",
+                        "code": code,
+                        "message": "The result interpretation request could not be started.",
+                        "retryable": statusCode == 503,
+                        "httpStatus": statusCode,
+                        "traceId": getattr(request.state, "traceId", None),
+                    },
+                )
+            except ApiError as error:
+                recordTerminal("error")
+                yield _sseFrame(
+                    "error",
+                    {
+                        "schemaVersion": "1.0.0",
+                        **_safeResultInterpretationErrorDetails(error),
+                        "code": error.code,
+                        "message": error.message,
+                        "httpStatus": error.statusCode,
+                        "traceId": getattr(request.state, "traceId", None),
+                    },
+                )
+            except Exception as error:
+                # 响应头已经发出后只能用 SSE 报告失败；禁止回显异常正文或堆栈。
+                LOGGER.error(
+                    "Unexpected result interpretation stream failure: traceId=%s errorType=%s",
+                    getattr(request.state, "traceId", "unavailable"),
+                    type(error).__name__,
+                )
+                recordTerminal("error")
+                yield _sseFrame(
+                    "error",
+                    {
+                        "schemaVersion": "1.0.0",
+                        "code": "RESULT_INTERPRETATION_INTERNAL_ERROR",
+                        "message": "The result interpretation stream ended unexpectedly.",
+                        "retryable": True,
+                        "httpStatus": 500,
+                        # 未知错误可能发生在供应商已接收请求之后，不能宣称未计费。
+                        "uncertainBillableAttempts": 1,
+                        "traceId": getattr(request.state, "traceId", None),
+                    },
+                )
+            finally:
+                if not terminalRecorded:
+                    recordTerminal("cancelled")
+                if progressTask is not None and not progressTask.done():
+                    progressTask.cancel()
+                if executionTask is not None and not executionTask.done():
+                    # 只取消本次 SSE 等待；单飞协调器会保护已经可能计费的底层调用。
+                    executionTask.cancel()
+
+        return StreamingResponse(
+            eventStream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-store, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @appInstance.get("/api/v1/experiments/{experimentId}/interpretation-conversations")
+    async def listResultInterpretationConversations(
+        experimentId: str,
+        request: Request,
+        limit: Annotated[int, Query(ge=1, le=300)] = 300,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        """列出当前用户在指定实验中已经完整验证并持久化的 AI 对话。"""
+
+        ownerUserId = _sessionId(sessionId)
+        experimentService: ExperimentService = request.app.state.experimentService
+        # 所有历史端点都先经过实验所有权检查，避免借会话 ID 枚举其他用户数据。
+        # 只检查所有权而不要求结果仍有效；即使实验后来被作废，用户也必须
+        # 能查看或删除自己此前保存的对话。
+        experimentService.getExperiment(experimentId, ownerUserId)
+        database: Database = request.app.state.database
+        return {
+            "schemaVersion": "1.0.0",
+            "items": database.listResultInterpretationConversations(
+                ownerUserId,
+                experimentId=experimentId,
+                limit=limit,
+            ),
+        }
+
+    @appInstance.get(
+        "/api/v1/experiments/{experimentId}/interpretation-conversations/{conversationId}"
+    )
+    async def getResultInterpretationConversation(
+        experimentId: str,
+        conversationId: str,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        """恢复当前用户的一段完整问答；API Key 与供应商私有推理从未入库。"""
+
+        ownerUserId = _sessionId(sessionId)
+        experimentService: ExperimentService = request.app.state.experimentService
+        experimentService.getExperiment(experimentId, ownerUserId)
+        database: Database = request.app.state.database
+        conversation = database.getResultInterpretationConversation(
+            ownerUserId=ownerUserId,
+            experimentId=experimentId,
+            conversationId=conversationId,
+        )
+        if conversation is None:
+            raise ApiError(
+                "RESULT_INTERPRETATION_CONVERSATION_NOT_FOUND",
+                404,
+                "The saved result interpretation conversation was not found.",
+            )
+
+        messages: list[dict[str, Any]] = []
+        for exchange in conversation["exchanges"]:
+            userMessageId = hashlib.sha256(
+                f"user:{exchange['clientRequestId']}".encode()
+            ).hexdigest()[:24]
+            messages.append(
+                {
+                    "id": f"persisted-user-{userMessageId}",
+                    "role": "user",
+                    "language": exchange["language"],
+                    "content": exchange["userMessage"],
+                    "createdAt": exchange["createdAt"],
+                }
+            )
+            messages.append(exchange["assistantMessage"])
+        return {
+            "schemaVersion": "1.0.0",
+            "conversationId": conversation["conversationId"],
+            "experimentId": conversation["experimentId"],
+            "language": conversation["language"],
+            "createdAt": conversation["createdAt"],
+            "updatedAt": conversation["updatedAt"],
+            "messages": messages,
+        }
+
+    @appInstance.delete(
+        "/api/v1/experiments/{experimentId}/interpretation-conversations/{conversationId}"
+    )
+    async def deleteResultInterpretationConversation(
+        experimentId: str,
+        conversationId: str,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        """删除当前用户的一段解释历史，不删除实验、结果或其他会话。"""
+
+        ownerUserId = _sessionId(sessionId)
+        experimentService: ExperimentService = request.app.state.experimentService
+        experimentService.getExperiment(experimentId, ownerUserId)
+        database: Database = request.app.state.database
+        conversationHash = hashlib.sha256(conversationId.encode()).hexdigest()
+
+        async def performDelete() -> dict[str, Any]:
+            database.deleteResultInterpretationConversation(
+                ownerUserId=ownerUserId,
+                experimentId=experimentId,
+                conversationId=conversationId,
+                auditPayload={"conversationHash": conversationHash},
+            )
+            return {
+                "schemaVersion": "1.0.0",
+                "deleted": True,
+                "conversationId": conversationId,
+            }
+
+        singleFlight: ResultInterpretationSingleFlight = (
+            request.app.state.resultInterpretationSingleFlight
+        )
+        try:
+            # 与该账号的模型生成共享排他锁，保证“删除成功”之后不会被一个
+            # 先前已排队的回答重新插入；稳定请求键也覆盖删除响应丢失后的重试。
+            return await singleFlight.execute(
+                principalKey=ownerUserId,
+                clientRequestId=f"delete-{conversationHash}",
+                requestHash=canonicalRequestHash(
+                    {
+                        "ownerUserId": ownerUserId,
+                        "experimentId": experimentId,
+                        "conversationHash": conversationHash,
+                        "operation": "DELETE_INTERPRETATION_CONVERSATION",
+                    }
+                ),
+                operation=performDelete,
+            )
+        except SingleFlightRequestConflictError as error:
+            raise ApiError(
+                "RESULT_INTERPRETATION_DELETE_CONFLICT",
+                409,
+                "The conversation deletion conflicted with a recent operation.",
+            ) from error
+        except SingleFlightCapacityError as error:
+            raise ApiError(
+                "RESULT_INTERPRETATION_BUSY",
+                503,
+                "Too many result interpretation operations are active. Retry shortly.",
             ) from error
 
     @appInstance.get("/api/v1/experiments/{experimentId}/runs")
@@ -2171,7 +2953,10 @@ def _rateLimitRules(request: Request) -> list[RateLimitRule]:
     isExperimentCreate = path == "/api/v1/experiments"
     isStudyRun = path == "/api/v1/studies/run"
     isResultInterpretation = bool(
-        re.fullmatch(r"/api/v1/experiments/[^/]+/interpretation-chat", path)
+        re.fullmatch(
+            r"/api/v1/experiments/[^/]+/interpretation-chat(?:/stream)?",
+            path,
+        )
     )
     isLimitedWrite = (
         isExperimentCreate
@@ -2189,16 +2974,23 @@ def _rateLimitRules(request: Request) -> list[RateLimitRule]:
                 r"/api/v1/llm/(?:config|test)",
                 r"/api/v1/evals/run",
                 r"/api/v1/experiments/[^/]+/(start|cancel|invalidate|export)",
+                r"/api/v1/experiments/[^/]+/interpretation-conversations/[^/]+",
             )
         )
     )
     if not isLimitedWrite:
         return []
 
+    authContext = getattr(request.state, "authContext", None)
+    isAuthenticatedRequest = isinstance(authContext, AuthContext)
     rawSessionId = (
-        request.cookies.get(AUTH_COOKIE_NAME)
-        or request.headers.get("X-Session-ID", "missing-session")
-    )[:128]
+        authContext.authSessionId
+        if isAuthenticatedRequest
+        else (
+            request.cookies.get(AUTH_COOKIE_NAME)
+            or request.headers.get("X-Session-ID", "missing-session")
+        )[:128]
+    )
     sessionDigest = hashlib.blake2s(rawSessionId.encode(), digest_size=8).hexdigest()
     rules = [
         RateLimitRule(key=f"write:ip:{clientIp}", limit=30),
@@ -2219,10 +3011,15 @@ def _rateLimitRules(request: Request) -> list[RateLimitRule]:
             )
         )
     if isResultInterpretation:
-        # 解释端点会调用外部付费模型；同时约束出口 IP 与登录会话，降低密钥滥用风险。
+        # 解释端点会调用外部付费模型。生产环境以已验证的 authSessionId 严格
+        # 限制每个会话；共享校园 NAT 的 IP 桶只承担异常流量兜底。
+        interpretationIpLimit = 120 if isAuthenticatedRequest else 8
         rules.extend(
             (
-                RateLimitRule(key=f"result-interpretation:ip:{clientIp}", limit=8),
+                RateLimitRule(
+                    key=f"result-interpretation:ip:{clientIp}",
+                    limit=interpretationIpLimit,
+                ),
                 RateLimitRule(
                     key=f"result-interpretation:session:{sessionDigest}",
                     limit=8,
@@ -2233,12 +3030,27 @@ def _rateLimitRules(request: Request) -> list[RateLimitRule]:
 
 
 def _clientIp(request: Request) -> str:
-    forwardedFor = request.headers.get("X-Forwarded-For")
+    directPeer = (request.client.host if request.client else "unknown-client")[:64]
+    try:
+        peerAddress = ipaddress.ip_address(directPeer)
+    except ValueError:
+        return directPeer
+
+    # 公网客户端可以自行构造 X-Forwarded-For；只有回环或私有容器网络中的
+    # 受控反向代理才有权覆盖客户端地址。生产链路由宝塔 Nginx 明确写入
+    # X-Real-IP；Caddy 直连回退则读取代理追加在最右侧的 X-Forwarded-For。
+    if not (peerAddress.is_loopback or peerAddress.is_private):
+        return peerAddress.compressed
+    candidates = [request.headers.get("X-Real-IP", "")]
+    forwardedFor = request.headers.get("X-Forwarded-For", "")
     if forwardedFor:
-        firstAddress = forwardedFor.split(",", maxsplit=1)[0].strip()
-        if firstAddress:
-            return firstAddress[:64]
-    return (request.client.host if request.client else "unknown-client")[:64]
+        candidates.append(forwardedFor.rsplit(",", maxsplit=1)[-1])
+    for candidate in candidates:
+        try:
+            return ipaddress.ip_address(candidate.strip()).compressed
+        except ValueError:
+            continue
+    return peerAddress.compressed
 
 
 def _addSecurityHeaders(response: Response, traceId: str) -> None:

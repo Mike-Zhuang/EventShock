@@ -21,6 +21,7 @@ from backend.app.cognition import (
     ResultInterpretationAnswer,
     ResultToolPlan,
 )
+from backend.app.cognition.gateway import validateEvidenceReferences
 from backend.app.cognition.result_interpreter import (
     DEFAULT_RESULT_TOOLS,
     MAX_TOOL_CONTEXT_BYTES,
@@ -28,6 +29,7 @@ from backend.app.cognition.result_interpreter import (
     executeResultTools,
     toolResultsPayload,
 )
+from backend.app.cognition.streaming import ModelStreamProgress, ModelStreamStage
 from backend.app.schemas import ResultInterpretationChatRequest
 
 SESSION_ID = "result-interpreter-session-001"
@@ -163,7 +165,7 @@ def answerWithReferences(
 
 @dataclass(frozen=True, slots=True)
 class FakeOutcome:
-    data: BaseModel
+    data: BaseModel | ModelGatewayError
     cacheHit: bool = False
     repairUsed: bool = False
 
@@ -183,6 +185,8 @@ class FakeGateway:
         self.harness.requests.append(request)
         self.harness.schemas.append(schema)
         self.harness.policies.append(policy)
+        if isinstance(self.outcome.data, ModelGatewayError):
+            raise self.outcome.data
         if not isinstance(self.outcome.data, schema):
             raise AssertionError("fake outcome does not match the requested schema")
         return ModelResult(
@@ -221,7 +225,11 @@ class GatewayHarness:
         return gateway
 
 
-def configuredService(outcomes: Sequence[FakeOutcome]) -> tuple[CognitionService, GatewayHarness]:
+def configuredService(
+    outcomes: Sequence[FakeOutcome],
+    *,
+    thinkingEnabled: bool = False,
+) -> tuple[CognitionService, GatewayHarness]:
     harness = GatewayHarness(outcomes)
     service = CognitionService(gatewayFactory=harness)
     service.setConfig(
@@ -229,6 +237,7 @@ def configuredService(outcomes: Sequence[FakeOutcome]) -> tuple[CognitionService
         apiKey=API_KEY,
         provider="zhipu",
         model="glm-5.2",
+        thinkingEnabled=thinkingEnabled,
         maxTokens=4_096,
     )
     return service, harness
@@ -355,7 +364,7 @@ def test_initial_interpretation_uses_all_read_only_tools_and_one_model_call() ->
     assert "SECRET RAW SOURCE BODY" not in harness.requests[0].userContent
     assert all(gateway.closed for gateway in harness.gateways)
     assert all(not policy.allow_rule_fallback for policy in harness.policies)
-    assert all(policy.timeout_seconds == 20 for policy in harness.policies)
+    assert all(policy.timeout_seconds == 120 for policy in harness.policies)
     assert all(policy.max_transport_attempts == 1 for policy in harness.policies)
     assert harness.caches == [None]
     assert harness.requests[0].samplingConfig.max_tokens == 4_096
@@ -373,7 +382,8 @@ def test_follow_up_plans_tools_and_keeps_mandatory_boundary_slices() -> None:
         "result:paired-deltas",
     )
     service, harness = configuredService(
-        [FakeOutcome(plan), FakeOutcome(answerWithReferences(references, includeSummary=False))]
+        [FakeOutcome(plan), FakeOutcome(answerWithReferences(references, includeSummary=False))],
+        thinkingEnabled=True,
     )
 
     run = asyncio.run(
@@ -405,8 +415,62 @@ def test_follow_up_plans_tools_and_keeps_mandatory_boundary_slices() -> None:
     assert "result_tool_outputs" in harness.requests[1].userContent
     assert harness.caches == [None, None]
     assert [request.samplingConfig.max_tokens for request in harness.requests] == [
-        2_048,
+        1_024,
         4_096,
+    ]
+    assert [request.samplingConfig.thinking_enabled for request in harness.requests] == [
+        False,
+        True,
+    ]
+
+
+def test_follow_up_planner_failure_falls_back_to_all_bounded_tools() -> None:
+    references = ("result:overview", "result:limitations")
+    service, harness = configuredService(
+        [
+            FakeOutcome(
+                ModelGatewayError(
+                    FailureCode.MODEL_TIMEOUT,
+                    "planner timed out with internal provider detail",
+                    retryable=True,
+                    attempts=1,
+                    uncertainBillableAttempts=1,
+                )
+            ),
+            FakeOutcome(answerWithReferences(references, includeSummary=False)),
+        ]
+    )
+    progressEvents: list[ModelStreamProgress] = []
+
+    async def observeProgress(progress: ModelStreamProgress) -> None:
+        progressEvents.append(progress)
+
+    run = asyncio.run(
+        service.interpretExperimentResult(
+            sessionId=SESSION_ID,
+            result=sampleResult(),
+            messages=({"role": "user", "content": "Why did the interval widen?"},),
+            language="en",
+            initial=False,
+            includeAnalysisSummary=False,
+            progressObserver=observeProgress,
+        )
+    )
+
+    assert run.planner_used is True
+    assert run.planner_fallback_used is True
+    assert run.transport_attempts == 2
+    assert run.uncertain_billable_attempts == 1
+    assert run.failure_codes == (FailureCode.MODEL_TIMEOUT.value,)
+    assert {activity.tool for activity in run.tool_activity} == set(ResultEvidenceTool)
+    assert harness.policies[0].timeout_seconds == 25
+    assert harness.policies[1].timeout_seconds == 120
+    assert [event.stage for event in progressEvents] == [
+        ModelStreamStage.PREPARING,
+        ModelStreamStage.PLANNING,
+        ModelStreamStage.READING_RESULTS,
+        ModelStreamStage.GENERATING,
+        ModelStreamStage.COMPLETED,
     ]
 
 
@@ -462,6 +526,74 @@ def test_interpretation_answer_rejects_unlisted_inline_reference() -> None:
             ),
             analysis_summary="An invented slice was also checked. [result:not-supplied]",
             grounding_references=("result:overview",),
+        )
+
+
+def test_interpretation_answer_normalizes_duplicate_and_uncited_legal_references() -> None:
+    answer = ResultInterpretationAnswer(
+        answer=(
+            "The paired result changed under the scenario. [result:overview] "
+            "The interval remains uncertain. [result:paired-deltas]"
+        ),
+        analysis_summary="Checked the study limitations. [result:limitations]",
+        grounding_references=(
+            "result:overview",
+            "result:overview",
+            "result:metric-summary",
+            "result:paired-deltas",
+            "result:limitations",
+        ),
+    )
+
+    assert answer.grounding_references == (
+        "result:overview",
+        "result:paired-deltas",
+        "result:limitations",
+    )
+    assert answer.model_dump()["grounding_references"] == (
+        "result:overview",
+        "result:paired-deltas",
+        "result:limitations",
+    )
+    assert "_reported_grounding_references" not in answer.model_dump()
+    # 网关仍能看到被规范化清理的原始 ID，以便执行请求级 allowlist 检查。
+    assert answer.evidenceIds() == {
+        "result:overview",
+        "result:metric-summary",
+        "result:paired-deltas",
+        "result:limitations",
+    }
+
+
+def test_interpretation_answer_does_not_auto_add_inline_reference() -> None:
+    with pytest.raises(ValueError, match="exactly match"):
+        ResultInterpretationAnswer(
+            answer=(
+                "The overview and paired delta were checked. "
+                "[result:overview] [result:paired-deltas]"
+            ),
+            grounding_references=("result:overview",),
+        )
+
+
+def test_interpretation_answer_does_not_hide_uncited_unknown_reference() -> None:
+    answer = ResultInterpretationAnswer(
+        answer="This is bounded scenario evidence. [result:overview]",
+        grounding_references=("result:overview", "result:not-supplied"),
+    )
+
+    assert answer.grounding_references == ("result:overview",)
+    with pytest.raises(ModelGatewayError) as error:
+        validateEvidenceReferences(answer, frozenset({"result:overview"}))
+
+    assert error.value.code is FailureCode.EVIDENCE_ID_UNKNOWN
+
+
+def test_interpretation_answer_rejects_invalid_uncited_reference_before_cleanup() -> None:
+    with pytest.raises(ValueError, match="invalid evidence ID"):
+        ResultInterpretationAnswer(
+            answer="This is bounded scenario evidence. [result:overview]",
+            grounding_references=("result:overview", "result:invalid reference"),
         )
 
 

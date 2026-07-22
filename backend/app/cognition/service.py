@@ -70,6 +70,12 @@ from backend.app.cognition.result_interpreter import (
     toolActivities,
     toolResultsPayload,
 )
+from backend.app.cognition.streaming import (
+    ModelStreamObserver,
+    ModelStreamProgress,
+    ModelStreamStage,
+    emitModelStreamProgress,
+)
 
 SourceType = Literal["OFFICIAL", "REPORTING", "ESTIMATE", "USER_PROVIDED"]
 
@@ -493,6 +499,7 @@ class CognitionService:
         language: ResultLanguage,
         initial: bool,
         includeAnalysisSummary: bool,
+        progressObserver: ModelStreamObserver | None = None,
     ) -> ResultInterpretationRun:
         """用会话级 BYOK 对已完成结果进行只读、可引用的解释。"""
 
@@ -503,10 +510,19 @@ class CognitionService:
             raise ValueError("language must be en or zh-CN")
         resultHash = canonicalHash(result)
         plannerResult: ModelResult[ResultToolPlan] | None = None
+        plannerError: ModelGatewayError | None = None
+        await emitModelStreamProgress(
+            progressObserver,
+            ModelStreamProgress(stage=ModelStreamStage.PREPARING),
+        )
 
         if initial:
             selectedTools = DEFAULT_RESULT_TOOLS
         else:
+            await emitModelStreamProgress(
+                progressObserver,
+                ModelStreamProgress(stage=ModelStreamStage.PLANNING),
+            )
             resultIndex = buildResultIndex(result)
             latestQuestion = messages[-1]["content"]
             plannerPayload = {
@@ -537,25 +553,38 @@ class CognitionService:
                     }
                 ),
                 allowedEvidenceIds=frozenset(),
-                maxTokens=2_048,
+                maxTokens=1_024,
+                thinkingEnabled=False,
+                streamResponse=True,
+                streamObserver=progressObserver,
             )
-            plannerResult = await self._execute(
-                request=plannerRequest,
-                schema=ResultToolPlan,
-                policy=self._interpretationPolicy(),
-                useDecisionCache=False,
-            )
-            # 即使 Planner 遗漏，解释也必须读取研究边界与局限。
-            selectedTools = tuple(
-                dict.fromkeys(
-                    (
-                        ResultEvidenceTool.OVERVIEW,
-                        ResultEvidenceTool.LIMITATIONS,
-                        *plannerResult.data.tools,
+            try:
+                plannerResult = await self._execute(
+                    request=plannerRequest,
+                    schema=ResultToolPlan,
+                    policy=self._interpretationPolicy(stage="planner"),
+                    useDecisionCache=False,
+                )
+                # 即使 Planner 遗漏，解释也必须读取研究边界与局限。
+                selectedTools = tuple(
+                    dict.fromkeys(
+                        (
+                            ResultEvidenceTool.OVERVIEW,
+                            ResultEvidenceTool.LIMITATIONS,
+                            *plannerResult.data.tools,
+                        )
                     )
                 )
-            )
+            except ModelGatewayError as error:
+                # Planner 只是选择只读切片的辅助模型，失败时读取全部有界工具比
+                # 让整轮解释失败更安全；答案阶段仍必须通过完整结构与证据校验。
+                plannerError = error
+                selectedTools = DEFAULT_RESULT_TOOLS
 
+        await emitModelStreamProgress(
+            progressObserver,
+            ModelStreamProgress(stage=ModelStreamStage.READING_RESULTS),
+        )
         toolResults = executeResultTools(result, selectedTools)
         allowedEvidenceIds = frozenset(item.evidence_id for item in toolResults)
         answerPayload = {
@@ -582,6 +611,8 @@ class CognitionService:
             observationHash=canonicalHash(answerPayload),
             allowedEvidenceIds=allowedEvidenceIds,
             maxTokens=4_096,
+            streamResponse=True,
+            streamObserver=progressObserver,
         )
 
         def validateInterpretation(modelResult: ModelResult[Any]) -> None:
@@ -592,10 +623,14 @@ class CognitionService:
                     "gateway returned the wrong result-interpretation schema",
                 )
 
+        await emitModelStreamProgress(
+            progressObserver,
+            ModelStreamProgress(stage=ModelStreamStage.GENERATING),
+        )
         answerResult = await self._execute(
             request=answerRequest,
             schema=ResultInterpretationAnswer,
-            policy=self._interpretationPolicy(),
+            policy=self._interpretationPolicy(stage="answer"),
             resultValidator=validateInterpretation,
             useDecisionCache=False,
         )
@@ -611,11 +646,32 @@ class CognitionService:
         latencyMs = answerResult.latencyMs
         cacheHit = answerResult.cacheHit
         repairUsed = answerResult.repairUsed
+        transportAttempts = answerResult.transportAttempts
+        uncertainBillableAttempts = answerResult.uncertainBillableAttempts
+        failureCodes = list(answerResult.failureCodes)
         if plannerResult is not None:
             usage = plannerResult.usage.plus(usage)
             latencyMs += plannerResult.latencyMs
             cacheHit = plannerResult.cacheHit and cacheHit
             repairUsed = plannerResult.repairUsed or repairUsed
+            transportAttempts += plannerResult.transportAttempts
+            uncertainBillableAttempts += plannerResult.uncertainBillableAttempts
+            failureCodes = [*plannerResult.failureCodes, *failureCodes]
+        elif plannerError is not None:
+            cacheHit = False
+            repairUsed = plannerError.repairUsed or repairUsed
+            transportAttempts += max(0, plannerError.attempts)
+            uncertainBillableAttempts += max(0, plannerError.uncertainBillableAttempts)
+            failureCodes.insert(0, plannerError.code)
+
+        await emitModelStreamProgress(
+            progressObserver,
+            ModelStreamProgress(
+                stage=ModelStreamStage.COMPLETED,
+                elapsedMs=latencyMs,
+                chunkCount=0,
+            ),
+        )
 
         return ResultInterpretationRun(
             interpretation=answerResult.data,
@@ -629,11 +685,17 @@ class CognitionService:
                 cachedTokens=usage.cachedTokens,
             ),
             latency_ms=latencyMs,
-            model_calls=2 if plannerResult is not None else 1,
+            model_calls=max(1, transportAttempts),
             cache_hit=cacheHit,
             repair_used=repairUsed,
-            planner_used=plannerResult is not None,
+            planner_used=not initial,
             prompt_version=RESULT_INTERPRETATION_PROMPT.version,
+            planner_fallback_used=plannerError is not None,
+            thinking_enabled=runtime.thinkingEnabled,
+            streamed=True,
+            transport_attempts=transportAttempts,
+            uncertain_billable_attempts=uncertainBillableAttempts,
+            failure_codes=tuple(code.value for code in failureCodes),
         )
 
     def getTelemetry(self) -> CognitionTelemetryView:
@@ -757,6 +819,9 @@ class CognitionService:
         allowedEvidenceIds: frozenset[str],
         allowedActionValues: frozenset[str] = frozenset(),
         maxTokens: int | None = None,
+        thinkingEnabled: bool | None = None,
+        streamResponse: bool = False,
+        streamObserver: ModelStreamObserver | None = None,
     ) -> ModelRequest:
         return ModelRequest(
             provider=runtime.provider,
@@ -772,11 +837,15 @@ class CognitionService:
             allowedEvidenceIds=allowedEvidenceIds,
             allowedActionValues=allowedActionValues,
             samplingConfig=SamplingConfig(
-                thinking_enabled=runtime.thinkingEnabled,
+                thinking_enabled=(
+                    runtime.thinkingEnabled if thinkingEnabled is None else thinkingEnabled
+                ),
                 do_sample=False,
                 max_tokens=min(runtime.maxTokens, maxTokens or runtime.maxTokens),
             ),
             apiKey=runtime.apiKey,
+            streamResponse=streamResponse,
+            streamObserver=streamObserver,
         )
 
     def _recordResult(self, result: ModelResult[Any]) -> None:
@@ -802,12 +871,14 @@ class CognitionService:
             update={"allow_rule_fallback": allowRuleFallback},
         )
 
-    def _interpretationPolicy(self) -> ModelPolicy:
-        """限制交互解释的最坏等待与计费尝试，保持在前端 120 秒预算内。"""
+    def _interpretationPolicy(self, *, stage: Literal["planner", "answer"]) -> ModelPolicy:
+        """分离规划与回答预算；流式刷新体验但仍保留单次调用总上限。"""
 
         return self._modelPolicy.model_copy(
             update={
-                "timeout_seconds": min(self._modelPolicy.timeout_seconds, 20.0),
+                # 最坏为 Planner 初次+修复 50 秒、答案初次+修复 240 秒，仍低于
+                # 生产代理 300 秒上限；单次传输不做自动重试，避免重复计费。
+                "timeout_seconds": 25.0 if stage == "planner" else 120.0,
                 "max_transport_attempts": 1,
                 "base_backoff_seconds": 0.0,
                 "allow_rule_fallback": False,

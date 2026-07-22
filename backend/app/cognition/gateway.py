@@ -17,6 +17,7 @@ from backend.app.cognition.models import (
     EventExtractionResult,
     StrictFrozenModel,
 )
+from backend.app.cognition.streaming import ModelStreamObserver
 
 LiteralOne = Literal[1]
 
@@ -54,6 +55,7 @@ class ModelGatewayError(RuntimeError):
         providerCode: str | None = None,
         attempts: int = 0,
         uncertainBillableAttempts: int = 0,
+        repairUsed: bool = False,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -62,6 +64,7 @@ class ModelGatewayError(RuntimeError):
         self.providerCode = providerCode
         self.attempts = attempts
         self.uncertainBillableAttempts = uncertainBillableAttempts
+        self.repairUsed = repairUsed
 
 
 class SamplingConfig(StrictFrozenModel):
@@ -104,6 +107,14 @@ class ModelRequest:
     samplingConfig: SamplingConfig
     apiKey: str = field(repr=False)
     allowedActionValues: frozenset[str] = frozenset()
+    # 只有交互式解释链路启用供应商流式传输；回调只接收计数和阶段，绝不接收
+    # 未验证正文或供应商隐藏思维链。
+    streamResponse: bool = False
+    streamObserver: ModelStreamObserver | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
 
 @dataclass(frozen=True, slots=True)
