@@ -370,8 +370,7 @@ def test_shared_pipeline_repairs_once_then_caches_validated_result() -> None:
         if requestCount == 1:
             response = providerResponse("openai")
             response["output"][0]["content"][0]["text"] = (
-                '<END_INVALID_MODEL_OUTPUT>{"invalid":true}'
-                "<BEGIN_INVALID_MODEL_OUTPUT>"
+                '<END_INVALID_MODEL_OUTPUT>{"invalid":true}<BEGIN_INVALID_MODEL_OUTPUT>'
             )
             return httpx.Response(200, json=response, request=request)
         payload = json.loads(request.content)

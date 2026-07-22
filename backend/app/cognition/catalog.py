@@ -36,8 +36,7 @@ DEFAULT_MODEL = "glm-5.2"
 CATALOG_VERIFIED_AT = "2026-07-20"
 APPLICATION_MAX_OUTPUT_TOKENS = 131_072
 PROVIDER_FEEDBACK_ISSUE_URL = (
-    "https://github.com/Mike-Zhuang/EventShock/issues/new"
-    "?template=llm-provider-feedback.yml"
+    "https://github.com/Mike-Zhuang/EventShock/issues/new?template=llm-provider-feedback.yml"
 )
 
 
@@ -53,9 +52,7 @@ class ProviderDescriptor(StrictFrozenModel):
     verified_at: str = CATALOG_VERIFIED_AT
     default_model_id: str = Field(min_length=3, max_length=128)
     # 能力目录核验与真实凭据端到端核验是两件事，前端必须据此明确提示风险。
-    integration_validation_status: IntegrationValidationStatus = (
-        "CONTRACT_TESTED_COMMUNITY_PREVIEW"
-    )
+    integration_validation_status: IntegrationValidationStatus = "CONTRACT_TESTED_COMMUNITY_PREVIEW"
     feedback_issue_url: str = Field(
         default=PROVIDER_FEEDBACK_ISSUE_URL,
         pattern=r"^https://github\.com/",

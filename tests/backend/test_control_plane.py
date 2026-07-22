@@ -88,15 +88,12 @@ def test_model_catalog_and_session_secret_lifecycle_are_safe(tmp_path: Path) -> 
     }
     assert providers["openai"]["baseUrl"] == "https://api.openai.com/v1/responses"
     assert providers["openai"]["structuredOutputMode"] == "json_schema"
-    assert providers["zhipu"]["integrationValidationStatus"] == (
-        "REAL_PROJECT_KEY_VERIFIED"
-    )
+    assert providers["zhipu"]["integrationValidationStatus"] == ("REAL_PROJECT_KEY_VERIFIED")
     assert providers["openai"]["integrationValidationStatus"] == (
         "CONTRACT_TESTED_COMMUNITY_PREVIEW"
     )
     assert providers["openai"]["feedbackIssueUrl"] == (
-        "https://github.com/Mike-Zhuang/EventShock/issues/new"
-        "?template=llm-provider-feedback.yml"
+        "https://github.com/Mike-Zhuang/EventShock/issues/new?template=llm-provider-feedback.yml"
     )
     assert providers["openai"]["models"][0]["billingCurrency"] == "USD"
     kimi26 = next(item for item in providers["moonshot"]["models"] if item["id"] == "kimi-k2.6")

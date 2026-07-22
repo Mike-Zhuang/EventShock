@@ -248,9 +248,10 @@ def test_result_tools_cover_every_output_family_without_raw_source_text() -> Non
     assert pathResult.item_count == 120
     assert len(pathResult.payload["series"]["step"]) == 60
     assert len(pathResult.payload["series"]["baseline"]["price"]) == 60
-    assert next(
-        result for result in toolResults if result.tool is ResultEvidenceTool.TRACE
-    ).item_count == 100
+    assert (
+        next(result for result in toolResults if result.tool is ResultEvidenceTool.TRACE).item_count
+        == 100
+    )
     tracePayload = next(
         result for result in toolResults if result.tool is ResultEvidenceTool.TRACE
     ).payload
@@ -262,11 +263,14 @@ def test_result_tools_cover_every_output_family_without_raw_source_text() -> Non
     ).payload
     assert agentPayload["agentFlows"]["retail"]["intervention"]["netVolume"] == 6
     assert "networkMetrics" in agentPayload["runSummaries"]
-    assert next(
-        result
-        for result in toolResults
-        if result.tool is ResultEvidenceTool.COGNITION_DECISIONS
-    ).truncated is True
+    assert (
+        next(
+            result
+            for result in toolResults
+            if result.tool is ResultEvidenceTool.COGNITION_DECISIONS
+        ).truncated
+        is True
+    )
 
 
 def test_result_index_counts_mapping_agent_sections() -> None:
@@ -279,8 +283,7 @@ def test_result_index_counts_mapping_agent_sections() -> None:
 def test_paired_delta_tool_discloses_omitted_metrics() -> None:
     result = sampleResult()
     result["metricSummaries"] = {
-        f"metric-{index:02d}": {"delta": {"median": index}}
-        for index in range(22)
+        f"metric-{index:02d}": {"delta": {"median": index}} for index in range(22)
     }
     result["analysisDiagnostics"] = {
         "preregisteredPrimaryOutcome": "metric-00",
@@ -302,22 +305,14 @@ def test_all_tools_remain_within_aggregate_context_limit_for_large_result() -> N
     result = sampleResult()
     longText = "结构化结果字段" * 2_000
     result["metricSummaries"] = {
-        f"metric-{index:02d}": {
-            "delta": {"median": index, "diagnostic": longText}
-        }
+        f"metric-{index:02d}": {"delta": {"median": index, "diagnostic": longText}}
         for index in range(24)
     }
     result["limitations"] = [longText for _index in range(30)]
     result["eventPackManifest"] = {
         "id": "event-pack-large",
-        "sources": [
-            {"sourceId": f"source-{index}", "title": longText}
-            for index in range(20)
-        ],
-        "claims": [
-            {"claimId": f"claim-{index}", "text": longText}
-            for index in range(30)
-        ],
+        "sources": [{"sourceId": f"source-{index}", "title": longText} for index in range(20)],
+        "claims": [{"claimId": f"claim-{index}", "text": longText} for index in range(30)],
     }
 
     toolResults = executeResultTools(result, DEFAULT_RESULT_TOOLS)
@@ -463,8 +458,7 @@ def test_interpretation_answer_rejects_unlisted_inline_reference() -> None:
     with pytest.raises(ValueError, match="exactly match"):
         ResultInterpretationAnswer(
             answer=(
-                "This is scenario evidence, not a forecast or investment advice. "
-                "[result:overview]"
+                "This is scenario evidence, not a forecast or investment advice. [result:overview]"
             ),
             analysis_summary="An invented slice was also checked. [result:not-supplied]",
             grounding_references=("result:overview",),

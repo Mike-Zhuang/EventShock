@@ -846,9 +846,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                     "region": provider.region,
                     "defaultModel": provider.default_model_id,
                     "catalogVerifiedAt": provider.verified_at,
-                    "integrationValidationStatus": (
-                        provider.integration_validation_status
-                    ),
+                    "integrationValidationStatus": (provider.integration_validation_status),
                     "feedbackIssueUrl": provider.feedback_issue_url,
                     "structuredOutputMode": "/".join(structuredModes),
                     "structuredOutputNote": (
@@ -1660,9 +1658,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                     ),
                     language=interpretationRequest.language,
                     initial=interpretationRequest.mode == "INITIAL",
-                    includeAnalysisSummary=(
-                        interpretationRequest.reasoningSummaryRequested
-                    ),
+                    includeAnalysisSummary=(interpretationRequest.reasoningSummaryRequested),
                 )
             except CredentialNotConfiguredError as error:
                 raise ApiError(
@@ -1697,9 +1693,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                     ).hexdigest(),
                     "language": interpretationRequest.language,
                     "mode": interpretationRequest.mode,
-                    "reasoningSummaryRequested": (
-                        interpretationRequest.reasoningSummaryRequested
-                    ),
+                    "reasoningSummaryRequested": (interpretationRequest.reasoningSummaryRequested),
                     "provider": run.provider,
                     "model": run.model,
                     "modelCalls": run.model_calls,
@@ -1708,9 +1702,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                     "cachedTokens": run.usage.cachedTokens,
                     "tools": [activity.tool.value for activity in run.tool_activity],
                     "truncatedTools": [
-                        activity.tool.value
-                        for activity in run.tool_activity
-                        if activity.truncated
+                        activity.tool.value for activity in run.tool_activity if activity.truncated
                     ],
                 },
             )

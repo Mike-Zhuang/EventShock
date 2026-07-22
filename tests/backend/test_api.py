@@ -776,9 +776,9 @@ def test_result_interpretation_chat_uses_owned_server_result_and_redacted_audit(
             headers={"X-Session-ID": SESSION_A},
             json=requestPayload,
         )
-        auditItems = client.get(
-            "/api/v1/audit-events", headers={"X-Session-ID": SESSION_A}
-        ).json()["items"]
+        auditItems = client.get("/api/v1/audit-events", headers={"X-Session-ID": SESSION_A}).json()[
+            "items"
+        ]
 
     assert missingCredential.status_code == 409
     assert missingCredential.json()["error"]["code"] == "LLM_CREDENTIAL_NOT_CONFIGURED"
@@ -792,9 +792,7 @@ def test_result_interpretation_chat_uses_owned_server_result_and_redacted_audit(
     assert body["message"]["followUpSuggestions"] == ["要继续查看配对差异吗？"]
     assert captured["result"] == persistedResult
     assert "apiKey" not in captured
-    auditEvent = next(
-        item for item in auditItems if item["action"] == "INTERPRETATION_GENERATED"
-    )
+    auditEvent = next(item for item in auditItems if item["action"] == "INTERPRETATION_GENERATED")
     auditText = json.dumps(auditEvent, ensure_ascii=False)
     assert "请解释这次结果" not in auditText
     assert "核对了实验边界" not in auditText

@@ -135,9 +135,7 @@ def toolActivities(
     )
 
 
-def _executeResultTool(
-    result: Mapping[str, Any], tool: ResultEvidenceTool
-) -> ResultToolResult:
+def _executeResultTool(result: Mapping[str, Any], tool: ResultEvidenceTool) -> ResultToolResult:
     metricIds = _outcomeMetricIds(result)
     truncated = False
 
@@ -186,9 +184,7 @@ def _executeResultTool(
             ],
         }
         itemCount = len(pairedRuns)
-        truncated = (
-            len(includedRuns) < len(pairedRuns) or len(metricIds) < len(summaries)
-        )
+        truncated = len(includedRuns) < len(pairedRuns) or len(metricIds) < len(summaries)
     elif tool is ResultEvidenceTool.PATH_SERIES:
         paths = _asMapping(result.get("medianPaths"))
         steps = _asSequence(paths.get("step"))
@@ -200,11 +196,7 @@ def _executeResultTool(
             for scenarioName in ("baseline", "intervention", "delta"):
                 scenario = _asMapping(paths.get(scenarioName))
                 projectedPaths[scenarioName] = {
-                    str(pathName): [
-                        series[index]
-                        for index in sampleIndices
-                        if index < len(series)
-                    ]
+                    str(pathName): [series[index] for index in sampleIndices if index < len(series)]
                     for pathName, rawSeries in scenario.items()
                     if (series := _asSequence(rawSeries))
                 }
@@ -499,12 +491,7 @@ def _sampleIndices(length: int, maximum: int) -> list[int]:
         return list(range(length))
     if maximum == 1:
         return [0]
-    return sorted(
-        {
-            round(index * (length - 1) / (maximum - 1))
-            for index in range(maximum)
-        }
-    )
+    return sorted({round(index * (length - 1) / (maximum - 1)) for index in range(maximum)})
 
 
 def _orderedSubset(values: Sequence[Any] | Any, *, limit: int) -> tuple[str, ...]:
@@ -539,9 +526,7 @@ def _asSequence(value: Any) -> Sequence[Any]:
 
 def _jsonSize(value: Any) -> int:
     return len(
-        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
-            "utf-8"
-        )
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     )
 
 

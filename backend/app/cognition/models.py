@@ -11,9 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 IDENTIFIER_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$"
 INLINE_RESULT_REFERENCE_PATTERN = re.compile(r"\[(result:[^\]\r\n]*)\]")
-VALID_RESULT_REFERENCE_PATTERN = re.compile(
-    r"^result:[A-Za-z0-9][A-Za-z0-9._:-]{0,72}$"
-)
+VALID_RESULT_REFERENCE_PATTERN = re.compile(r"^result:[A-Za-z0-9][A-Za-z0-9._:-]{0,72}$")
 PROHIBITED_INVESTMENT_RECOMMENDATION_PATTERNS = (
     re.compile(
         r"\b(?:you should|i recommend|we recommend|consider)\s+"
@@ -334,9 +332,7 @@ class ResultToolPlan(StrictFrozenModel):
 class ResultInterpretationAnswer(StrictFrozenModel):
     """面向用户的结果解释；analysis_summary 是可核验摘要，不是隐藏思维链。"""
 
-    schema_version: Literal["result_interpretation_v1.0.0"] = (
-        "result_interpretation_v1.0.0"
-    )
+    schema_version: Literal["result_interpretation_v1.0.0"] = "result_interpretation_v1.0.0"
     answer: str = Field(min_length=1, max_length=12_000)
     analysis_summary: str | None = Field(default=None, min_length=1, max_length=2_000)
     grounding_references: tuple[str, ...] = Field(min_length=1, max_length=20)
@@ -362,15 +358,11 @@ class ResultInterpretationAnswer(StrictFrozenModel):
             raise ValueError("every grounding reference must appear inline in answer")
         citedReferences = set(
             INLINE_RESULT_REFERENCE_PATTERN.findall(
-                "\n".join(
-                    part for part in (self.answer, self.analysis_summary) if part is not None
-                )
+                "\n".join(part for part in (self.answer, self.analysis_summary) if part is not None)
             )
         )
         if citedReferences != set(self.grounding_references):
-            raise ValueError(
-                "inline result references must exactly match grounding_references"
-            )
+            raise ValueError("inline result references must exactly match grounding_references")
         reviewableText = "\n".join(
             part for part in (self.answer, self.analysis_summary) if part is not None
         )
@@ -378,9 +370,7 @@ class ResultInterpretationAnswer(StrictFrozenModel):
             pattern.search(reviewableText)
             for pattern in PROHIBITED_INVESTMENT_RECOMMENDATION_PATTERNS
         ):
-            raise ValueError(
-                "result interpretation must not contain an investment recommendation"
-            )
+            raise ValueError("result interpretation must not contain an investment recommendation")
         if any(not suggestion.strip() for suggestion in self.follow_up_suggestions):
             raise ValueError("follow_up_suggestions must not contain blank values")
         if any(len(suggestion) > 400 for suggestion in self.follow_up_suggestions):

@@ -186,9 +186,7 @@ def test_interpretation_endpoint_single_flight_reuses_response_and_audit(
     assert conflict.status_code == 409
     assert conflict.json()["error"]["code"] == "CLIENT_REQUEST_ID_REUSED"
     assert providerCallCount == 1
-    assert len(
-        [item for item in auditItems if item["action"] == "INTERPRETATION_GENERATED"]
-    ) == 1
+    assert len([item for item in auditItems if item["action"] == "INTERPRETATION_GENERATED"]) == 1
 
 
 def test_interpretation_endpoint_has_dedicated_ip_and_session_rate_limit(

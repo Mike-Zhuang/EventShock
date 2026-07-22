@@ -62,9 +62,7 @@ def test_provider_catalog_has_joint_keys_and_one_matching_recommendation() -> No
             "https://github.com/Mike-Zhuang/EventShock/issues/new"
         )
 
-    assert getProvider("zhipu").integration_validation_status == (
-        "REAL_PROJECT_KEY_VERIFIED"
-    )
+    assert getProvider("zhipu").integration_validation_status == ("REAL_PROJECT_KEY_VERIFIED")
     assert all(
         provider.integration_validation_status == "CONTRACT_TESTED_COMMUNITY_PREVIEW"
         for provider in providers
