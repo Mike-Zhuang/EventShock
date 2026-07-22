@@ -7,6 +7,7 @@ import hashlib
 import json
 import random
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -38,6 +39,13 @@ from backend.app.cognition.models import ActionPreference
 from backend.app.cognition.prompts import (
     buildRepairInstruction,
     encodeUntrustedPromptText,
+)
+from backend.app.cognition.streaming import (
+    ModelStreamProgress,
+    ModelStreamStage,
+    ProviderStreamAccumulator,
+    emitModelStreamProgress,
+    iterSseEvents,
 )
 
 RETRYABLE_PROVIDER_CODES = frozenset({"1302", "1305"})
@@ -120,13 +128,22 @@ class ZhipuRestGateway:
                 payload=payload,
                 request=request,
                 policy=policy,
+                repair=False,
             )
             totalAttempts += attempts
             uncertainBillableAttempts += uncertainAttempts
             # 200 响应即可能产生费用；先登记 usage，再解析内容或执行语义校验。
-            callUsage = self._usageFromBody(body)
+            callUsage = self._usageFromBillableBody(body)
             totalUsage = totalUsage.plus(callUsage)
             rawContent = self._contentFromBody(body)
+            await emitModelStreamProgress(
+                request.streamObserver,
+                ModelStreamProgress(
+                    stage=ModelStreamStage.VALIDATING,
+                    elapsedMs=self._elapsedMilliseconds(startedAt),
+                    attempt=attempts,
+                ),
+            )
             data = self._validateContent(
                 rawContent,
                 schema,
@@ -144,6 +161,15 @@ class ZhipuRestGateway:
 
         if data is None and lastError is not None and self._isRepairable(lastError):
             repairUsed = True
+            await emitModelStreamProgress(
+                request.streamObserver,
+                ModelStreamProgress(
+                    stage=ModelStreamStage.REPAIRING,
+                    elapsedMs=self._elapsedMilliseconds(startedAt),
+                    attempt=max(1, totalAttempts + 1),
+                    repair=True,
+                ),
+            )
             repairPayload = self._buildRepairPayload(
                 request=request,
                 invalidContent=rawContent,
@@ -154,11 +180,21 @@ class ZhipuRestGateway:
                     payload=repairPayload,
                     request=request,
                     policy=policy,
+                    repair=True,
                 )
                 totalAttempts += attempts
                 uncertainBillableAttempts += uncertainAttempts
-                totalUsage = totalUsage.plus(self._usageFromBody(body))
+                totalUsage = totalUsage.plus(self._usageFromBillableBody(body))
                 repairedContent = self._contentFromBody(body)
+                await emitModelStreamProgress(
+                    request.streamObserver,
+                    ModelStreamProgress(
+                        stage=ModelStreamStage.VALIDATING,
+                        elapsedMs=self._elapsedMilliseconds(startedAt),
+                        attempt=attempts,
+                        repair=True,
+                    ),
+                )
                 data = self._validateContent(
                     repairedContent,
                     schema,
@@ -180,6 +216,9 @@ class ZhipuRestGateway:
                     "model did not produce a validated result",
                 )
             if not policy.allow_rule_fallback:
+                lastError.attempts = max(lastError.attempts, totalAttempts)
+                lastError.uncertainBillableAttempts = uncertainBillableAttempts
+                lastError.repairUsed = repairUsed
                 raise lastError
             data = buildRuleFallback(schema, lastError.code)
             fallbackBytes = canonicalModelBytes(data)
@@ -282,7 +321,7 @@ class ZhipuRestGateway:
                 {"role": "system", "content": request.systemPrompt},
                 {"role": "user", "content": request.userContent},
             ],
-            "stream": False,
+            "stream": request.streamResponse,
             "do_sample": request.samplingConfig.do_sample,
             "max_tokens": request.samplingConfig.max_tokens,
             "response_format": {"type": "json_object"},
@@ -307,6 +346,12 @@ class ZhipuRestGateway:
         error: ModelGatewayError,
     ) -> dict[str, Any]:
         payload = ZhipuRestGateway._buildPayload(request)
+        # 修复轮已经携带上一轮的有界无效 JSON；为提高一次修复成功率并避免
+        # 再次处理半截结构，按“结构化 JSON 不适合边生成边展示”的例外非流式接收。
+        payload["stream"] = False
+        # repair 是一次新的供应商调用，必须使用独立的请求标识。只发送随机 ID，
+        # 不把原始应用请求 ID 拼接进去，避免供应商追踪记录混淆两次计费请求。
+        payload["request_id"] = ZhipuRestGateway._newRepairRequestId(request.requestId)
         payload["messages"] = [
             {"role": "system", "content": request.systemPrompt},
             {"role": "user", "content": request.userContent},
@@ -331,24 +376,38 @@ class ZhipuRestGateway:
         payload: dict[str, Any],
         request: ModelRequest,
         policy: ModelPolicy,
+        repair: bool,
     ) -> tuple[dict[str, Any], bytes, int, int]:
         lastError: ModelGatewayError | None = None
         uncertainBillableAttempts = 0
         for attemptIndex in range(policy.max_transport_attempts):
             attemptNumber = attemptIndex + 1
             try:
-                response = await self._client.post(
-                    ZHIPU_CHAT_COMPLETIONS_URL,
-                    headers={
-                        "Authorization": f"Bearer {request.apiKey}",
-                        "Content-Type": "application/json",
-                        "Accept": "application/json",
-                    },
-                    json=payload,
-                    timeout=policy.timeout_seconds,
-                    follow_redirects=False,
-                )
-            except httpx.TimeoutException as error:
+                if payload.get("stream") is True:
+                    statusCode, responseHeaders, body, rawBody = await self._postStreaming(
+                        payload=payload,
+                        request=request,
+                        policy=policy,
+                        attempt=attemptNumber,
+                        repair=repair,
+                    )
+                else:
+                    response = await self._client.post(
+                        ZHIPU_CHAT_COMPLETIONS_URL,
+                        headers={
+                            "Authorization": f"Bearer {request.apiKey}",
+                            "Content-Type": "application/json",
+                            "Accept": "application/json",
+                        },
+                        json=payload,
+                        timeout=self._httpxTimeout(policy),
+                        follow_redirects=False,
+                    )
+                    statusCode = response.status_code
+                    responseHeaders = response.headers
+                    body = self._decodeBody(response, request.apiKey)
+                    rawBody = response.content
+            except (httpx.TimeoutException, TimeoutError) as error:
                 uncertainBillableAttempts += 1
                 lastError = ModelGatewayError(
                     FailureCode.MODEL_TIMEOUT,
@@ -374,11 +433,26 @@ class ZhipuRestGateway:
                     await self._backoff(policy, attemptIndex, None)
                     continue
                 raise lastError from error
+            except ModelGatewayError as error:
+                if error.httpStatus == 200:
+                    uncertainBillableAttempts += 1
+                error.attempts = attemptNumber
+                error.uncertainBillableAttempts = uncertainBillableAttempts
+                if error.retryable and attemptNumber < policy.max_transport_attempts:
+                    await self._backoff(policy, attemptIndex, None)
+                    continue
+                raise
 
             try:
-                body = self._decodeBody(response)
+                if not isinstance(body, dict):
+                    raise ModelGatewayError(
+                        FailureCode.MODEL_RESPONSE_INVALID,
+                        "provider response root must be an object",
+                        retryable=statusCode >= 500,
+                        httpStatus=statusCode,
+                    )
             except ModelGatewayError as error:
-                if response.status_code == 200:
+                if statusCode == 200:
                     # 200 但无法解析 usage 时，账单状态仍未知，必须保留单次响应上界。
                     uncertainBillableAttempts += 1
                 error.attempts = attemptNumber
@@ -387,21 +461,21 @@ class ZhipuRestGateway:
                     await self._backoff(
                         policy,
                         attemptIndex,
-                        response.headers.get("Retry-After"),
+                        responseHeaders.get("Retry-After"),
                     )
                     continue
                 raise
-            if response.status_code == 200:
-                return body, response.content, attemptNumber, uncertainBillableAttempts
+            if statusCode == 200:
+                return body, rawBody, attemptNumber, uncertainBillableAttempts
 
-            lastError = self._classifyError(response.status_code, body, request.apiKey)
+            lastError = self._classifyError(statusCode, body, request.apiKey)
             lastError.attempts = attemptNumber
             lastError.uncertainBillableAttempts = uncertainBillableAttempts
             if lastError.retryable and attemptNumber < policy.max_transport_attempts:
                 await self._backoff(
                     policy,
                     attemptIndex,
-                    response.headers.get("Retry-After"),
+                    responseHeaders.get("Retry-After"),
                 )
                 continue
             raise lastError
@@ -412,6 +486,109 @@ class ZhipuRestGateway:
                 "model request failed without a response",
             )
         raise lastError
+
+    async def _postStreaming(
+        self,
+        *,
+        payload: dict[str, Any],
+        request: ModelRequest,
+        policy: ModelPolicy,
+        attempt: int,
+        repair: bool,
+    ) -> tuple[int, httpx.Headers, dict[str, Any], bytes]:
+        """消费智谱 SSE 并仅公开安全进度；完整 JSON 在流结束后统一校验。"""
+
+        accumulator = ProviderStreamAccumulator("zhipu")
+        startedAt = self._clock()
+        headers = {
+            "Authorization": f"Bearer {request.apiKey}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        }
+        async with asyncio.timeout(policy.timeout_seconds):
+            async with self._client.stream(
+                "POST",
+                ZHIPU_CHAT_COMPLETIONS_URL,
+                headers=headers,
+                json=payload,
+                timeout=self._httpxTimeout(policy),
+                follow_redirects=False,
+            ) as response:
+                if response.status_code != 200:
+                    rawBody = await response.aread()
+                    body = self._decodeRawBody(
+                        rawBody,
+                        response.status_code,
+                        request.apiKey,
+                    )
+                    return response.status_code, response.headers, body, rawBody
+
+                contentType = response.headers.get("content-type", "").lower()
+                if "text/event-stream" not in contentType:
+                    rawBody = await response.aread()
+                    body = self._decodeRawBody(
+                        rawBody,
+                        response.status_code,
+                        request.apiKey,
+                    )
+                    return response.status_code, response.headers, body, rawBody
+
+                try:
+                    async for event in iterSseEvents(response):
+                        previousReasoning = accumulator.reasoningChunkCount
+                        accumulator.accept(event)
+                        if (
+                            accumulator.chunkCount == 1
+                            or accumulator.chunkCount % 8 == 0
+                            or accumulator.reasoningChunkCount > previousReasoning
+                        ):
+                            stage = (
+                                ModelStreamStage.REASONING
+                                if accumulator.reasoningChunkCount > previousReasoning
+                                else ModelStreamStage.GENERATING
+                            )
+                            await emitModelStreamProgress(
+                                request.streamObserver,
+                                ModelStreamProgress(
+                                    stage=stage,
+                                    elapsedMs=self._elapsedMilliseconds(startedAt),
+                                    chunkCount=accumulator.chunkCount,
+                                    answerChunkCount=accumulator.answerChunkCount,
+                                    reasoningChunkCount=accumulator.reasoningChunkCount,
+                                    attempt=attempt,
+                                    repair=repair,
+                                ),
+                            )
+                except ValueError as error:
+                    raise ModelGatewayError(
+                        FailureCode.MODEL_RESPONSE_INVALID,
+                        str(error),
+                        httpStatus=response.status_code,
+                    ) from error
+                try:
+                    body = accumulator.buildBody()
+                except ValueError as error:
+                    raise ModelGatewayError(
+                        FailureCode.MODEL_RESPONSE_INVALID,
+                        str(error),
+                        httpStatus=response.status_code,
+                    ) from error
+                rawBody = json.dumps(
+                    body,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                return response.status_code, response.headers, body, rawBody
+
+    @staticmethod
+    def _httpxTimeout(policy: ModelPolicy) -> httpx.Timeout:
+        return httpx.Timeout(
+            policy.timeout_seconds,
+            connect=min(10.0, policy.timeout_seconds),
+            write=min(30.0, policy.timeout_seconds),
+            pool=min(10.0, policy.timeout_seconds),
+        )
 
     async def _backoff(
         self,
@@ -430,23 +607,36 @@ class ZhipuRestGateway:
             delay = policy.base_backoff_seconds * (2**attemptIndex) * jitterMultiplier
         await self._sleeper(delay)
 
-    @staticmethod
-    def _decodeBody(response: httpx.Response) -> dict[str, Any]:
+    @classmethod
+    def _decodeBody(cls, response: httpx.Response, apiKey: str) -> dict[str, Any]:
+        return cls._decodeRawBody(response.content, response.status_code, apiKey)
+
+    @classmethod
+    def _decodeRawBody(
+        cls,
+        rawBody: bytes,
+        statusCode: int,
+        apiKey: str,
+    ) -> dict[str, Any]:
         try:
-            body = response.json()
-        except json.JSONDecodeError as error:
+            body = json.loads(rawBody)
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            if statusCode != 200:
+                # CDN、WAF 和供应商网关可能以 HTML 返回认证、限流或服务错误。
+                # 此时只信任 HTTP 状态，绝不把不可信正文写入异常或响应。
+                raise cls._classifyError(statusCode, {}, apiKey) from error
             raise ModelGatewayError(
                 FailureCode.MODEL_RESPONSE_INVALID,
                 "provider returned non-JSON response",
-                retryable=response.status_code >= 500,
-                httpStatus=response.status_code,
+                httpStatus=statusCode,
             ) from error
         if not isinstance(body, dict):
+            if statusCode != 200:
+                raise cls._classifyError(statusCode, {}, apiKey)
             raise ModelGatewayError(
                 FailureCode.MODEL_RESPONSE_INVALID,
                 "provider response root must be an object",
-                retryable=response.status_code >= 500,
-                httpStatus=response.status_code,
+                httpStatus=statusCode,
             )
         return body
 
@@ -458,36 +648,28 @@ class ZhipuRestGateway:
     ) -> ModelGatewayError:
         errorBody = body.get("error")
         rawProviderCode = str(errorBody.get("code", "")) if isinstance(errorBody, dict) else ""
-        providerMessage = (
-            str(errorBody.get("message", "provider request failed"))
-            if isinstance(errorBody, dict)
-            else "provider request failed"
-        )
-        # 供应商错误正文不可信，可能原样回显请求头或密钥；进入异常和日志前
-        # 必须显式替换，不依赖供应商“通常不会回显”的行为。
-        redactedMessage = providerMessage
+        providerCodeForClassification = rawProviderCode
         for secret in (f"Bearer {apiKey}", apiKey):
             if secret:
-                redactedMessage = redactedMessage.replace(secret, "[REDACTED]")
-        providerCode = rawProviderCode
-        for secret in (f"Bearer {apiKey}", apiKey):
-            if secret:
-                providerCode = providerCode.replace(secret, "[REDACTED]")
-        safeMessage = " ".join(redactedMessage.split())[:300]
+                providerCodeForClassification = providerCodeForClassification.replace(
+                    secret,
+                    "[REDACTED]",
+                )
+        providerCode = ZhipuRestGateway._sanitizeProviderCode(providerCodeForClassification)
 
-        if providerCode in {"1000", "1001", "1003", "1005"} or statusCode == 401:
+        if providerCodeForClassification in {"1000", "1001", "1003", "1005"} or statusCode == 401:
             code = FailureCode.MODEL_AUTHENTICATION_ERROR
             retryable = False
-        elif providerCode in {"1220", "1311"} or statusCode == 403:
+        elif providerCodeForClassification in {"1220", "1311"} or statusCode == 403:
             code = FailureCode.MODEL_PERMISSION_ERROR
             retryable = False
-        elif providerCode == "1302":
+        elif providerCodeForClassification == "1302":
             code = FailureCode.MODEL_RATE_LIMITED
             retryable = True
-        elif providerCode == "1305" or statusCode == 503:
+        elif providerCodeForClassification == "1305" or statusCode == 503:
             code = FailureCode.MODEL_OVERLOADED
             retryable = True
-        elif providerCode in {
+        elif providerCodeForClassification in {
             "1113",
             "1308",
             "1309",
@@ -504,25 +686,50 @@ class ZhipuRestGateway:
         }:
             code = FailureCode.MODEL_QUOTA_EXHAUSTED
             retryable = False
-        elif providerCode == "1301":
+        elif providerCodeForClassification == "1301":
             code = FailureCode.CONTENT_FILTERED
             retryable = False
         elif statusCode == 429:
             code = FailureCode.MODEL_RATE_LIMITED
-            retryable = providerCode in RETRYABLE_PROVIDER_CODES or not providerCode
+            retryable = (
+                providerCodeForClassification in RETRYABLE_PROVIDER_CODES
+                or not providerCodeForClassification
+            )
         elif statusCode >= 500:
             code = FailureCode.MODEL_TRANSPORT_ERROR
             retryable = True
         else:
             code = FailureCode.MODEL_REQUEST_INVALID
             retryable = False
+        safeMessages = {
+            FailureCode.MODEL_AUTHENTICATION_ERROR: "model provider rejected the API credential",
+            FailureCode.MODEL_PERMISSION_ERROR: "model provider denied this request",
+            FailureCode.MODEL_RATE_LIMITED: "model provider rate limit was reached",
+            FailureCode.MODEL_OVERLOADED: "model provider is temporarily overloaded",
+            FailureCode.MODEL_QUOTA_EXHAUSTED: "model provider quota is exhausted",
+            FailureCode.CONTENT_FILTERED: "model provider filtered the request",
+            FailureCode.MODEL_TRANSPORT_ERROR: "model provider returned a server error",
+            FailureCode.MODEL_REQUEST_INVALID: "model provider rejected the request",
+        }
         return ModelGatewayError(
             code,
-            safeMessage,
+            safeMessages[code],
             retryable=retryable,
             httpStatus=statusCode,
-            providerCode=providerCode or None,
+            providerCode=providerCode,
         )
+
+    @staticmethod
+    def _sanitizeProviderCode(providerCode: str) -> str | None:
+        candidate = providerCode.strip()
+        if not candidate or len(candidate) > 80:
+            return None
+        if any(
+            not character.isascii() or not (character.isalnum() or character in "._:-")
+            for character in candidate
+        ):
+            return None
+        return candidate
 
     @staticmethod
     def _contentFromBody(body: dict[str, Any]) -> str:
@@ -551,13 +758,29 @@ class ZhipuRestGateway:
             )
         if finishReason == "content_filter":
             raise ModelGatewayError(FailureCode.CONTENT_FILTERED, "provider filtered content")
+        if finishReason in {"sensitive", "safety"}:
+            raise ModelGatewayError(FailureCode.CONTENT_FILTERED, "provider filtered content")
+        if finishReason == "network_error":
+            raise ModelGatewayError(
+                FailureCode.MODEL_TRANSPORT_ERROR,
+                "provider stopped because generation transport failed",
+                retryable=True,
+            )
+        if finishReason != "stop":
+            raise ModelGatewayError(
+                FailureCode.MODEL_RESPONSE_INVALID,
+                "provider returned an unsupported finish reason",
+            )
         message = firstChoice.get("message") if isinstance(firstChoice, dict) else None
         refusal = message.get("refusal") if isinstance(message, dict) else None
         if isinstance(refusal, str) and refusal.strip():
             raise ModelGatewayError(FailureCode.REFUSAL, "model refused structured output")
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str) or not content.strip():
-            raise ModelGatewayError(FailureCode.REFUSAL, "model returned no structured content")
+            raise ModelGatewayError(
+                FailureCode.MODEL_RESPONSE_INVALID,
+                "model returned no structured content",
+            )
         return content
 
     @staticmethod
@@ -619,6 +842,26 @@ class ZhipuRestGateway:
         )
 
     @staticmethod
+    def _usageFromBillableBody(body: dict[str, Any]) -> ModelUsage:
+        """HTTP 200 缺失可信 usage 时必须保留一次未知计费尝试。"""
+
+        try:
+            return ZhipuRestGateway._usageFromBody(body)
+        except ModelGatewayError as error:
+            if error.code == FailureCode.MODEL_USAGE_MISSING:
+                error.uncertainBillableAttempts = max(1, error.uncertainBillableAttempts)
+            raise
+
+    @staticmethod
+    def _newRepairRequestId(originalRequestId: str) -> str:
+        # 官方限制为 6–64 字符。随机 repair ID 与原始应用 ID 解耦，且循环保证
+        # 即使调用方恰好使用同形字符串也绝不复用同一标识。
+        while True:
+            candidate = f"repair-{uuid.uuid4().hex}"
+            if candidate != originalRequestId:
+                return candidate
+
+    @staticmethod
     def _requiredUsageInt(usage: dict[str, Any], key: str) -> int:
         value = usage.get(key)
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
@@ -639,7 +882,6 @@ class ZhipuRestGateway:
             FailureCode.EVIDENCE_ID_UNKNOWN,
             FailureCode.ACTION_NOT_ALLOWED,
             FailureCode.MODEL_RESPONSE_INVALID,
-            FailureCode.REFUSAL,
         }
 
     def _elapsedMilliseconds(self, startedAt: float) -> float:

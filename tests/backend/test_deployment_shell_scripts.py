@@ -21,6 +21,7 @@ def testCaddyRetriesStartupRaceWithoutSyntheticHealthTraffic() -> None:
 
     assert "lb_try_duration 5s" in caddyfile
     assert "lb_try_interval 250ms" in caddyfile
+    assert "header_up X-Real-IP {remote_host}" in caddyfile
     assert "health_uri" not in caddyfile
     assert "health_interval" not in caddyfile
     assert "/usr/local/bin/caddy-startup-gate.sh" in composeFile

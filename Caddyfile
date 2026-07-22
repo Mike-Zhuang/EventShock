@@ -18,6 +18,10 @@
 
 	# 默认直连应用；启用宝塔真实流量统计后改为 host.docker.internal:18080。
 	reverse_proxy {$CADDY_UPSTREAM:app:8000} {
+		# 无论直连应用还是转发到宝塔 Nginx，都覆盖客户端可伪造的同名头。
+		# 后端只信任来自私有代理网络的 X-Real-IP，因此这里必须写入真实对端。
+		header_up X-Real-IP {remote_host}
+
 		# 容器入口负责主机重启时的首次就绪门控；这里继续覆盖运行期间的
 		# 短暂连接故障，并避免后台主动健康探针持续污染宝塔访问统计。
 		lb_try_duration 5s

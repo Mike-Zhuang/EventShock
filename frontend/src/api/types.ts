@@ -438,13 +438,104 @@ export interface ResultInterpretationAssistantMessage {
   createdAt: string;
 }
 
+export interface ResultInterpretationUserMessage {
+  id: string;
+  role: 'user';
+  language: ResultInterpretationLanguage;
+  content: string;
+  createdAt: string;
+}
+
+export type ResultInterpretationChatMessage =
+  | ResultInterpretationUserMessage
+  | ResultInterpretationAssistantMessage;
+
 export interface ResultInterpretationChatResponse {
-  schemaVersion: string;
+  schemaVersion: '1.0.0';
   conversationId: string;
   clientRequestId: string;
   experimentId: string;
   resultHash: string;
+  historyPersisted: boolean;
   message: ResultInterpretationAssistantMessage;
+}
+
+export interface ResultInterpretationConversationSummary {
+  conversationId: string;
+  experimentId: string;
+  language: ResultInterpretationLanguage;
+  exchangeCount: number;
+  lastUserMessage: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ResultInterpretationConversationList {
+  schemaVersion: '1.0.0';
+  items: ResultInterpretationConversationSummary[];
+}
+
+export interface ResultInterpretationConversation {
+  schemaVersion: '1.0.0';
+  conversationId: string;
+  experimentId: string;
+  language: ResultInterpretationLanguage;
+  createdAt: string;
+  updatedAt: string;
+  messages: ResultInterpretationChatMessage[];
+}
+
+export interface ResultInterpretationConversationDeleteResult {
+  schemaVersion: '1.0.0';
+  deleted: true;
+  conversationId: string;
+}
+
+export type ResultInterpretationStreamStage =
+  | 'PREPARING'
+  | 'PLANNING'
+  | 'READING_RESULTS'
+  | 'GENERATING'
+  | 'REASONING'
+  | 'VALIDATING'
+  | 'REPAIRING'
+  | 'COMPLETED';
+
+export interface ResultInterpretationStreamProgress {
+  schemaVersion: '1.0.0';
+  stage: ResultInterpretationStreamStage;
+  elapsedMs: number;
+  chunkCount?: number;
+  answerChunkCount?: number;
+  reasoningChunkCount?: number;
+}
+
+export interface ResultInterpretationStreamErrorPayload {
+  code: string;
+  message: string;
+  retryable: boolean;
+  httpStatus: number;
+  uncertainBillableAttempts: number;
+  traceId?: string;
+}
+
+export type ResultInterpretationStreamUpdate = {
+  kind: 'status' | 'progress';
+  progress: ResultInterpretationStreamProgress;
+  /** 已接收并成功解析的 SSE 事件数；不包含心跳与未知事件。 */
+  receivedEventCount: number;
+} | {
+  /** 兼容旧后端时由客户端生成，不是服务端可控的自由文本。 */
+  kind: 'fallback';
+  receivedEventCount: number;
+  elapsedMs: number;
+};
+
+export interface ResultInterpretationStreamResult {
+  response: ResultInterpretationChatResponse;
+  transport: 'sse' | 'json-fallback';
+  receivedEventCount: number;
+  elapsedMs: number;
 }
 
 export interface LlmConnectionTest {

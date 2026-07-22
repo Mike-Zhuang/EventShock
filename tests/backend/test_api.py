@@ -774,7 +774,9 @@ def test_result_interpretation_chat_uses_owned_server_result_and_redacted_audit(
         response = client.post(
             f"/api/v1/experiments/{experimentId}/interpretation-chat",
             headers={"X-Session-ID": SESSION_A},
-            json=requestPayload,
+            # 同一 clientRequestId 的失败会短期重放，避免供应商可能已经计费时
+            # 浏览器无意中重复调用；用户明确重试必须使用新的请求 ID。
+            json={**requestPayload, "clientRequestId": "request-api-002"},
         )
         auditItems = client.get("/api/v1/audit-events", headers={"X-Session-ID": SESSION_A}).json()[
             "items"

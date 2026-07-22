@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import threading
 import zlib
@@ -13,8 +14,85 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from backend.app.security import scanTextContent
+
 MAX_CHECKPOINT_UNCOMPRESSED_BYTES = 32 * 1024 * 1024
 DEFAULT_EXPERIMENT_RETENTION_DAYS = 90
+DEFAULT_INTERPRETATION_RETENTION_DAYS = 90
+MAX_INTERPRETATION_EXCHANGES_PER_OWNER = 300
+MAX_STORED_INTERPRETATION_EXCHANGES = 5_000
+MAX_INTERPRETATION_ASSISTANT_JSON_BYTES = 128 * 1024
+
+_INTERPRETATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,79}$")
+_REQUEST_HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_SAFE_ASSISTANT_MESSAGE_FIELDS = frozenset(
+    {
+        "id",
+        "role",
+        "language",
+        "answer",
+        "analysisSummary",
+        "groundingReferences",
+        "followUpSuggestions",
+        "toolActivity",
+        "provider",
+        "model",
+        "thinkingEnabled",
+        "streamed",
+        "promptTokens",
+        "completionTokens",
+        "cachedTokens",
+        "totalTokens",
+        "modelCalls",
+        "transportAttempts",
+        "uncertainBillableAttempts",
+        "cacheHit",
+        "repairUsed",
+        "plannerUsed",
+        "plannerFallbackUsed",
+        "failureCodes",
+        "promptVersion",
+        "latencyMs",
+        "createdAt",
+    }
+)
+_FORBIDDEN_INTERPRETATION_KEYS = frozenset(
+    {
+        "apikey",
+        "authorization",
+        "credential",
+        "credentials",
+        "secret",
+        "rawreasoning",
+        "reasoning",
+        "reasoningcontent",
+        "thought",
+        "thoughts",
+        "chainofthought",
+        "rawresponse",
+        "providerresponse",
+        "streamchunk",
+        "chunk",
+        "delta",
+        "partial",
+    }
+)
+_SECRET_FINDING_CODES = frozenset(
+    {
+        "PRIVATE_KEY_MATERIAL",
+        "API_KEY_OR_TOKEN",
+        "PASSWORD_VALUE",
+        "URL_EMBEDDED_CREDENTIAL",
+    }
+)
+
+
+class ResultInterpretationRequestConflictError(ValueError):
+    """相同 clientRequestId 被绑定到不同请求时拒绝覆盖持久化结果。"""
+
+
+class ResultInterpretationConversationDeletedError(ValueError):
+    """已删除会话的旧请求不得通过缓存或重放重新写回。"""
 
 
 def utcNow() -> str:
@@ -106,6 +184,49 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_experiments_session_created
                 ON experiments(session_id, created_at DESC);
+                CREATE TABLE IF NOT EXISTS result_interpretation_exchanges (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_user_id TEXT NOT NULL CHECK(
+                        length(owner_user_id) BETWEEN 1 AND 128
+                    ),
+                    experiment_id TEXT NOT NULL CHECK(
+                        length(experiment_id) BETWEEN 1 AND 128
+                    ),
+                    conversation_id TEXT NOT NULL CHECK(
+                        length(conversation_id) BETWEEN 8 AND 80
+                    ),
+                    client_request_id TEXT NOT NULL CHECK(
+                        length(client_request_id) BETWEEN 8 AND 80
+                    ),
+                    request_hash TEXT NOT NULL CHECK(length(request_hash)=64),
+                    language TEXT NOT NULL CHECK(language IN ('en', 'zh-CN')),
+                    user_message TEXT NOT NULL CHECK(length(user_message) BETWEEN 1 AND 4000),
+                    assistant_message_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE,
+                    UNIQUE (owner_user_id, experiment_id, client_request_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_interpretation_owner_experiment_conversation
+                ON result_interpretation_exchanges(
+                    owner_user_id, experiment_id, conversation_id, id
+                );
+                CREATE INDEX IF NOT EXISTS idx_interpretation_owner_updated
+                ON result_interpretation_exchanges(owner_user_id, updated_at DESC);
+                CREATE TABLE IF NOT EXISTS result_interpretation_tombstones (
+                    owner_user_id TEXT NOT NULL CHECK(
+                        length(owner_user_id) BETWEEN 1 AND 128
+                    ),
+                    experiment_id TEXT NOT NULL CHECK(
+                        length(experiment_id) BETWEEN 1 AND 128
+                    ),
+                    conversation_hash TEXT NOT NULL CHECK(length(conversation_hash)=64),
+                    deleted_at TEXT NOT NULL,
+                    FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE,
+                    PRIMARY KEY (owner_user_id, experiment_id, conversation_hash)
+                );
+                CREATE INDEX IF NOT EXISTS idx_interpretation_tombstones_owner
+                ON result_interpretation_tombstones(owner_user_id, deleted_at DESC);
                 CREATE TABLE IF NOT EXISTS study_runs (
                     run_id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL,
@@ -840,6 +961,7 @@ class Database:
             connection.execute("DELETE FROM event_pack_drafts WHERE updated_at < ?", (cutoff,))
             connection.execute("DELETE FROM custom_event_packs WHERE updated_at < ?", (cutoff,))
             connection.execute("DELETE FROM scenarios WHERE updated_at < ?", (cutoff,))
+            self._pruneResultInterpretationExchangesInConnection(connection)
             # 审计链只能整条删除；部分截断会让 remaining previous_hash 无法验证。
             connection.execute(
                 """
@@ -930,6 +1052,348 @@ class Database:
                 (sessionId,),
             ).fetchall()
         return [self._experimentFromRow(row, includeCheckpoint=False) for row in rows]
+
+    def saveResultInterpretationExchange(
+        self,
+        *,
+        ownerUserId: str,
+        experimentId: str,
+        conversationId: str,
+        clientRequestId: str,
+        requestHash: str,
+        language: str,
+        userMessage: str,
+        assistantMessage: dict[str, Any],
+    ) -> tuple[dict[str, Any], bool]:
+        """原子保存一次完整问答；相同请求返回原结果，不覆盖既有正文。
+
+        调用方只能传入已经通过结果解释 Schema、证据边界与语言检查的最终
+        assistant message。这里再用字段白名单阻止密钥、私有推理和流片段进入
+        SQLite，形成独立于接口层的纵深防护。
+        """
+
+        normalizedOwner = ownerUserId.strip()
+        normalizedExperiment = experimentId.strip()
+        normalizedUserMessage = userMessage.strip()
+        self._validateInterpretationIdentifier("conversationId", conversationId)
+        self._validateInterpretationIdentifier("clientRequestId", clientRequestId)
+        if not normalizedOwner or len(normalizedOwner) > 128:
+            raise ValueError("ownerUserId must contain between 1 and 128 characters")
+        if not normalizedExperiment or len(normalizedExperiment) > 128:
+            raise ValueError("experimentId must contain between 1 and 128 characters")
+        if _REQUEST_HASH_PATTERN.fullmatch(requestHash) is None:
+            raise ValueError("requestHash must be a lowercase SHA-256 digest")
+        if language not in {"en", "zh-CN"}:
+            raise ValueError("language must be en or zh-CN")
+        if not normalizedUserMessage or len(normalizedUserMessage) > 4_000:
+            raise ValueError("userMessage must contain between 1 and 4000 characters")
+        self._rejectInterpretationSecretsInText(normalizedUserMessage)
+        assistantMessageJson = self._serializeSafeAssistantMessage(assistantMessage, language)
+        now = utcNow()
+
+        with self.writeLock, self.connection() as connection:
+            # 先清除已经到期的幂等键；否则同一 clientRequestId 在保留期结束后
+            # 仍会被唯一约束绑定到一条用户已经无法读取的旧回答。
+            self._pruneResultInterpretationExchangesInConnection(
+                connection,
+                ownerUserId=normalizedOwner,
+            )
+            experiment = connection.execute(
+                """
+                SELECT 1 FROM experiments
+                WHERE id=? AND COALESCE(owner_user_id, session_id)=?
+                  AND status='COMPLETED' AND result_json IS NOT NULL
+                """,
+                (normalizedExperiment, normalizedOwner),
+            ).fetchone()
+            if experiment is None:
+                raise ValueError("completed experiment does not exist for this owner")
+
+            if self._isResultInterpretationConversationDeletedInConnection(
+                connection,
+                ownerUserId=normalizedOwner,
+                experimentId=normalizedExperiment,
+                conversationId=conversationId,
+            ):
+                raise ResultInterpretationConversationDeletedError(
+                    "deleted result interpretation conversation cannot be recreated"
+                )
+
+            existingRow = connection.execute(
+                """
+                SELECT * FROM result_interpretation_exchanges
+                WHERE owner_user_id=? AND experiment_id=? AND client_request_id=?
+                """,
+                (normalizedOwner, normalizedExperiment, clientRequestId),
+            ).fetchone()
+            if existingRow is not None:
+                self._ensureMatchingInterpretationRequest(existingRow, requestHash)
+                return self._resultInterpretationExchangeFromRow(existingRow), False
+
+            insertCursor = connection.execute(
+                """
+                INSERT INTO result_interpretation_exchanges(
+                    owner_user_id, experiment_id, conversation_id,
+                    client_request_id, request_hash, language, user_message,
+                    assistant_message_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(owner_user_id, experiment_id, client_request_id) DO NOTHING
+                """,
+                (
+                    normalizedOwner,
+                    normalizedExperiment,
+                    conversationId,
+                    clientRequestId,
+                    requestHash,
+                    language,
+                    normalizedUserMessage,
+                    assistantMessageJson,
+                    now,
+                    now,
+                ),
+            )
+            storedRow = connection.execute(
+                """
+                SELECT * FROM result_interpretation_exchanges
+                WHERE owner_user_id=? AND experiment_id=? AND client_request_id=?
+                """,
+                (normalizedOwner, normalizedExperiment, clientRequestId),
+            ).fetchone()
+            if storedRow is None:
+                raise RuntimeError("result interpretation exchange could not be persisted")
+            self._ensureMatchingInterpretationRequest(storedRow, requestHash)
+            created = insertCursor.rowcount == 1
+            self._pruneResultInterpretationExchangesInConnection(
+                connection,
+                ownerUserId=normalizedOwner,
+            )
+        return self._resultInterpretationExchangeFromRow(storedRow), created
+
+    def getResultInterpretationExchangeByRequest(
+        self,
+        *,
+        ownerUserId: str,
+        experimentId: str,
+        clientRequestId: str,
+        requestHash: str,
+    ) -> dict[str, Any] | None:
+        """按账号和实验恢复已完成响应；请求哈希不同视为幂等键冲突。"""
+
+        cutoff = (
+            datetime.now(UTC) - timedelta(days=DEFAULT_INTERPRETATION_RETENTION_DAYS)
+        ).isoformat()
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM result_interpretation_exchanges
+                WHERE owner_user_id=? AND experiment_id=? AND client_request_id=?
+                  AND updated_at>=?
+                """,
+                (ownerUserId, experimentId, clientRequestId, cutoff),
+            ).fetchone()
+        if row is None:
+            return None
+        self._ensureMatchingInterpretationRequest(row, requestHash)
+        return self._resultInterpretationExchangeFromRow(row)
+
+    def listResultInterpretationConversations(
+        self,
+        ownerUserId: str,
+        *,
+        experimentId: str | None = None,
+        limit: int = MAX_INTERPRETATION_EXCHANGES_PER_OWNER,
+    ) -> list[dict[str, Any]]:
+        """列出当前账号的会话摘要，可进一步限定到单个实验。"""
+
+        # 每个账号最多只保留 300 轮；即使每轮各自属于一个会话，也必须让用户
+        # 能从列表枚举并删除全部已存内容，不能产生“库里存在、界面不可发现”的记录。
+        safeLimit = max(1, min(limit, MAX_INTERPRETATION_EXCHANGES_PER_OWNER))
+        cutoff = (
+            datetime.now(UTC) - timedelta(days=DEFAULT_INTERPRETATION_RETENTION_DAYS)
+        ).isoformat()
+        parameters: list[Any] = [ownerUserId, cutoff]
+        experimentFilter = ""
+        if experimentId is not None:
+            experimentFilter = "AND experiment_id=?"
+            parameters.append(experimentId)
+        parameters.append(safeLimit)
+        with self.connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    owner_user_id, experiment_id, conversation_id,
+                    COUNT(*) AS exchange_count,
+                    MIN(created_at) AS created_at,
+                    MAX(updated_at) AS updated_at,
+                    (
+                        SELECT latest.language
+                        FROM result_interpretation_exchanges AS latest
+                        WHERE latest.owner_user_id=exchanges.owner_user_id
+                          AND latest.experiment_id=exchanges.experiment_id
+                          AND latest.conversation_id=exchanges.conversation_id
+                        ORDER BY latest.id DESC LIMIT 1
+                    ) AS language,
+                    (
+                        SELECT latest.user_message
+                        FROM result_interpretation_exchanges AS latest
+                        WHERE latest.owner_user_id=exchanges.owner_user_id
+                          AND latest.experiment_id=exchanges.experiment_id
+                          AND latest.conversation_id=exchanges.conversation_id
+                        ORDER BY latest.id DESC LIMIT 1
+                    ) AS last_user_message
+                FROM result_interpretation_exchanges AS exchanges
+                WHERE owner_user_id=? AND updated_at>=? {experimentFilter}
+                GROUP BY owner_user_id, experiment_id, conversation_id
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,  # noqa: S608 -- experimentFilter 只可能是固定 SQL 片段。
+                tuple(parameters),
+            ).fetchall()
+        return [
+            {
+                "conversationId": row["conversation_id"],
+                "experimentId": row["experiment_id"],
+                "language": row["language"],
+                "exchangeCount": int(row["exchange_count"]),
+                "lastUserMessage": row["last_user_message"][:240],
+                "createdAt": row["created_at"],
+                "updatedAt": row["updated_at"],
+            }
+            for row in rows
+        ]
+
+    def getResultInterpretationConversation(
+        self,
+        *,
+        ownerUserId: str,
+        experimentId: str,
+        conversationId: str,
+    ) -> dict[str, Any] | None:
+        """读取一个账号、实验和会话三重作用域内的全部已完成问答。"""
+
+        cutoff = (
+            datetime.now(UTC) - timedelta(days=DEFAULT_INTERPRETATION_RETENTION_DAYS)
+        ).isoformat()
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM result_interpretation_exchanges
+                WHERE owner_user_id=? AND experiment_id=? AND conversation_id=?
+                  AND updated_at>=?
+                ORDER BY id ASC
+                """,
+                (ownerUserId, experimentId, conversationId, cutoff),
+            ).fetchall()
+        if not rows:
+            return None
+        exchanges = [self._resultInterpretationExchangeFromRow(row) for row in rows]
+        return {
+            "conversationId": conversationId,
+            "experimentId": experimentId,
+            "language": exchanges[-1]["language"],
+            "createdAt": exchanges[0]["createdAt"],
+            "updatedAt": exchanges[-1]["updatedAt"],
+            "exchanges": exchanges,
+        }
+
+    def deleteResultInterpretationConversation(
+        self,
+        *,
+        ownerUserId: str,
+        experimentId: str,
+        conversationId: str,
+        auditPayload: dict[str, Any] | None = None,
+    ) -> bool:
+        """删除会话并写最小墓碑，阻止旧请求或短期缓存把正文复活。"""
+
+        self._validateInterpretationIdentifier("conversationId", conversationId)
+        conversationHash = hashlib.sha256(conversationId.encode("utf-8")).hexdigest()
+        deletedAt = utcNow()
+        with self.writeLock, self.connection() as connection:
+            existingTombstone = self._isResultInterpretationConversationDeletedInConnection(
+                connection,
+                ownerUserId=ownerUserId,
+                experimentId=experimentId,
+                conversationId=conversationId,
+            )
+            cursor = connection.execute(
+                """
+                DELETE FROM result_interpretation_exchanges
+                WHERE owner_user_id=? AND experiment_id=? AND conversation_id=?
+                """,
+                (ownerUserId, experimentId, conversationId),
+            )
+            # 只有确实存在过的会话才创建墓碑。随机 DELETE 不得无限制造
+            # 墓碑与审计记录；同进程生成和删除由账号级单飞锁串行化。
+            if cursor.rowcount > 0 and not existingTombstone:
+                connection.execute(
+                    """
+                    INSERT INTO result_interpretation_tombstones(
+                        owner_user_id, experiment_id, conversation_hash, deleted_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (ownerUserId, experimentId, conversationHash, deletedAt),
+                )
+            if cursor.rowcount > 0 and auditPayload is not None:
+                self._appendAuditEventInConnection(
+                    connection,
+                    ownerUserId,
+                    "RESULT_INTERPRETATION",
+                    experimentId,
+                    "INTERPRETATION_CONVERSATION_DELETED",
+                    auditPayload,
+                    deletedAt,
+                )
+        return cursor.rowcount > 0
+
+    def isResultInterpretationConversationDeleted(
+        self,
+        *,
+        ownerUserId: str,
+        experimentId: str,
+        conversationId: str,
+    ) -> bool:
+        """只查询不可逆删除标记；墓碑不含用户问题、回答或供应商数据。"""
+
+        self._validateInterpretationIdentifier("conversationId", conversationId)
+        with self.connection() as connection:
+            return self._isResultInterpretationConversationDeletedInConnection(
+                connection,
+                ownerUserId=ownerUserId,
+                experimentId=experimentId,
+                conversationId=conversationId,
+            )
+
+    def countResultInterpretationExchanges(self, ownerUserId: str | None = None) -> int:
+        with self.connection() as connection:
+            if ownerUserId is None:
+                row = connection.execute(
+                    "SELECT COUNT(*) FROM result_interpretation_exchanges"
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    """
+                    SELECT COUNT(*) FROM result_interpretation_exchanges
+                    WHERE owner_user_id=?
+                    """,
+                    (ownerUserId,),
+                ).fetchone()
+        return int(row[0])
+
+    def enforceResultInterpretationRetention(
+        self,
+        *,
+        retentionDays: int = DEFAULT_INTERPRETATION_RETENTION_DAYS,
+        maxPerOwner: int = MAX_INTERPRETATION_EXCHANGES_PER_OWNER,
+        maxStored: int = MAX_STORED_INTERPRETATION_EXCHANGES,
+    ) -> None:
+        with self.writeLock, self.connection() as connection:
+            self._pruneResultInterpretationExchangesInConnection(
+                connection,
+                retentionDays=retentionDays,
+                maxPerOwner=maxPerOwner,
+                maxStored=maxStored,
+            )
 
     def invalidateCompletedExperiment(
         self,
@@ -1148,6 +1612,169 @@ class Database:
             "historicalValidityEstablished": False,
             "createdAt": row["created_at"],
         }
+
+    @staticmethod
+    def _validateInterpretationIdentifier(fieldName: str, value: str) -> None:
+        if _INTERPRETATION_ID_PATTERN.fullmatch(value) is None:
+            raise ValueError(f"{fieldName} has an invalid format")
+
+    @staticmethod
+    def _serializeSafeAssistantMessage(
+        assistantMessage: dict[str, Any],
+        language: str,
+    ) -> str:
+        if not isinstance(assistantMessage, dict):
+            raise ValueError("assistantMessage must be an object")
+        unknownFields = set(assistantMessage) - _SAFE_ASSISTANT_MESSAGE_FIELDS
+        if unknownFields:
+            raise ValueError(
+                f"assistantMessage contains unsupported fields: {sorted(unknownFields)}"
+            )
+        requiredFields = {
+            "id",
+            "role",
+            "language",
+            "answer",
+            "groundingReferences",
+            "createdAt",
+        }
+        missingFields = requiredFields - set(assistantMessage)
+        if missingFields:
+            raise ValueError(
+                f"assistantMessage is missing required fields: {sorted(missingFields)}"
+            )
+        if assistantMessage["role"] != "assistant":
+            raise ValueError("assistantMessage.role must be assistant")
+        if assistantMessage["language"] != language:
+            raise ValueError("assistantMessage.language must match the exchange language")
+        answer = assistantMessage["answer"]
+        if not isinstance(answer, str) or not answer.strip() or len(answer) > 12_000:
+            raise ValueError("assistantMessage.answer must contain between 1 and 12000 characters")
+        references = assistantMessage["groundingReferences"]
+        if not isinstance(references, list) or not references or len(references) > 20:
+            raise ValueError("assistantMessage.groundingReferences must contain 1 to 20 items")
+        Database._rejectSensitiveInterpretationKeys(assistantMessage)
+        try:
+            serialized = json.dumps(
+                assistantMessage,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError("assistantMessage must be JSON serializable") from error
+        if len(serialized.encode("utf-8")) > MAX_INTERPRETATION_ASSISTANT_JSON_BYTES:
+            raise ValueError("assistantMessage exceeds the 128 KiB storage limit")
+        Database._rejectInterpretationSecretsInText(serialized)
+        return serialized
+
+    @staticmethod
+    def _rejectInterpretationSecretsInText(value: str) -> None:
+        findings = scanTextContent(value, field="resultInterpretationPersistence").findings
+        findingCodes = {finding.code for finding in findings}
+        if findingCodes & _SECRET_FINDING_CODES:
+            raise ValueError("result interpretation exchange contains credential-like content")
+        # 安全扫描器只检查前 100,000 个字符。大于该上限时必须拒绝整条记录，
+        # 不能让后半段未经扫描的文本进入账号数据库。
+        if "CONTENT_SIZE_LIMIT_EXCEEDED" in findingCodes:
+            raise ValueError("result interpretation exchange exceeds the safe scanning limit")
+
+    @staticmethod
+    def _rejectSensitiveInterpretationKeys(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, nestedValue in value.items():
+                normalizedKey = re.sub(r"[^a-z0-9]", "", str(key).lower())
+                if normalizedKey in _FORBIDDEN_INTERPRETATION_KEYS:
+                    raise ValueError(
+                        "assistantMessage contains a private or unverified response field"
+                    )
+                Database._rejectSensitiveInterpretationKeys(nestedValue)
+        elif isinstance(value, list):
+            for nestedValue in value:
+                Database._rejectSensitiveInterpretationKeys(nestedValue)
+
+    @staticmethod
+    def _ensureMatchingInterpretationRequest(row: sqlite3.Row, requestHash: str) -> None:
+        if row["request_hash"] != requestHash:
+            raise ResultInterpretationRequestConflictError(
+                "clientRequestId is bound to a different persisted request"
+            )
+
+    @staticmethod
+    def _isResultInterpretationConversationDeletedInConnection(
+        connection: sqlite3.Connection,
+        *,
+        ownerUserId: str,
+        experimentId: str,
+        conversationId: str,
+    ) -> bool:
+        conversationHash = hashlib.sha256(conversationId.encode("utf-8")).hexdigest()
+        row = connection.execute(
+            """
+            SELECT 1 FROM result_interpretation_tombstones
+            WHERE owner_user_id=? AND experiment_id=? AND conversation_hash=?
+            """,
+            (ownerUserId, experimentId, conversationHash),
+        ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def _resultInterpretationExchangeFromRow(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "conversationId": row["conversation_id"],
+            "experimentId": row["experiment_id"],
+            "clientRequestId": row["client_request_id"],
+            "requestHash": row["request_hash"],
+            "language": row["language"],
+            "userMessage": row["user_message"],
+            "assistantMessage": json.loads(row["assistant_message_json"]),
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+        }
+
+    @staticmethod
+    def _pruneResultInterpretationExchangesInConnection(
+        connection: sqlite3.Connection,
+        *,
+        ownerUserId: str | None = None,
+        retentionDays: int = DEFAULT_INTERPRETATION_RETENTION_DAYS,
+        maxPerOwner: int = MAX_INTERPRETATION_EXCHANGES_PER_OWNER,
+        maxStored: int = MAX_STORED_INTERPRETATION_EXCHANGES,
+    ) -> None:
+        if retentionDays < 1 or maxPerOwner < 1 or maxStored < 1:
+            raise ValueError("interpretation retention limits must be positive")
+        cutoff = (datetime.now(UTC) - timedelta(days=retentionDays)).isoformat()
+        connection.execute(
+            "DELETE FROM result_interpretation_exchanges WHERE updated_at < ?",
+            (cutoff,),
+        )
+        if ownerUserId is None:
+            owners = connection.execute(
+                "SELECT DISTINCT owner_user_id FROM result_interpretation_exchanges"
+            ).fetchall()
+            ownerIds = [row["owner_user_id"] for row in owners]
+        else:
+            ownerIds = [ownerUserId]
+        for ownerId in ownerIds:
+            connection.execute(
+                """
+                DELETE FROM result_interpretation_exchanges WHERE id IN (
+                    SELECT id FROM result_interpretation_exchanges
+                    WHERE owner_user_id=?
+                    ORDER BY updated_at DESC, id DESC LIMIT -1 OFFSET ?
+                )
+                """,
+                (ownerId, maxPerOwner),
+            )
+        connection.execute(
+            """
+            DELETE FROM result_interpretation_exchanges WHERE id IN (
+                SELECT id FROM result_interpretation_exchanges
+                ORDER BY updated_at DESC, id DESC LIMIT -1 OFFSET ?
+            )
+            """,
+            (maxStored,),
+        )
 
 
 def _encodeCheckpoint(value: Any) -> bytes:

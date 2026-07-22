@@ -44,8 +44,16 @@ import type {
   RedTeamRegistry,
   RedTeamResult,
   ResultInterpretationAssistantMessage,
+  ResultInterpretationChatMessage,
   ResultInterpretationChatResponse,
+  ResultInterpretationConversation,
+  ResultInterpretationConversationDeleteResult,
+  ResultInterpretationConversationList,
+  ResultInterpretationConversationSummary,
   ResultInterpretationLanguage,
+  ResultInterpretationStreamErrorPayload,
+  ResultInterpretationStreamProgress,
+  ResultInterpretationStreamStage,
   ResultInterpretationToolActivity,
   ReleaseGateDefinition,
   ReleaseGateResult,
@@ -1274,108 +1282,352 @@ export function normalizeResults(value: unknown): ExperimentResults {
  * 结果解释属于付费且面向人的输出，因此拒绝静默填充缺失字段。
  * 这样后端契约漂移时，界面会明确报错，而不会把不完整回答伪装成成功。
  */
-export function normalizeResultInterpretationChatResponse(
+function requireResultInterpretationString(record: JsonRecord, ...keys: string[]): string {
+  const normalized = asOptionalString(read(record, ...keys))?.trim();
+  if (!normalized) throw new TypeError(`Result interpretation is missing ${keys[0]}.`);
+  return normalized;
+}
+
+function requireResultInterpretationCount(record: JsonRecord, ...keys: string[]): number {
+  const normalized = asNumber(read(record, ...keys));
+  if (normalized === undefined || !Number.isInteger(normalized) || normalized < 0) {
+    throw new TypeError(`Result interpretation has an invalid ${keys[0]}.`);
+  }
+  return normalized;
+}
+
+function requireResultInterpretationNumber(record: JsonRecord, ...keys: string[]): number {
+  const normalized = asNumber(read(record, ...keys));
+  if (normalized === undefined || normalized < 0) {
+    throw new TypeError(`Result interpretation has an invalid ${keys[0]}.`);
+  }
+  return normalized;
+}
+
+function requireResultInterpretationBoolean(record: JsonRecord, ...keys: string[]): boolean {
+  const normalized = asBoolean(read(record, ...keys));
+  if (normalized === undefined) {
+    throw new TypeError(`Result interpretation has an invalid ${keys[0]}.`);
+  }
+  return normalized;
+}
+
+function requireResultInterpretationStringList(record: JsonRecord, ...keys: string[]): string[] {
+  const raw = read(record, ...keys);
+  if (!Array.isArray(raw)
+    || raw.some((item) => typeof item !== 'string' || item.trim().length === 0)) {
+    throw new TypeError(`Result interpretation has an invalid ${keys[0]}.`);
+  }
+  return raw.map((item) => (item as string).trim());
+}
+
+function requireResultInterpretationDate(record: JsonRecord, ...keys: string[]): string {
+  const normalized = requireResultInterpretationString(record, ...keys);
+  if (Number.isNaN(Date.parse(normalized))) {
+    throw new TypeError(`Result interpretation has an invalid ${keys[0]}.`);
+  }
+  return normalized;
+}
+
+function requireResultInterpretationLanguage(
+  record: JsonRecord,
+  ...keys: string[]
+): ResultInterpretationLanguage {
+  const rawLanguage = read(record, ...keys);
+  if (rawLanguage !== 'en' && rawLanguage !== 'zh-CN') {
+    throw new TypeError(`Result interpretation has an invalid ${keys[0]}.`);
+  }
+  return rawLanguage;
+}
+
+function requireResultInterpretationSchema(record: JsonRecord): '1.0.0' {
+  const schemaVersion = requireResultInterpretationString(
+    record,
+    'schemaVersion',
+    'schema_version',
+  );
+  if (schemaVersion !== '1.0.0') {
+    throw new TypeError('Result interpretation response has an unsupported schemaVersion.');
+  }
+  return schemaVersion;
+}
+
+export function normalizeResultInterpretationAssistantMessage(
   value: unknown,
-): ResultInterpretationChatResponse {
-  if (!isRecord(value)) throw new TypeError('Result interpretation response is not an object.');
-
-  const requireString = (record: JsonRecord, ...keys: string[]): string => {
-    const normalized = asOptionalString(read(record, ...keys))?.trim();
-    if (!normalized) throw new TypeError(`Result interpretation is missing ${keys[0]}.`);
-    return normalized;
-  };
-  const requireCount = (record: JsonRecord, ...keys: string[]): number => {
-    const normalized = asNumber(read(record, ...keys));
-    if (normalized === undefined || !Number.isInteger(normalized) || normalized < 0) {
-      throw new TypeError(`Result interpretation has an invalid ${keys[0]}.`);
-    }
-    return normalized;
-  };
-  const requireNonNegativeNumber = (record: JsonRecord, ...keys: string[]): number => {
-    const normalized = asNumber(read(record, ...keys));
-    if (normalized === undefined || normalized < 0) {
-      throw new TypeError(`Result interpretation has an invalid ${keys[0]}.`);
-    }
-    return normalized;
-  };
-  const requireBoolean = (record: JsonRecord, ...keys: string[]): boolean => {
-    const normalized = asBoolean(read(record, ...keys));
-    if (normalized === undefined) {
-      throw new TypeError(`Result interpretation has an invalid ${keys[0]}.`);
-    }
-    return normalized;
-  };
-  const requireStringList = (record: JsonRecord, ...keys: string[]): string[] => {
-    const raw = read(record, ...keys);
-    if (!Array.isArray(raw) || raw.some((item) => typeof item !== 'string' || item.trim().length === 0)) {
-      throw new TypeError(`Result interpretation has an invalid ${keys[0]}.`);
-    }
-    return raw.map((item) => (item as string).trim());
-  };
-
-  const rawMessage = read(value, 'message');
-  if (!isRecord(rawMessage)) throw new TypeError('Result interpretation message is not an object.');
-  if (read(rawMessage, 'role') !== 'assistant') {
+): ResultInterpretationAssistantMessage {
+  if (!isRecord(value)) throw new TypeError('Result interpretation message is not an object.');
+  if (read(value, 'role') !== 'assistant') {
     throw new TypeError('Result interpretation message role must be assistant.');
   }
-  const rawLanguage = read(rawMessage, 'language');
-  if (rawLanguage !== 'en' && rawLanguage !== 'zh-CN') {
-    throw new TypeError('Result interpretation message has an invalid language.');
-  }
-  const rawAnalysisSummary = read(rawMessage, 'analysisSummary', 'analysis_summary');
+  const language = requireResultInterpretationLanguage(value, 'language');
+  const rawAnalysisSummary = read(value, 'analysisSummary', 'analysis_summary');
   if (rawAnalysisSummary !== undefined && rawAnalysisSummary !== null
     && (typeof rawAnalysisSummary !== 'string' || rawAnalysisSummary.trim().length === 0)) {
     throw new TypeError('Result interpretation message has an invalid analysisSummary.');
   }
-  const rawToolActivity = read(rawMessage, 'toolActivity', 'tool_activity');
+  const rawToolActivity = read(value, 'toolActivity', 'tool_activity');
   if (!Array.isArray(rawToolActivity)) {
     throw new TypeError('Result interpretation message has an invalid toolActivity.');
   }
   const toolActivity: ResultInterpretationToolActivity[] = rawToolActivity.map((item) => {
     if (!isRecord(item)) throw new TypeError('Result interpretation tool activity is not an object.');
     return {
-      tool: requireString(item, 'tool'),
-      label: requireString(item, 'label'),
-      itemCount: requireCount(item, 'itemCount', 'item_count'),
-      truncated: requireBoolean(item, 'truncated'),
-      evidenceId: requireString(item, 'evidenceId', 'evidence_id'),
+      tool: requireResultInterpretationString(item, 'tool'),
+      label: requireResultInterpretationString(item, 'label'),
+      itemCount: requireResultInterpretationCount(item, 'itemCount', 'item_count'),
+      truncated: requireResultInterpretationBoolean(item, 'truncated'),
+      evidenceId: requireResultInterpretationString(item, 'evidenceId', 'evidence_id'),
     };
   });
-  const createdAt = requireString(rawMessage, 'createdAt', 'created_at');
-  if (Number.isNaN(Date.parse(createdAt))) {
-    throw new TypeError('Result interpretation message has an invalid createdAt.');
-  }
-  const message: ResultInterpretationAssistantMessage = {
-    id: requireString(rawMessage, 'id'),
+  return {
+    id: requireResultInterpretationString(value, 'id'),
     role: 'assistant',
-    language: rawLanguage as ResultInterpretationLanguage,
-    answer: requireString(rawMessage, 'answer'),
-    analysisSummary: typeof rawAnalysisSummary === 'string' ? rawAnalysisSummary.trim() : undefined,
-    groundingReferences: requireStringList(rawMessage, 'groundingReferences', 'grounding_references'),
-    followUpSuggestions: requireStringList(rawMessage, 'followUpSuggestions', 'follow_up_suggestions'),
+    language,
+    answer: requireResultInterpretationString(value, 'answer'),
+    analysisSummary: typeof rawAnalysisSummary === 'string'
+      ? rawAnalysisSummary.trim()
+      : undefined,
+    groundingReferences: requireResultInterpretationStringList(
+      value,
+      'groundingReferences',
+      'grounding_references',
+    ),
+    followUpSuggestions: requireResultInterpretationStringList(
+      value,
+      'followUpSuggestions',
+      'follow_up_suggestions',
+    ),
     toolActivity,
-    provider: requireString(rawMessage, 'provider'),
-    model: requireString(rawMessage, 'model'),
-    promptTokens: requireCount(rawMessage, 'promptTokens', 'prompt_tokens'),
-    completionTokens: requireCount(rawMessage, 'completionTokens', 'completion_tokens'),
-    cachedTokens: requireCount(rawMessage, 'cachedTokens', 'cached_tokens'),
-    totalTokens: requireCount(rawMessage, 'totalTokens', 'total_tokens'),
-    modelCalls: requireCount(rawMessage, 'modelCalls', 'model_calls'),
-    cacheHit: requireBoolean(rawMessage, 'cacheHit', 'cache_hit'),
-    repairUsed: requireBoolean(rawMessage, 'repairUsed', 'repair_used'),
-    plannerUsed: requireBoolean(rawMessage, 'plannerUsed', 'planner_used'),
-    promptVersion: requireString(rawMessage, 'promptVersion', 'prompt_version'),
-    latencyMs: requireNonNegativeNumber(rawMessage, 'latencyMs', 'latency_ms'),
-    createdAt,
+    provider: requireResultInterpretationString(value, 'provider'),
+    model: requireResultInterpretationString(value, 'model'),
+    promptTokens: requireResultInterpretationCount(value, 'promptTokens', 'prompt_tokens'),
+    completionTokens: requireResultInterpretationCount(
+      value,
+      'completionTokens',
+      'completion_tokens',
+    ),
+    cachedTokens: requireResultInterpretationCount(value, 'cachedTokens', 'cached_tokens'),
+    totalTokens: requireResultInterpretationCount(value, 'totalTokens', 'total_tokens'),
+    modelCalls: requireResultInterpretationCount(value, 'modelCalls', 'model_calls'),
+    cacheHit: requireResultInterpretationBoolean(value, 'cacheHit', 'cache_hit'),
+    repairUsed: requireResultInterpretationBoolean(value, 'repairUsed', 'repair_used'),
+    plannerUsed: requireResultInterpretationBoolean(value, 'plannerUsed', 'planner_used'),
+    promptVersion: requireResultInterpretationString(value, 'promptVersion', 'prompt_version'),
+    latencyMs: requireResultInterpretationNumber(value, 'latencyMs', 'latency_ms'),
+    createdAt: requireResultInterpretationDate(value, 'createdAt', 'created_at'),
   };
+}
+
+export function normalizeResultInterpretationChatMessage(
+  value: unknown,
+): ResultInterpretationChatMessage {
+  if (!isRecord(value)) throw new TypeError('Result interpretation message is not an object.');
+  if (read(value, 'role') === 'assistant') {
+    return normalizeResultInterpretationAssistantMessage(value);
+  }
+  if (read(value, 'role') !== 'user') {
+    throw new TypeError('Result interpretation message has an invalid role.');
+  }
+  return {
+    id: requireResultInterpretationString(value, 'id'),
+    role: 'user',
+    language: requireResultInterpretationLanguage(value, 'language'),
+    content: requireResultInterpretationString(value, 'content'),
+    createdAt: requireResultInterpretationDate(value, 'createdAt', 'created_at'),
+  };
+}
+
+export function normalizeResultInterpretationChatResponse(
+  value: unknown,
+): ResultInterpretationChatResponse {
+  if (!isRecord(value)) throw new TypeError('Result interpretation response is not an object.');
+  return {
+    schemaVersion: requireResultInterpretationSchema(value),
+    conversationId: requireResultInterpretationString(value, 'conversationId', 'conversation_id'),
+    clientRequestId: requireResultInterpretationString(value, 'clientRequestId', 'client_request_id'),
+    experimentId: requireResultInterpretationString(value, 'experimentId', 'experiment_id'),
+    resultHash: requireResultInterpretationString(value, 'resultHash', 'result_hash'),
+    historyPersisted: requireResultInterpretationBoolean(
+      value,
+      'historyPersisted',
+      'history_persisted',
+    ),
+    message: normalizeResultInterpretationAssistantMessage(read(value, 'message')),
+  };
+}
+
+function normalizeResultInterpretationConversationSummary(
+  value: unknown,
+): ResultInterpretationConversationSummary {
+  if (!isRecord(value)) {
+    throw new TypeError('Result interpretation conversation summary is not an object.');
+  }
+  return {
+    conversationId: requireResultInterpretationString(value, 'conversationId', 'conversation_id'),
+    experimentId: requireResultInterpretationString(value, 'experimentId', 'experiment_id'),
+    language: requireResultInterpretationLanguage(value, 'language'),
+    exchangeCount: requireResultInterpretationCount(value, 'exchangeCount', 'exchange_count'),
+    lastUserMessage: requireResultInterpretationString(
+      value,
+      'lastUserMessage',
+      'last_user_message',
+    ),
+    createdAt: requireResultInterpretationDate(value, 'createdAt', 'created_at'),
+    updatedAt: requireResultInterpretationDate(value, 'updatedAt', 'updated_at'),
+  };
+}
+
+export function normalizeResultInterpretationConversationList(
+  value: unknown,
+): ResultInterpretationConversationList {
+  if (!isRecord(value)) {
+    throw new TypeError('Result interpretation conversation list is not an object.');
+  }
+  const rawItems = read(value, 'items');
+  if (!Array.isArray(rawItems)) {
+    throw new TypeError('Result interpretation conversation list has invalid items.');
+  }
+  return {
+    schemaVersion: requireResultInterpretationSchema(value),
+    items: rawItems.map(normalizeResultInterpretationConversationSummary),
+  };
+}
+
+export function normalizeResultInterpretationConversation(
+  value: unknown,
+): ResultInterpretationConversation {
+  if (!isRecord(value)) {
+    throw new TypeError('Result interpretation conversation is not an object.');
+  }
+  const rawMessages = read(value, 'messages');
+  if (!Array.isArray(rawMessages) || rawMessages.length === 0 || rawMessages.length % 2 !== 0) {
+    throw new TypeError('Result interpretation conversation has invalid messages.');
+  }
+  const messages = rawMessages.map(normalizeResultInterpretationChatMessage);
+  const messageIds = new Set<string>();
+  messages.forEach((message, index) => {
+    const expectedRole = index % 2 === 0 ? 'user' : 'assistant';
+    if (message.role !== expectedRole || messageIds.has(message.id)) {
+      throw new TypeError('Result interpretation conversation has invalid message ordering.');
+    }
+    messageIds.add(message.id);
+  });
+  return {
+    schemaVersion: requireResultInterpretationSchema(value),
+    conversationId: requireResultInterpretationString(value, 'conversationId', 'conversation_id'),
+    experimentId: requireResultInterpretationString(value, 'experimentId', 'experiment_id'),
+    language: requireResultInterpretationLanguage(value, 'language'),
+    createdAt: requireResultInterpretationDate(value, 'createdAt', 'created_at'),
+    updatedAt: requireResultInterpretationDate(value, 'updatedAt', 'updated_at'),
+    messages,
+  };
+}
+
+export function normalizeResultInterpretationConversationDeleteResult(
+  value: unknown,
+): ResultInterpretationConversationDeleteResult {
+  if (!isRecord(value)) {
+    throw new TypeError('Result interpretation conversation deletion is not an object.');
+  }
+  if (read(value, 'deleted') !== true) {
+    throw new TypeError('Result interpretation conversation deletion was not confirmed.');
+  }
+  return {
+    schemaVersion: requireResultInterpretationSchema(value),
+    deleted: true,
+    conversationId: requireResultInterpretationString(value, 'conversationId', 'conversation_id'),
+  };
+}
+
+const RESULT_INTERPRETATION_STREAM_STAGES: readonly ResultInterpretationStreamStage[] = [
+  'PREPARING',
+  'PLANNING',
+  'READING_RESULTS',
+  'GENERATING',
+  'REASONING',
+  'VALIDATING',
+  'REPAIRING',
+  'COMPLETED',
+];
+
+function normalizeNonNegativeInteger(value: unknown, field: string): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  const normalized = asNumber(value);
+  if (normalized === undefined || !Number.isInteger(normalized) || normalized < 0) {
+    throw new TypeError(`Result interpretation stream has an invalid ${field}.`);
+  }
+  return normalized;
+}
+
+/**
+ * 流式阶段只接受公开契约中的固定枚举，并主动丢弃服务端自由文本 message。
+ * 这避免把供应商原始输出或内部执行细节误当成安全的进度说明展示给用户。
+ */
+export function normalizeResultInterpretationStreamProgress(
+  value: unknown,
+): ResultInterpretationStreamProgress {
+  if (!isRecord(value)) throw new TypeError('Result interpretation stream progress is not an object.');
+  const schemaVersion = asOptionalString(read(value, 'schemaVersion', 'schema_version'));
+  if (schemaVersion !== '1.0.0') {
+    throw new TypeError('Result interpretation stream has an invalid schemaVersion.');
+  }
+  const rawStage = asOptionalString(read(value, 'stage'));
+  if (!rawStage || !RESULT_INTERPRETATION_STREAM_STAGES.includes(
+    rawStage as ResultInterpretationStreamStage,
+  )) {
+    throw new TypeError('Result interpretation stream has an invalid stage.');
+  }
+  const elapsedMs = asNumber(read(value, 'elapsedMs', 'elapsed_ms'));
+  if (elapsedMs === undefined || elapsedMs < 0) {
+    throw new TypeError('Result interpretation stream has an invalid elapsedMs.');
+  }
 
   return {
-    schemaVersion: requireString(value, 'schemaVersion', 'schema_version'),
-    conversationId: requireString(value, 'conversationId', 'conversation_id'),
-    clientRequestId: requireString(value, 'clientRequestId', 'client_request_id'),
-    experimentId: requireString(value, 'experimentId', 'experiment_id'),
-    resultHash: requireString(value, 'resultHash', 'result_hash'),
+    schemaVersion: '1.0.0',
+    stage: rawStage as ResultInterpretationStreamStage,
+    elapsedMs,
+    chunkCount: normalizeNonNegativeInteger(
+      read(value, 'chunkCount', 'chunk_count'),
+      'chunkCount',
+    ),
+    answerChunkCount: normalizeNonNegativeInteger(
+      read(value, 'answerChunkCount', 'answer_chunk_count'),
+      'answerChunkCount',
+    ),
+    reasoningChunkCount: normalizeNonNegativeInteger(
+      read(value, 'reasoningChunkCount', 'reasoning_chunk_count'),
+      'reasoningChunkCount',
+    ),
+  };
+}
+
+export function normalizeResultInterpretationStreamError(
+  value: unknown,
+): ResultInterpretationStreamErrorPayload {
+  if (!isRecord(value)) throw new TypeError('Result interpretation stream error is not an object.');
+  const code = asOptionalString(read(value, 'code'))?.trim();
+  const message = asOptionalString(read(value, 'message'))?.trim();
+  const retryable = asBoolean(read(value, 'retryable'));
+  const httpStatus = normalizeNonNegativeInteger(
+    read(value, 'httpStatus', 'http_status'),
+    'httpStatus',
+  );
+  const uncertainBillableAttempts = normalizeNonNegativeInteger(
+    read(value, 'uncertainBillableAttempts', 'uncertain_billable_attempts'),
+    'uncertainBillableAttempts',
+  ) ?? 0;
+  if (!code || !message || retryable === undefined || httpStatus === undefined
+  ) {
+    throw new TypeError('Result interpretation stream error is incomplete.');
+  }
+  const traceId = asOptionalString(read(value, 'traceId', 'trace_id'))?.trim();
+  return {
+    code,
     message,
+    retryable,
+    httpStatus,
+    uncertainBillableAttempts,
+    traceId: traceId || undefined,
   };
 }
 

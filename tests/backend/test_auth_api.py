@@ -280,3 +280,128 @@ def test_production_blocks_account_writes_until_admin_bootstrap(
     assert verification.status_code == 503
     assert verification.json()["error"]["code"] == "AUTHENTICATION_INITIALIZING"
     assert CapturingMailer.messages == []
+
+
+def _interpretationRequestPayload(clientRequestId: str) -> dict[str, object]:
+    return {
+        "schemaVersion": "1.0.0",
+        "conversationId": "auth-rate-limit-conversation",
+        "clientRequestId": clientRequestId,
+        "mode": "INITIAL",
+        "language": "en",
+        "reasoningSummaryRequested": False,
+        "messages": [{"role": "user", "content": "Explain the saved result."}],
+    }
+
+
+def test_anonymous_requests_cannot_exhaust_authenticated_interpretation_quota(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configureProduction(monkeypatch)
+    monkeypatch.setattr(mainModule, "SmtpVerificationMailer", CapturingMailer)
+    bootstrapTestAdmin(tmp_path)
+    url = "/api/v1/experiments/missing-experiment/interpretation-chat/stream"
+    sharedIp = "203.0.113.81"
+
+    with TestClient(createApp(tmp_path), base_url="https://testserver") as client:
+        anonymousResponses = [
+            client.post(
+                url,
+                headers={"Origin": "https://testserver", "X-Forwarded-For": sharedIp},
+                json=_interpretationRequestPayload(f"anonymous-request-{index:03d}"),
+            )
+            for index in range(12)
+        ]
+        login = client.post(
+            "/api/v1/auth/login",
+            json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD, "language": "en"},
+        )
+        authenticated = client.post(
+            url,
+            headers={
+                "Origin": "https://testserver",
+                "X-CSRF-Token": login.json()["csrfToken"],
+                "X-Forwarded-For": sharedIp,
+            },
+            json=_interpretationRequestPayload("authenticated-request-001"),
+        )
+
+    assert [response.status_code for response in anonymousResponses] == [401] * 12
+    assert login.status_code == 200
+    assert authenticated.status_code == 404
+    assert authenticated.json()["error"]["code"] == "EXPERIMENT_NOT_FOUND"
+
+
+def test_authenticated_users_on_same_nat_have_independent_interpretation_quota(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configureProduction(monkeypatch)
+    monkeypatch.setattr(mainModule, "SmtpVerificationMailer", CapturingMailer)
+    bootstrapTestAdmin(tmp_path)
+    userEmail = "shared-nat-analyst@example.com"
+    userPassword = "Analyst password 123!"
+    url = "/api/v1/experiments/missing-experiment/interpretation-chat/stream"
+    sharedIp = "203.0.113.82"
+
+    with TestClient(createApp(tmp_path), base_url="https://testserver") as client:
+        adminLogin = client.post(
+            "/api/v1/auth/login",
+            json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD, "language": "en"},
+        )
+        assert adminLogin.status_code == 200
+        adminCsrf = adminLogin.json()["csrfToken"]
+        adminToken = client.cookies.get(mainModule.AUTH_COOKIE_NAME)
+        assert adminToken
+
+        codeResponse = client.post(
+            "/api/v1/auth/verification-code",
+            json={"email": userEmail, "purpose": "REGISTER", "language": "en"},
+        )
+        assert codeResponse.status_code == 202
+        registered = client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": userEmail,
+                "password": userPassword,
+                "verificationCode": CapturingMailer.messages[-1].code,
+                "language": "en",
+            },
+        )
+        assert registered.status_code == 201
+        userCsrf = registered.json()["csrfToken"]
+        userToken = client.cookies.get(mainModule.AUTH_COOKIE_NAME)
+        assert userToken
+        assert userToken != adminToken
+
+        client.cookies.clear()
+        client.cookies.set(mainModule.AUTH_COOKIE_NAME, adminToken)
+        adminResponses = [
+            client.post(
+                url,
+                headers={
+                    "Origin": "https://testserver",
+                    "X-CSRF-Token": adminCsrf,
+                    "X-Forwarded-For": sharedIp,
+                },
+                json=_interpretationRequestPayload(f"admin-request-{index:03d}"),
+            )
+            for index in range(8)
+        ]
+
+        client.cookies.clear()
+        client.cookies.set(mainModule.AUTH_COOKIE_NAME, userToken)
+        userResponse = client.post(
+            url,
+            headers={
+                "Origin": "https://testserver",
+                "X-CSRF-Token": userCsrf,
+                "X-Forwarded-For": sharedIp,
+            },
+            json=_interpretationRequestPayload("user-request-001"),
+        )
+
+    assert [response.status_code for response in adminResponses] == [404] * 8
+    assert userResponse.status_code == 404
+    assert userResponse.json()["error"]["code"] == "EXPERIMENT_NOT_FOUND"

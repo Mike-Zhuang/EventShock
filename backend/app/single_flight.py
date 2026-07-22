@@ -26,9 +26,42 @@ class _ActiveFlight:
 
 
 @dataclass(slots=True)
+class _CachedFailure:
+    """不持有 traceback 的异常快照；每次重放都构造新的异常实例。"""
+
+    errorType: type[Exception]
+    arguments: tuple[Any, ...]
+    attributes: dict[str, Any]
+
+    @classmethod
+    def fromError(cls, error: Exception) -> _CachedFailure | None:
+        failure = cls(
+            errorType=type(error),
+            arguments=error.args,
+            attributes=dict(vars(error)),
+        )
+        try:
+            failure.replay()
+        except (AttributeError, TypeError, ValueError):
+            # 无法稳定重建的第三方异常不进入完成态缓存，避免改变异常类型语义。
+            return None
+        return failure
+
+    def replay(self) -> Exception:
+        error = self.errorType.__new__(self.errorType)
+        BaseException.__init__(error, *self.arguments)
+        vars(error).update(self.attributes)
+        error.__traceback__ = None
+        error.__cause__ = None
+        error.__context__ = None
+        return error
+
+
+@dataclass(slots=True)
 class _CompletedFlight:
     requestHash: str
     result: Any
+    failure: _CachedFailure | None
     expiresAt: float
 
 
@@ -45,10 +78,11 @@ def canonicalRequestHash(payload: Mapping[str, Any]) -> str:
 
 
 class ResultInterpretationSingleFlight:
-    """按登录会话和客户端请求 ID 合并结果解释请求。
+    """按账号和客户端请求 ID 合并结果解释请求。
 
-    调用方取消等待时，底层任务仍继续；成功响应只在内存保留一分钟，以覆盖
-    “供应商已计费、HTTP 响应丢失”后的同 ID 重试，不写数据库或长期聊天缓存。
+    调用方取消等待时，底层任务仍继续；成功响应或失败异常只在内存保留一分钟，
+    以覆盖“供应商可能已计费、HTTP 响应丢失”后的同 ID 重试，不写数据库或
+    长期聊天缓存。
     """
 
     def __init__(
@@ -83,7 +117,7 @@ class ResultInterpretationSingleFlight:
         return len(self._completedFlights)
 
     async def purgeExpired(self) -> int:
-        """主动清理超过重试窗口的响应，避免无后续请求时继续驻留内存。"""
+        """主动清理超过重试窗口的完成态，避免无后续请求时继续驻留内存。"""
 
         async with self._stateLock:
             before = len(self._completedFlights)
@@ -116,7 +150,10 @@ class ResultInterpretationSingleFlight:
                     raise SingleFlightRequestConflictError(
                         "clientRequestId is bound to a different recent request"
                     )
-                # 仅保留一分钟，覆盖“服务端完成但响应在网络中丢失”的付费重试窗口。
+                # 仅保留一分钟，覆盖“供应商可能已计费但响应失败或丢失”的重试窗口。
+                if completedFlight.failure is not None:
+                    # 每次新建异常，缓存本身永远不持有本次 HTTP 请求的 traceback。
+                    raise completedFlight.failure.replay()
                 return completedFlight.result  # type: ignore[return-value]
             activeFlight = self._activeFlights.get(key)
             if activeFlight is not None:
@@ -134,7 +171,7 @@ class ResultInterpretationSingleFlight:
                     principalKey,
                     asyncio.Lock(),
                 )
-                # 同一 BYOK 会话最多执行一个供应商请求；不同 request ID 排队但不合并。
+                # 同一账号最多执行一个供应商请求；不同 request ID 排队但不合并。
                 task = asyncio.create_task(
                     self._runForPrincipal(principalLock, operation),
                     name=f"result-interpretation:{clientRequestId[:32]}",
@@ -190,18 +227,32 @@ class ResultInterpretationSingleFlight:
             if activeFlight is None or activeFlight.task is not completedTask:
                 return
             self._activeFlights.pop(key, None)
-            if not completedTask.cancelled() and completedTask.exception() is None:
-                if len(self._completedFlights) >= self._maxCompletedFlights:
-                    oldestKey = min(
-                        self._completedFlights,
-                        key=lambda item: self._completedFlights[item].expiresAt,
-                    )
-                    self._completedFlights.pop(oldestKey, None)
-                self._completedFlights[key] = _CompletedFlight(
-                    requestHash=activeFlight.requestHash,
-                    result=completedTask.result(),
-                    expiresAt=self._clock() + self._completedTtlSeconds,
+            if not completedTask.cancelled():
+                completedError = completedTask.exception()
+                failure = (
+                    _CachedFailure.fromError(completedError)
+                    if isinstance(completedError, Exception)
+                    else None
                 )
+                if completedError is None or failure is not None:
+                    if len(self._completedFlights) >= self._maxCompletedFlights:
+                        oldestKey = min(
+                            self._completedFlights,
+                            key=lambda item: self._completedFlights[item].expiresAt,
+                        )
+                        self._completedFlights.pop(oldestKey, None)
+                    self._completedFlights[key] = _CompletedFlight(
+                        requestHash=activeFlight.requestHash,
+                        result=(completedTask.result() if completedError is None else None),
+                        failure=failure,
+                        expiresAt=self._clock() + self._completedTtlSeconds,
+                    )
+                if isinstance(completedError, Exception):
+                    # 超时异常的因果链可能持有 httpx 请求（包括 Authorization 头）；
+                    # 快照创建后立即断开原异常和传输对象的引用。
+                    completedError.__traceback__ = None
+                    completedError.__cause__ = None
+                    completedError.__context__ = None
             principalKey = key[0]
             if not any(activeKey[0] == principalKey for activeKey in self._activeFlights):
                 principalLock = self._principalLocks.get(principalKey)

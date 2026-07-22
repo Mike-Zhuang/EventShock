@@ -327,10 +327,16 @@ def test_zhipu_gateway_accepts_valid_json_and_records_audit_metadata() -> None:
     assert API_KEY not in json.dumps(requestPayloads[0])
 
 
-def test_zhipu_gateway_fails_closed_when_success_response_omits_usage() -> None:
+@pytest.mark.parametrize("usageFailure", ["missing", "invalid"])
+def test_zhipu_gateway_marks_untrusted_success_usage_as_uncertain(
+    usageFailure: str,
+) -> None:
     observation = makeObservation()
     body = providerResponse(decisionPayload())
-    del body["usage"]
+    if usageFailure == "missing":
+        del body["usage"]
+    else:
+        body["usage"]["total_tokens"] += 1
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=body, request=request)
@@ -346,6 +352,7 @@ def test_zhipu_gateway_fails_closed_when_success_response_omits_usage() -> None:
 
     assert result.fallbackUsed is True
     assert result.usage.totalTokens == 0
+    assert result.uncertainBillableAttempts == 1
     assert FailureCode.MODEL_USAGE_MISSING in result.failureCodes
 
 
@@ -486,6 +493,10 @@ def test_schema_failure_gets_exactly_one_repair_and_usage_is_accumulated() -> No
     )
 
     assert len(requestPayloads) == 2
+    assert requestPayloads[0]["request_id"] == "request-test-001"
+    assert requestPayloads[1]["request_id"] != requestPayloads[0]["request_id"]
+    assert requestPayloads[1]["request_id"].startswith("repair-")
+    assert 6 <= len(requestPayloads[1]["request_id"]) <= 64
     assert len(requestPayloads[1]["messages"]) == 4
     assert "SCHEMA_INVALID" in requestPayloads[1]["messages"][-1]["content"]
     repairedOutput = requestPayloads[1]["messages"][-2]["content"]
@@ -496,6 +507,99 @@ def test_schema_failure_gets_exactly_one_repair_and_usage_is_accumulated() -> No
     assert result.failureCodes == (FailureCode.SCHEMA_INVALID,)
     assert result.usage.promptTokens == 16
     assert result.usage.completionTokens == 18
+
+
+@pytest.mark.parametrize("usageFailure", ["missing", "invalid"])
+def test_zhipu_repair_usage_failure_is_an_uncertain_billable_attempt(
+    usageFailure: str,
+) -> None:
+    observation = makeObservation()
+    invalid = providerResponse(decisionPayload(targetFraction=2.0))
+    repaired = providerResponse(decisionPayload(), promptTokens=9, outputTokens=10)
+    if usageFailure == "missing":
+        del repaired["usage"]
+    else:
+        repaired["usage"]["prompt_tokens"] = -1
+    responses = [invalid, repaired]
+    requestCount = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requestCount
+        requestCount += 1
+        return httpx.Response(200, json=responses.pop(0), request=request)
+
+    result = runGateway(
+        handler,
+        lambda gateway: gateway.generateStructured(
+            makeRequest(observation),
+            BeliefDecision,
+            ModelPolicy(base_backoff_seconds=0.0),
+        ),
+    )
+
+    assert requestCount == 2
+    assert result.repairUsed is True
+    assert result.fallbackUsed is True
+    assert result.transportAttempts == 2
+    assert result.uncertainBillableAttempts == 1
+    assert result.usage.totalTokens == 30
+    assert result.failureCodes[:2] == (
+        FailureCode.SCHEMA_INVALID,
+        FailureCode.MODEL_USAGE_MISSING,
+    )
+
+
+def test_zhipu_explicit_refusal_is_not_repaired() -> None:
+    observation = makeObservation()
+    response = providerResponse(decisionPayload())
+    response["choices"][0]["message"]["refusal"] = "Cannot comply."
+    requestCount = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requestCount
+        requestCount += 1
+        return httpx.Response(200, json=response, request=request)
+
+    with pytest.raises(ModelGatewayError) as captured:
+        runGateway(
+            handler,
+            lambda gateway: gateway.generateStructured(
+                makeRequest(observation),
+                BeliefDecision,
+                ModelPolicy(base_backoff_seconds=0.0, allow_rule_fallback=False),
+            ),
+        )
+
+    assert requestCount == 1
+    assert captured.value.code == FailureCode.REFUSAL
+    assert captured.value.attempts == 1
+    assert captured.value.repairUsed is False
+
+
+def test_zhipu_empty_content_gets_one_bounded_repair() -> None:
+    observation = makeObservation()
+    empty = providerResponse(decisionPayload())
+    empty["choices"][0]["message"]["content"] = ""
+    responses = [empty, providerResponse(decisionPayload())]
+    requestCount = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requestCount
+        requestCount += 1
+        return httpx.Response(200, json=responses.pop(0), request=request)
+
+    result = runGateway(
+        handler,
+        lambda gateway: gateway.generateStructured(
+            makeRequest(observation),
+            BeliefDecision,
+            ModelPolicy(base_backoff_seconds=0.0, allow_rule_fallback=False),
+        ),
+    )
+
+    assert requestCount == 2
+    assert result.repairUsed is True
+    assert result.failureCodes == (FailureCode.MODEL_RESPONSE_INVALID,)
 
 
 def test_invalid_200_content_still_accumulates_usage_before_repair() -> None:
@@ -722,7 +826,85 @@ def test_zhipu_provider_error_redacts_api_key_before_exception_or_log() -> None:
 
     assert error.value.code == FailureCode.MODEL_AUTHENTICATION_ERROR
     assert API_KEY not in str(error.value)
-    assert "[REDACTED]" in str(error.value)
+    assert str(error.value) == "model provider rejected the API credential"
+    assert "Rejected" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("statusCode", "expectedCode", "retryable"),
+    [
+        (401, FailureCode.MODEL_AUTHENTICATION_ERROR, False),
+        (403, FailureCode.MODEL_PERMISSION_ERROR, False),
+        (429, FailureCode.MODEL_RATE_LIMITED, True),
+        (500, FailureCode.MODEL_TRANSPORT_ERROR, True),
+        (503, FailureCode.MODEL_OVERLOADED, True),
+    ],
+)
+def test_zhipu_non_json_http_errors_use_safe_status_classification(
+    statusCode: int,
+    expectedCode: FailureCode,
+    retryable: bool,
+) -> None:
+    observation = makeObservation()
+    unsafeBody = f"<html>{API_KEY} analyst@example.com private prompt</html>".encode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            statusCode,
+            content=unsafeBody,
+            headers={"Content-Type": "text/html"},
+            request=request,
+        )
+
+    with pytest.raises(ModelGatewayError) as captured:
+        runGateway(
+            handler,
+            lambda gateway: gateway.generateStructured(
+                makeRequest(observation),
+                BeliefDecision,
+                ModelPolicy(
+                    max_transport_attempts=1,
+                    base_backoff_seconds=0.0,
+                    allow_rule_fallback=False,
+                ),
+            ),
+        )
+
+    assert captured.value.code == expectedCode
+    assert captured.value.retryable is retryable
+    assert captured.value.httpStatus == statusCode
+    assert API_KEY not in str(captured.value)
+    assert "analyst@example.com" not in str(captured.value)
+
+
+def test_zhipu_non_json_rate_limit_retries() -> None:
+    observation = makeObservation()
+    requestCount = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requestCount
+        requestCount += 1
+        if requestCount == 1:
+            return httpx.Response(
+                429,
+                content=b"<html>rate limited</html>",
+                headers={"Content-Type": "text/html", "Retry-After": "0"},
+                request=request,
+            )
+        return httpx.Response(200, json=providerResponse(decisionPayload()), request=request)
+
+    result = runGateway(
+        handler,
+        lambda gateway: gateway.generateStructured(
+            makeRequest(observation),
+            BeliefDecision,
+            ModelPolicy(max_transport_attempts=2, base_backoff_seconds=0.0),
+        ),
+    )
+
+    assert requestCount == 2
+    assert result.transportAttempts == 2
+    assert result.fallbackUsed is False
 
 
 def test_immutable_cache_prevents_second_call_and_conflicting_overwrite() -> None:

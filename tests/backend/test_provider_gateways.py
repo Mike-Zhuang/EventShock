@@ -334,7 +334,7 @@ def failureResponse(provider: str) -> tuple[dict, FailureCode]:
         response["choices"][0]["finish_reason"] = "content_filter"
         return response, FailureCode.CONTENT_FILTERED
     response["choices"][0]["message"]["content"] = ""
-    return response, FailureCode.REFUSAL
+    return response, FailureCode.MODEL_RESPONSE_INVALID
 
 
 @pytest.mark.parametrize(("provider", "model", "gatewayFactory"), PROVIDER_CASES)
@@ -344,8 +344,11 @@ def test_provider_specific_refusal_truncation_and_empty_content_are_rejected(
     gatewayFactory: GatewayFactory,
 ) -> None:
     response, expectedCode = failureResponse(provider)
+    requestCount = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requestCount
+        requestCount += 1
         return httpx.Response(200, json=response, request=request)
 
     async def execute() -> None:
@@ -359,6 +362,9 @@ def test_provider_specific_refusal_truncation_and_empty_content_are_rejected(
     with pytest.raises(ModelGatewayError) as error:
         asyncio.run(execute())
     assert error.value.code == expectedCode
+    expectedRepair = expectedCode == FailureCode.MODEL_RESPONSE_INVALID
+    assert requestCount == (2 if expectedRepair else 1)
+    assert error.value.repairUsed is expectedRepair
 
 
 def test_shared_pipeline_repairs_once_then_caches_validated_result() -> None:
@@ -454,7 +460,33 @@ def test_result_interpretation_advice_is_repaired_during_schema_validation() -> 
     assert result.failureCodes == (FailureCode.SCHEMA_INVALID,)
 
 
-def test_refusal_usage_is_counted_before_successful_repair() -> None:
+def test_explicit_refusal_is_not_repaired() -> None:
+    requestCount = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requestCount
+        requestCount += 1
+        response = providerResponse("openai")
+        response["output"][0]["content"] = [{"type": "refusal", "refusal": "Cannot comply."}]
+        return httpx.Response(200, json=response, request=request)
+
+    async def execute() -> object:
+        async with OpenAIRestGateway(transport=httpx.MockTransport(handler)) as gateway:
+            return await gateway.generateStructured(
+                makeRequest("openai", "gpt-5.6-luna"),
+                EventExtractionResult,
+                ModelPolicy(base_backoff_seconds=0.0, allow_rule_fallback=False),
+            )
+
+    with pytest.raises(ModelGatewayError) as captured:
+        asyncio.run(execute())
+    assert requestCount == 1
+    assert captured.value.code == FailureCode.REFUSAL
+    assert captured.value.attempts == 1
+    assert captured.value.repairUsed is False
+
+
+def test_empty_content_gets_one_bounded_repair() -> None:
     requestCount = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -462,7 +494,7 @@ def test_refusal_usage_is_counted_before_successful_repair() -> None:
         requestCount += 1
         response = providerResponse("openai")
         if requestCount == 1:
-            response["output"][0]["content"] = [{"type": "refusal", "refusal": "Cannot comply."}]
+            response["output"][0]["content"] = []
         return httpx.Response(200, json=response, request=request)
 
     async def execute() -> object:
@@ -478,7 +510,86 @@ def test_refusal_usage_is_counted_before_successful_repair() -> None:
     assert result.repairUsed is True
     assert result.usage.promptTokens == 22
     assert result.usage.completionTokens == 14
-    assert result.failureCodes == (FailureCode.REFUSAL,)
+    assert result.failureCodes == (FailureCode.MODEL_RESPONSE_INVALID,)
+
+
+@pytest.mark.parametrize(
+    ("statusCode", "expectedCode", "retryable"),
+    [
+        (401, FailureCode.MODEL_AUTHENTICATION_ERROR, False),
+        (403, FailureCode.MODEL_PERMISSION_ERROR, False),
+        (429, FailureCode.MODEL_RATE_LIMITED, True),
+        (500, FailureCode.MODEL_TRANSPORT_ERROR, True),
+        (503, FailureCode.MODEL_OVERLOADED, True),
+    ],
+)
+def test_non_zhipu_non_json_http_errors_use_safe_status_classification(
+    statusCode: int,
+    expectedCode: FailureCode,
+    retryable: bool,
+) -> None:
+    unsafeBody = f"<html>{API_KEY} analyst@example.com private prompt</html>".encode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            statusCode,
+            content=unsafeBody,
+            headers={"Content-Type": "text/html"},
+            request=request,
+        )
+
+    async def execute() -> None:
+        async with OpenAIRestGateway(transport=httpx.MockTransport(handler)) as gateway:
+            await gateway.generateStructured(
+                makeRequest("openai", "gpt-5.6-luna"),
+                EventExtractionResult,
+                ModelPolicy(
+                    max_transport_attempts=1,
+                    base_backoff_seconds=0.0,
+                    allow_rule_fallback=False,
+                ),
+            )
+
+    with pytest.raises(ModelGatewayError) as captured:
+        asyncio.run(execute())
+    assert captured.value.code == expectedCode
+    assert captured.value.retryable is retryable
+    assert captured.value.httpStatus == statusCode
+    assert API_KEY not in str(captured.value)
+    assert "analyst@example.com" not in str(captured.value)
+
+
+def test_non_zhipu_non_json_rate_limit_retries() -> None:
+    requestCount = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requestCount
+        requestCount += 1
+        if requestCount == 1:
+            return httpx.Response(
+                429,
+                content=b"<html>rate limited</html>",
+                headers={"Content-Type": "text/html", "Retry-After": "0"},
+                request=request,
+            )
+        return httpx.Response(200, json=providerResponse("openai"), request=request)
+
+    async def execute() -> object:
+        async with OpenAIRestGateway(transport=httpx.MockTransport(handler)) as gateway:
+            return await gateway.generateStructured(
+                makeRequest("openai", "gpt-5.6-luna"),
+                EventExtractionResult,
+                ModelPolicy(
+                    max_transport_attempts=2,
+                    base_backoff_seconds=0.0,
+                    allow_rule_fallback=False,
+                ),
+            )
+
+    result = asyncio.run(execute())
+    assert requestCount == 2
+    assert result.transportAttempts == 2
+    assert result.fallbackUsed is False
 
 
 def test_haiku_uses_manual_thinking_budget_and_rejects_too_small_output() -> None:

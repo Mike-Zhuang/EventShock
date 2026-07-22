@@ -553,7 +553,12 @@ def proxyConfigurationPresent():
         if not fileName.endswith(".conf") or not os.path.isfile(filePath):
             continue
         content = open(filePath).read()
-        if f"proxy_pass {APP_URL}" in content and "proxy_set_header Host $host" in content:
+        if (
+            f"proxy_pass {APP_URL}" in content
+            and "proxy_set_header Host $host" in content
+            and "proxy_set_header X-Real-IP $remote_addr" in content
+            and "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for" in content
+        ):
             return True
     return False
 
