@@ -74,7 +74,7 @@ export function RunCenterPage({ navigate }: { navigate: Navigate }) {
     try {
       const nextResults = await loadResults(activeExperiment.id);
       if (!nextResults) return;
-      navigate('results', activeExperiment.id);
+      navigate('results', { experimentId: activeExperiment.id });
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error));
     }

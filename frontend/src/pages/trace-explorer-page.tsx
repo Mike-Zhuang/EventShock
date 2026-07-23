@@ -128,7 +128,15 @@ export function TraceExplorerPage() {
     <div className="page page--trace">
       <PageHeader title={t('trace.title')} subtitle={t('trace.subtitle')} guide={getPageGuide('trace', language)} />
       {!results || results.traces.length === 0 ? (
-        <EmptyState title={t('trace.selectTitle')} body={t('trace.selectBody')} icon={<FlowArrow size={28} weight="duotone" />} />
+        <section className="trace-timeline" aria-labelledby="trace-timeline-heading">
+          <div className="section-heading">
+            <h2 id="trace-timeline-heading">{t('trace.timeline')}</h2>
+            <p>{language === 'zh-CN'
+              ? '当前实验没有可用链路；目标仍保留，便于深链明确说明空状态。'
+              : 'This experiment has no available trace. The stable target remains so deep links can explain the empty state.'}</p>
+          </div>
+          <EmptyState title={t('trace.selectTitle')} body={t('trace.selectBody')} icon={<FlowArrow size={28} weight="duotone" />} />
+        </section>
       ) : (
         <div className="trace-layout">
           <section className="trace-timeline" aria-labelledby="trace-timeline-heading">

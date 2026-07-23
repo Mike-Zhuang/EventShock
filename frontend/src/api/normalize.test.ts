@@ -580,6 +580,8 @@ describe('API normalizers', () => {
     };
     const results = normalizeResults({
       experimentId: 'exp-test',
+      question: 'How does reduced market-making capacity change simulated liquidity?',
+      questionZh: '做市能力下降如何改变模拟流动性？',
       scenarioDiff: {
         parameter: 'marketMakerCapacity',
         baselineValue: 1,
@@ -707,6 +709,28 @@ describe('API normalizers', () => {
         engineVersion: 'engine-0.1.0',
         pythonVersion: '3.12.13',
         schemaVersion: '1.0.0',
+      },
+      eventPackManifest: {
+        id: 'event-pack-test',
+        title: 'SpaceX event pack',
+        titleZh: 'SpaceX 事件包',
+        asOf: '2026-07-14T00:00:00Z',
+        frozenAt: '2026-07-14T01:00:00Z',
+        sources: [{ sourceId: 'source-1' }, { sourceId: 'source-2' }],
+        claims: [{ claimId: 'claim-1' }],
+      },
+    });
+    expect(results).toMatchObject({
+      question: 'How does reduced market-making capacity change simulated liquidity?',
+      questionZh: '做市能力下降如何改变模拟流动性？',
+      generatedAt: '2026-07-15T00:00:00Z',
+      validSeedCount: 2,
+      sourceSummary: {
+        eventPackId: 'event-pack-test',
+        title: 'SpaceX event pack',
+        titleZh: 'SpaceX 事件包',
+        sourceCount: 2,
+        claimCount: 1,
       },
     });
     expect(results.metrics[0]).toMatchObject({

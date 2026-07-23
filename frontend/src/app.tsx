@@ -29,7 +29,12 @@ import {
   useState,
   type ComponentType,
 } from 'react';
-import { ApiConnectionBanner, LoadingPanel, ServiceStatus } from './components/common';
+import {
+  ApiConnectionBanner,
+  ErrorPanel,
+  LoadingPanel,
+  ServiceStatus,
+} from './components/common';
 import { I18nProvider, useI18n } from './i18n';
 import { AuthenticationPage } from './pages/authentication-page';
 import { CaseLibraryPage } from './pages/case-library-page';
@@ -49,10 +54,45 @@ const TraceExplorerPage = lazy(async () => ({ default: (await import('./pages/tr
 const AdminPage = lazy(async () => ({ default: (await import('./pages/admin-page')).AdminPage }));
 
 export type ViewId = 'cases' | 'pack' | 'ai' | 'scenario' | 'preflight' | 'runs' | 'results' | 'study' | 'trace' | 'governance' | 'export' | 'admin';
-export type Navigate = (view: ViewId, experimentId?: string) => void;
+export const ROUTE_TARGET_IDS = [
+  'result-overview-heading',
+  'metrics-heading',
+  'paired-heading',
+  'paths-heading',
+  'trace-timeline-heading',
+  'agent-flow-heading',
+  'cognition-heading',
+  'cognition-decisions-heading',
+  'analysis-diagnostics-heading',
+  'result-limitations-heading',
+  'result-manifest-heading',
+] as const;
+export type RouteTargetId = (typeof ROUTE_TARGET_IDS)[number];
+
+export interface NavigateOptions {
+  experimentId?: string;
+  target?: RouteTargetId;
+}
+
+export type Navigate = (view: ViewId, options?: NavigateOptions) => void;
+
+type RouteRestoreState = 'idle' | 'loading' | 'error';
 
 const VIEW_IDS: ViewId[] = ['cases', 'pack', 'ai', 'scenario', 'preflight', 'runs', 'results', 'study', 'trace', 'governance', 'export', 'admin'];
 const MOBILE_NAVIGATION_ID = 'mobile-primary-navigation';
+const ROUTE_TARGET_VIEWS: Record<RouteTargetId, Extract<ViewId, 'results' | 'trace'>> = {
+  'result-overview-heading': 'results',
+  'metrics-heading': 'results',
+  'paired-heading': 'results',
+  'paths-heading': 'results',
+  'trace-timeline-heading': 'trace',
+  'agent-flow-heading': 'results',
+  'cognition-heading': 'results',
+  'cognition-decisions-heading': 'results',
+  'analysis-diagnostics-heading': 'results',
+  'result-limitations-heading': 'results',
+  'result-manifest-heading': 'results',
+};
 
 interface NavigationItem {
   id: ViewId;
@@ -60,16 +100,31 @@ interface NavigationItem {
   icon: ComponentType<{ size?: number; weight?: 'regular' | 'fill' }>;
 }
 
-export function parseAppRoute(hash: string): { view: ViewId; experimentId?: string } {
+export function parseAppRoute(hash: string): { view: ViewId; experimentId?: string; target?: RouteTargetId } {
   const [rawView, rawQuery = ''] = hash.replace(/^#\/?/, '').split('?', 2);
   const view = VIEW_IDS.includes(rawView as ViewId) ? rawView as ViewId : 'cases';
-  const experimentId = new URLSearchParams(rawQuery).get('experimentId') || undefined;
-  return { view, experimentId };
+  const parameters = new URLSearchParams(rawQuery);
+  const experimentId = view === 'results' || view === 'trace'
+    ? parameters.get('experimentId') || undefined
+    : undefined;
+  const rawTarget = parameters.get('target');
+  const target = rawTarget && ROUTE_TARGET_IDS.includes(rawTarget as RouteTargetId)
+    && ROUTE_TARGET_VIEWS[rawTarget as RouteTargetId] === view
+    ? rawTarget as RouteTargetId
+    : undefined;
+  return { view, experimentId, target };
 }
 
-export function buildAppHash(view: ViewId, experimentId?: string): string {
-  if (view !== 'results' || !experimentId) return `#/${view}`;
-  return `#/${view}?${new URLSearchParams({ experimentId }).toString()}`;
+export function buildAppHash(view: ViewId, options: NavigateOptions = {}): string {
+  const parameters = new URLSearchParams();
+  if ((view === 'results' || view === 'trace') && options.experimentId) {
+    parameters.set('experimentId', options.experimentId);
+  }
+  if (options.target && ROUTE_TARGET_VIEWS[options.target] === view) {
+    parameters.set('target', options.target);
+  }
+  const query = parameters.toString();
+  return query ? `#/${view}?${query}` : `#/${view}`;
 }
 
 interface NavigationSection {
@@ -118,7 +173,16 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
   const { cancelPendingExperimentRequests, loadResults, selectExperiment } = useWorkflow();
   const loadResultsRef = useRef(loadResults);
   const routeGenerationRef = useRef(0);
-  const [view, setView] = useState<ViewId>(() => parseAppRoute(window.location.hash).view);
+  const initialRoute = useMemo(() => parseAppRoute(window.location.hash), []);
+  const [view, setView] = useState<ViewId>(initialRoute.view);
+  // 带 experimentId 的刷新必须先恢复对应结果，避免先聚焦仍在页面上的上一实验同名标题。
+  const [routeTarget, setRouteTarget] = useState<RouteTargetId | undefined>(
+    initialRoute.experimentId ? undefined : initialRoute.target,
+  );
+  const [routeTargetRequest, setRouteTargetRequest] = useState(0);
+  const [routeRestoreState, setRouteRestoreState] = useState<RouteRestoreState>(
+    initialRoute.experimentId ? 'loading' : 'idle',
+  );
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [logoutError, setLogoutError] = useState(false);
@@ -135,8 +199,16 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
       const currentGeneration = ++routeGenerationRef.current;
       cancelPendingExperimentRequests();
       const route = parseAppRoute(window.location.hash);
-      if (!cancelled) setView(route.view);
-      if (route.view !== 'results' || !route.experimentId) return;
+      const requiresResultRestore = Boolean(
+        (route.view === 'results' || route.view === 'trace') && route.experimentId,
+      );
+      if (!cancelled) {
+        setView(route.view);
+        setRouteTarget(requiresResultRestore ? undefined : route.target);
+        setRouteTargetRequest((current) => current + 1);
+        setRouteRestoreState(requiresResultRestore ? 'loading' : 'idle');
+      }
+      if ((route.view !== 'results' && route.view !== 'trace') || !route.experimentId) return;
       try {
         const experiment = await selectExperiment(route.experimentId);
         if (
@@ -145,10 +217,30 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
           && currentGeneration === routeGenerationRef.current
           && experiment.status === 'COMPLETED'
         ) {
-          await loadResultsRef.current(experiment.id);
+          const restoredResults = await loadResultsRef.current(experiment.id);
+          if (
+            restoredResults
+            && !cancelled
+            && currentGeneration === routeGenerationRef.current
+          ) {
+            setRouteTarget(route.target);
+            setRouteTargetRequest((current) => current + 1);
+            setRouteRestoreState('idle');
+          } else if (!cancelled && currentGeneration === routeGenerationRef.current) {
+            setRouteRestoreState('error');
+          }
+        } else if (
+          experiment
+          && !cancelled
+          && currentGeneration === routeGenerationRef.current
+        ) {
+          setRouteRestoreState('error');
         }
       } catch {
-        // 工作流上下文已经记录可展示的错误；路由仍保留，便于刷新或审计链接。
+        // 深链恢复失败时必须遮蔽旧实验，避免新 URL 与旧结果产生错误归属。
+        if (!cancelled && currentGeneration === routeGenerationRef.current) {
+          setRouteRestoreState('error');
+        }
       }
     };
     const handleHashChange = () => void restoreRoute();
@@ -159,6 +251,41 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
       window.removeEventListener('hashchange', handleHashChange);
     };
   }, [cancelPendingExperimentRequests, selectExperiment]);
+
+  useEffect(() => {
+    if (!routeTarget) return;
+    let cancelled = false;
+    let observer: MutationObserver | undefined;
+    let timeoutId: number | undefined;
+
+    const focusTarget = () => {
+      if (cancelled) return false;
+      const target = document.getElementById(routeTarget);
+      if (!target) return false;
+      const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      target.setAttribute('tabindex', '-1');
+      target.scrollIntoView({ block: 'start', behavior: reducedMotion ? 'auto' : 'smooth' });
+      target.focus({ preventScroll: true });
+      observer?.disconnect();
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+      return true;
+    };
+
+    if (focusTarget()) return;
+    observer = new MutationObserver(() => {
+      focusTarget();
+    });
+    observer.observe(document.getElementById('main-content') ?? document.body, {
+      childList: true,
+      subtree: true,
+    });
+    timeoutId = window.setTimeout(() => observer?.disconnect(), 15_000);
+    return () => {
+      cancelled = true;
+      observer?.disconnect();
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+    };
+  }, [routeTarget, routeTargetRequest, view]);
 
   useEffect(() => {
     const mobileQuery = window.matchMedia('(max-width: 920px)');
@@ -218,14 +345,21 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
     if (restoreFocus) mobileMenuButtonRef.current?.focus();
   };
 
-  const navigate: Navigate = (nextView, experimentId) => {
+  const navigate: Navigate = (nextView, options = {}) => {
     routeGenerationRef.current += 1;
     cancelPendingExperimentRequests();
     setView(nextView);
+    const nextHash = buildAppHash(nextView, options);
+    const nextRoute = parseAppRoute(nextHash);
+    setRouteTarget(nextRoute.target);
+    setRouteTargetRequest((current) => current + 1);
+    setRouteRestoreState('idle');
     setMobileNavOpen(false);
-    window.history.replaceState(null, '', buildAppHash(nextView, experimentId));
-    document.getElementById('main-content')?.focus({ preventScroll: true });
-    window.scrollTo({ top: 0, behavior: 'auto' });
+    window.history.replaceState(null, '', nextHash);
+    if (!nextRoute.target) {
+      document.getElementById('main-content')?.focus({ preventScroll: true });
+      window.scrollTo({ top: 0, behavior: 'auto' });
+    }
   };
 
   useEffect(() => {
@@ -279,6 +413,28 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
     export: <ExportHistoryPage navigate={navigate} />,
     admin: <AdminPage />,
   };
+
+  const pageRequiresRouteRestore = (view === 'results' || view === 'trace')
+    && routeRestoreState !== 'idle';
+  const currentPage = pageRequiresRouteRestore
+    ? routeRestoreState === 'loading'
+      ? (
+        <div className="page">
+          <LoadingPanel label={language === 'zh-CN' ? '正在恢复实验结果' : 'Restoring experiment results'} />
+        </div>
+      )
+      : (
+        <div className="page">
+          <ErrorPanel
+            title={language === 'zh-CN' ? '无法恢复实验' : 'Experiment could not be restored'}
+            body={language === 'zh-CN'
+              ? '请求的实验或结果不可用。旧实验已被隐藏，请核对链接后重试。'
+              : 'The requested experiment or result is unavailable. The previous experiment has been hidden; verify the link and retry.'}
+            onRetry={() => window.dispatchEvent(new HashChangeEvent('hashchange'))}
+          />
+        </div>
+      )
+    : pages[view];
 
   const signOut = async () => {
     setLogoutBusy(true);
@@ -399,7 +555,7 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
           ) : null}
           <ApiConnectionBanner />
           <Suspense fallback={<LoadingPanel />}>
-            {pages[view]}
+            {currentPage}
           </Suspense>
           <footer className="product-footer">
             <p>{t('footer.copyright')}</p>

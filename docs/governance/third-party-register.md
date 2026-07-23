@@ -38,6 +38,13 @@
 | Carbon React / Styles | `^1.94.0` | 设计系统 | Apache-2.0 | Attribution 与 Bundle 许可复核待人工 |
 | Phosphor Icons React | `^2.1.10` | 图标 | MIT | 图标使用与 Attribution 复核待人工 |
 | Recharts | `^3.1.2` | 图表 | MIT | 图表语义由项目负责，不由库保证 |
+| React Markdown | `^10.1.0`（lock `10.1.0`） | 将模型回答转换为 React 元素 | MIT | 锁定版本与上游许可证已核对；最终 Bundle Attribution 待人工复核 |
+| Remark GFM | `^4.0.1`（lock `4.0.1`） | GFM 表格、任务列表、删除线与自动链接扩展 | MIT | 锁定版本与上游许可证已核对；最终 Bundle Attribution 待人工复核 |
+| Rehype Sanitize | `^6.0.0`（lock `6.0.0`） | 对 Markdown 生成的 HTML AST 执行白名单清理 | MIT | 锁定版本与上游许可证已核对；安全 Schema 与最终 Bundle Attribution 待人工复核 |
+| Remark Parse | `^11.0.0`（lock `11.0.0`） | 直接解析 Markdown AST，使证据编号与实际渲染语义一致 | MIT | 直接运行时依赖；锁定版本与上游许可证已核对，最终 Bundle Attribution 待人工复核 |
+| Unified | `^11.0.5`（lock `11.0.5`） | 直接构建 Remark/Rehype AST 处理管线 | MIT | 直接运行时依赖；锁定版本与上游许可证已核对，最终 Bundle Attribution 待人工复核 |
+| `@types/hast` | `^3.0.5`（lock `3.0.5`） | HTML AST TypeScript 类型 | MIT | 仅开发与类型检查；锁定版本与上游许可证已核对 |
+| `@types/mdast` | `^4.0.4`（lock `4.0.4`） | Markdown AST TypeScript 类型 | MIT | 仅开发与类型检查；锁定版本与上游许可证已核对 |
 | Vite | `^7.0.6` | Build Tool | MIT | 生产构建供应链复核待人工 |
 | TypeScript | `^5.8.3` | Type Check | Apache-2.0 | 仅开发构建 |
 | Vitest 与 Testing Library | 锁定于 package lock | 前端测试 | 以各上游声明为准 | 完整许可证导出待人工 |

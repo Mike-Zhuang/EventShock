@@ -70,7 +70,7 @@ export function ExportHistoryPage({ navigate }: { navigate: Navigate }) {
       if (experiment.status === 'COMPLETED') {
         const nextResults = await loadResults(experiment.id);
         if (!nextResults) return;
-        navigate('results', experiment.id);
+        navigate('results', { experimentId: experiment.id });
         return;
       }
       navigate('runs');
