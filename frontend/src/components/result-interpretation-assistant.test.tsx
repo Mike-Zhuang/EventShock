@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, ResultInterpretationStreamError } from '../api/client';
@@ -113,7 +113,9 @@ function createSavedSummary(
   };
 }
 
-function createSavedConversation(): ResultInterpretationConversation {
+function createSavedConversation(
+  assistantOverrides: Partial<ResultInterpretationAssistantMessage> = {},
+): ResultInterpretationConversation {
   const summary = createSavedSummary();
   return {
     schemaVersion: '1.0.0',
@@ -132,6 +134,7 @@ function createSavedConversation(): ResultInterpretationConversation {
       id: 'saved-assistant-one',
       answer: 'This validated answer was restored from server history.',
       createdAt: summary.updatedAt,
+      ...assistantOverrides,
     })],
   };
 }
@@ -250,6 +253,35 @@ describe('结果解释助手', () => {
     });
   });
 
+  it('旧历史建议中的内部证据 ID 会以可读名称显示并写入输入框', async () => {
+    vi.mocked(api.getResultInterpretationConversations).mockResolvedValue({
+      schemaVersion: '1.0.0',
+      items: [createSavedSummary()],
+    });
+    vi.mocked(api.getResultInterpretationConversation).mockResolvedValue(
+      createSavedConversation({
+        followUpSuggestions: [
+          'Compare [result:overview] with [result:legacy.v1].',
+        ],
+      }),
+    );
+    renderAssistant();
+    const user = userEvent.setup();
+
+    const savedQuestion = await screen.findByText('Explain the saved liquidity result.');
+    await user.click(savedQuestion.closest('button')!);
+    const safeSuggestion = await screen.findByRole('button', {
+      name: 'Compare Experiment overview with Legacy evidence reference.',
+    });
+
+    expect(document.body).not.toHaveTextContent('result:overview');
+    expect(document.body).not.toHaveTextContent('result:legacy.v1');
+    await user.click(safeSuggestion);
+    expect(screen.getByLabelText('Ask about this experiment')).toHaveValue(
+      'Compare Experiment overview with Legacy evidence reference.',
+    );
+  });
+
   it('删除已保存对话前要求明确确认，并只调用当前实验的删除端点', async () => {
     vi.mocked(api.getResultInterpretationConversations).mockResolvedValue({
       schemaVersion: '1.0.0',
@@ -272,7 +304,7 @@ describe('结果解释助手', () => {
     expect(screen.queryByText('Explain the saved liquidity result.')).not.toBeInTheDocument();
   });
 
-  it('只有明确点击才发起 INITIAL 请求，并将模型内容作为纯文本与折叠证据呈现', async () => {
+  it('只有明确点击才发起 INITIAL 请求，并安全渲染模型回答', async () => {
     const unsafeAnswer = 'Literal <img src=x onerror=alert(1)> and <script>alert("x")</script>.';
     vi.mocked(api.streamChatAboutResults).mockImplementation(async (_experimentId, input) => (
       createStreamResult(input, { answer: unsafeAnswer })
@@ -304,7 +336,7 @@ describe('结果解释助手', () => {
     });
     expect(input.clientRequestId).toEqual(expect.any(String));
 
-    expect(await screen.findByText(unsafeAnswer)).toBeInTheDocument();
+    expect(await screen.findByText(/Literal/)).toBeInTheDocument();
     expect(container.querySelector('script')).toBeNull();
     expect(container.querySelector('img')).toBeNull();
 
@@ -314,12 +346,244 @@ describe('结果解释助手', () => {
     expect(reasoningDetails).toHaveTextContent(
       'I compared the paired-seed effect and the registered limitations.',
     );
-    expect(screen.getByText('Result sections inspected (1)').closest('details')).not.toHaveAttribute('open');
-    expect(screen.getByText('Grounding references (2)').closest('details')).not.toHaveAttribute('open');
+    expect(screen.getByText('Evidence used').closest('details')).not.toHaveAttribute('open');
+    expect(screen.getByText('Technical details').closest('details')).not.toHaveAttribute('open');
     const suggestion = screen.getByRole('button', { name: 'How stable is this difference?' });
     await user.click(suggestion);
     expect(screen.getByLabelText('Ask about this experiment')).toHaveValue('How stable is this difference?');
     expect(api.streamChatAboutResults).toHaveBeenCalledTimes(1);
+  });
+
+  it('在助手消息中渲染 GFM，复用首次引用编号并隐藏内部证据 ID', async () => {
+    const markdownAnswer = [
+      '# Evidence-backed result',
+      '',
+      '**Spread changed** [result:paired-deltas].',
+      '',
+      '- Matched seeds were used.',
+      '- The same evidence is reused [result:paired-deltas].',
+      '',
+      '| Metric | Delta |',
+      '| --- | ---: |',
+      '| Spread | 4.8 bps |',
+      '',
+      '<script>window.__unsafe = true</script>',
+    ].join('\n');
+    vi.mocked(api.streamChatAboutResults).mockImplementation(async (_experimentId, input) => (
+      createStreamResult(input, {
+        answer: markdownAnswer,
+        analysisSummary: 'Registered limits remain important [result:limitations].',
+        groundingReferences: ['result:paired-deltas', 'result:limitations'],
+        toolActivity: [
+          {
+            tool: 'PAIRED_DELTAS',
+            label: 'Paired effects',
+            itemCount: 10,
+            truncated: false,
+            evidenceId: 'result:paired-deltas',
+          },
+          {
+            tool: 'LIMITATIONS',
+            label: 'Limitations',
+            itemCount: 4,
+            truncated: false,
+            evidenceId: 'result:limitations',
+          },
+        ],
+      })
+    ));
+    const { container } = render(
+      <I18nProvider>
+        <ResultInterpretationAssistant experimentId={EXPERIMENT_ID} navigate={vi.fn()} />
+      </I18nProvider>,
+    );
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: 'Generate explanation' }));
+
+    const assistantMessage = (await screen.findByText('Evidence-backed result'))
+      .closest('.result-assistant__message--assistant');
+    expect(assistantMessage).not.toBeNull();
+    expect(within(assistantMessage as HTMLElement).getByRole('heading', {
+      level: 3,
+      name: 'Evidence-backed result',
+    })).toBeInTheDocument();
+    expect(within(assistantMessage as HTMLElement).getByText('Spread changed').tagName).toBe('STRONG');
+    const answerRegion = assistantMessage?.querySelector('.result-assistant__answer');
+    expect(answerRegion?.querySelector('ul')).toBeInTheDocument();
+    expect(answerRegion?.querySelector('table')).toBeInTheDocument();
+    expect(container.querySelector('script')).toBeNull();
+
+    const pairedCitations = within(assistantMessage as HTMLElement).getAllByRole('button', {
+      name: 'View evidence 1: Paired-seed differences',
+    });
+    expect(pairedCitations).toHaveLength(2);
+    expect(within(assistantMessage as HTMLElement).getByRole('button', {
+      name: 'View evidence 2: Limitations',
+    })).toBeInTheDocument();
+    for (const markdownRegion of assistantMessage?.querySelectorAll('.safe-markdown') ?? []) {
+      expect(markdownRegion).not.toHaveTextContent('result:');
+    }
+
+    pairedCitations[0].focus();
+    await user.keyboard('{Enter}');
+    const evidenceDetails = within(assistantMessage as HTMLElement)
+      .getByText('Evidence used').closest('details');
+    expect(evidenceDetails).toHaveAttribute('open');
+    const pairedEvidenceItem = within(assistantMessage as HTMLElement)
+      .getByText('Paired-seed differences').closest('li');
+    expect(pairedEvidenceItem).toHaveFocus();
+    expect(pairedEvidenceItem?.scrollIntoView).toHaveBeenCalledWith({
+      block: 'nearest',
+      behavior: 'auto',
+    });
+  });
+
+  it('从证据面板定位结果与追踪区段，并传递实验深链', async () => {
+    vi.mocked(api.streamChatAboutResults).mockImplementation(async (_experimentId, input) => (
+      createStreamResult(input, {
+        answer: 'Compare paired effects [result:paired-deltas] and inspect the trace [result:trace].',
+        analysisSummary: undefined,
+        groundingReferences: ['result:paired-deltas', 'result:trace'],
+        toolActivity: [
+          {
+            tool: 'PAIRED_DELTAS',
+            label: 'Paired effects',
+            itemCount: 10,
+            truncated: false,
+            evidenceId: 'result:paired-deltas',
+          },
+          {
+            tool: 'TRACE',
+            label: 'Mechanism trace',
+            itemCount: 12,
+            truncated: false,
+            evidenceId: 'result:trace',
+          },
+        ],
+      })
+    ));
+    const navigate = renderAssistant();
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: 'Generate explanation' }));
+    await user.click(await screen.findByRole('button', {
+      name: 'View evidence 1: Paired-seed differences',
+    }));
+    const pairedItem = screen.getByText('Paired-seed differences').closest('li');
+    await user.click(within(pairedItem as HTMLElement).getByRole('button', {
+      name: 'View result section',
+    }));
+    expect(navigate).toHaveBeenCalledWith('results', {
+      experimentId: EXPERIMENT_ID,
+      target: 'paired-heading',
+    });
+
+    await user.click(screen.getByRole('button', {
+      name: 'View evidence 2: Mechanism trace',
+    }));
+    const traceItem = screen.getByText('Mechanism trace').closest('li');
+    await user.click(within(traceItem as HTMLElement).getByRole('button', {
+      name: 'View result section',
+    }));
+    expect(navigate).toHaveBeenCalledWith('trace', {
+      experimentId: EXPERIMENT_ID,
+      target: 'trace-timeline-heading',
+    });
+  });
+
+  it('旧历史回答无需迁移，未知引用保留审计但禁用定位', async () => {
+    vi.mocked(api.getResultInterpretationConversations).mockResolvedValue({
+      schemaVersion: '1.0.0',
+      items: [createSavedSummary()],
+    });
+    vi.mocked(api.getResultInterpretationConversation).mockResolvedValue(
+      createSavedConversation({
+        answer: 'A legacy result remains available [result:legacy.v2:detail].',
+        analysisSummary: undefined,
+        groundingReferences: ['result:legacy.v2:detail'],
+        toolActivity: [{
+          tool: 'LEGACY_DETAIL',
+          label: 'Legacy detail',
+          itemCount: 1,
+          truncated: false,
+          evidenceId: 'result:legacy.v2:detail',
+        }],
+        promptVersion: 'result_interpretation_v1.0.0',
+      }),
+    );
+    const { container } = render(
+      <I18nProvider>
+        <ResultInterpretationAssistant experimentId={EXPERIMENT_ID} navigate={vi.fn()} />
+      </I18nProvider>,
+    );
+    const user = userEvent.setup();
+
+    const savedQuestion = await screen.findByText('Explain the saved liquidity result.');
+    await user.click(savedQuestion.closest('button')!);
+    const citation = await screen.findByRole('button', {
+      name: 'View evidence 1: Legacy evidence reference',
+    });
+    expect(citation).toBeInTheDocument();
+    expect(container.querySelector('.safe-markdown')).not.toHaveTextContent('result:legacy.v2:detail');
+    await user.click(citation);
+    expect(screen.getByText('Historical evidence reference; currently unavailable'))
+      .toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Location unavailable' })).toBeDisabled();
+    expect(screen.getByText('Some evidence references could not be fully reconciled'))
+      .toBeInTheDocument();
+  });
+
+  it('引用正文、groundingReferences 与工具活动不一致时明确告警', async () => {
+    vi.mocked(api.streamChatAboutResults).mockImplementation(async (_experimentId, input) => (
+      createStreamResult(input, {
+        answer: 'The paired result is cited here [result:paired-deltas].',
+        analysisSummary: undefined,
+        groundingReferences: [],
+        toolActivity: [{
+          tool: 'PAIRED_DELTAS',
+          label: 'Paired effects',
+          itemCount: 10,
+          truncated: false,
+          evidenceId: 'result:paired-deltas',
+        }],
+      })
+    ));
+    renderAssistant();
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: 'Generate explanation' }));
+
+    const warning = (await screen.findByText(
+      'Some evidence references could not be fully reconciled',
+    )).closest('[role="alert"]');
+    expect(warning).toHaveTextContent('Some evidence references could not be fully reconciled');
+    expect(warning).toHaveTextContent('missing, legacy, or mismatched references');
+  });
+
+  it('用户消息保持纯文本与独立角色布局类，不解析 Markdown', async () => {
+    vi.mocked(api.streamChatAboutResults).mockImplementation(async (_experimentId, input) => (
+      createStreamResult(input, { analysisSummary: undefined })
+    ));
+    renderAssistant();
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: 'Generate explanation' }));
+    const composer = await screen.findByLabelText('Ask about this experiment');
+    await user.click(composer);
+    await user.paste('**Keep this literal** [reference](https://example.com)');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() => expect(api.streamChatAboutResults).toHaveBeenCalledTimes(2));
+    const userCards = document.querySelectorAll('.result-assistant__message--user');
+    const userCard = userCards.item(userCards.length - 1) as HTMLElement;
+    const literalMessage = userCard.querySelector('.result-assistant__answer--user');
+    expect(literalMessage).toHaveTextContent('**Keep this literal** [reference](https://example.com)');
+    expect(literalMessage).toHaveClass('result-assistant__answer--user');
+    expect(literalMessage?.querySelector('strong')).toBeNull();
+    expect(literalMessage?.querySelector('a')).toBeNull();
+    expect(userCard).toHaveClass('result-assistant__message', 'result-assistant__message--user');
+    expect(within(userCard).getByText('You')).toBeInTheDocument();
   });
 
   it('最终回答未能持久化时保留可见回答并明确警告用户', async () => {

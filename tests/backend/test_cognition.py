@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from backend.app.cognition import (
     EVENT_EXTRACTION_PROMPT,
     HYBRID_BELIEF_PROMPT,
+    RESULT_INTERPRETATION_PROMPT,
     ZHIPU_CHAT_COMPLETIONS_URL,
     ActionPreference,
     BeliefDecision,
@@ -292,6 +293,21 @@ def test_prompt_injection_is_confined_to_untrusted_user_data() -> None:
     assert "ABSTAIN" in HYBRID_BELIEF_PROMPT.systemPrompt
     assert "requires_human_review" in EVENT_EXTRACTION_PROMPT.systemPrompt
     assert sha256Text(HYBRID_BELIEF_PROMPT.systemPrompt) == HYBRID_BELIEF_PROMPT.promptHash
+
+
+def test_result_interpretation_prompt_requests_safe_gfm_and_prose_citations() -> None:
+    prompt = RESULT_INTERPRETATION_PROMPT.systemPrompt
+    normalizedPrompt = " ".join(prompt.split())
+
+    assert RESULT_INTERPRETATION_PROMPT.version == "result_interpretation_v1.1.0"
+    assert RESULT_INTERPRETATION_PROMPT.schemaVersion == "result_interpretation_v1.0.0"
+    assert "GitHub Flavored Markdown" in prompt
+    assert "Never emit raw HTML or an image" in prompt
+    assert "outside backticks and code fences" in prompt
+    assert "standalone technical reference-ID" in normalizedPrompt
+    assert "follow_up_suggestions must" in normalizedPrompt
+    assert "any [result:*] evidence marker" in normalizedPrompt
+    assert sha256Text(prompt) == RESULT_INTERPRETATION_PROMPT.promptHash
 
 
 def test_zhipu_gateway_accepts_valid_json_and_records_audit_metadata() -> None:

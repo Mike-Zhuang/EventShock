@@ -18,17 +18,19 @@ export function PageHeader({
   subtitle,
   actions,
   guide,
+  headingId,
 }: {
   title: string;
   subtitle: string;
   actions?: ReactNode;
   guide?: PageGuideContent;
+  headingId?: string;
 }) {
   return (
     <>
       <header className="page-header">
         <div>
-          <h1>{title}</h1>
+          <h1 id={headingId}>{title}</h1>
           <p>{subtitle}</p>
         </div>
         {actions ? <div className="page-header__actions">{actions}</div> : null}

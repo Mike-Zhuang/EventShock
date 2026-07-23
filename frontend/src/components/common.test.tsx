@@ -2,7 +2,15 @@ import { NumberInput, Select, SelectItem, TextInput } from '@carbon/react';
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { I18nProvider } from '../i18n';
-import { ParameterHelp } from './common';
+import { PageHeader, ParameterHelp } from './common';
+
+describe('PageHeader', () => {
+  it('可为页面主标题提供稳定的深链锚点', () => {
+    render(<PageHeader title="Results" subtitle="Experiment evidence" headingId="results-heading" />);
+
+    expect(screen.getByRole('heading', { level: 1, name: 'Results' })).toHaveAttribute('id', 'results-heading');
+  });
+});
 
 describe('ParameterHelp', () => {
   it('把帮助按钮放在 Carbon decorator 中，而不是嵌入原生表单标签', () => {

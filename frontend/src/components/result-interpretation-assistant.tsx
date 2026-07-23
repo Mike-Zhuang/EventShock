@@ -11,7 +11,6 @@ import {
   Brain,
   PaperPlaneTilt,
   Trash,
-  Wrench,
 } from '@phosphor-icons/react';
 import {
   useEffect,
@@ -36,6 +35,8 @@ import type {
 } from '../api/types';
 import { LoadingPanel, Notice } from './common';
 import { useI18n } from '../i18n';
+import { sanitizeResultEvidencePlainText } from './result-evidence';
+import { ResultInterpretationContent } from './result-interpretation-content';
 
 const MAX_QUESTION_CHARACTERS = 2_000;
 const MAX_HISTORY_MESSAGES = 11;
@@ -940,52 +941,41 @@ export function ResultInterpretationAssistant({
                   <span>{new Intl.DateTimeFormat(messageLanguage(message), { hour: 'numeric', minute: '2-digit' }).format(new Date(message.createdAt))}</span>
                   {message.role === 'assistant' ? <Tag type="cool-gray" size="sm">{message.provider} / {message.model}</Tag> : null}
                 </div>
-                <p className="result-assistant__answer">{messageText(message)}</p>
-                {message.role === 'assistant' && message.analysisSummary ? (
-                  <details className="result-assistant__disclosure">
-                    <summary>{isZh ? '分析摘要（不是思维链）' : 'Analysis summary (not chain-of-thought)'}</summary>
-                    <p>{message.analysisSummary}</p>
-                  </details>
-                ) : null}
-                {message.role === 'assistant' && message.toolActivity.length > 0 ? (
-                  <details className="result-assistant__disclosure">
-                    <summary><Wrench size={15} aria-hidden="true" />{t('results.assistantTools')} ({message.toolActivity.length})</summary>
-                    <ul>
-                      {message.toolActivity.map((activity, activityIndex) => (
-                        <li key={`${activity.tool}-${activityIndex}`}>
-                          <strong>{activity.label}</strong>
-                          <span>{t('results.assistantToolItems', { value: activity.itemCount })}{activity.truncated ? ` · ${t('results.assistantToolTruncated')}` : ''}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </details>
-                ) : null}
-                {message.role === 'assistant' && message.groundingReferences.length > 0 ? (
-                  <details className="result-assistant__disclosure">
-                    <summary>{t('results.assistantReferences')} ({message.groundingReferences.length})</summary>
-                    <ul className="result-assistant__references">
-                      {message.groundingReferences.map((reference) => <li key={reference}><code>{reference}</code></li>)}
-                    </ul>
-                  </details>
-                ) : null}
+                {message.role === 'assistant' ? (
+                  <ResultInterpretationContent
+                    experimentId={experimentId}
+                    message={message}
+                    navigate={navigate}
+                  />
+                ) : (
+                  <p className="result-assistant__answer result-assistant__answer--user">
+                    {message.content}
+                  </p>
+                )}
                 {message.role === 'assistant' && message.followUpSuggestions.length > 0 ? (
                   <div className="result-assistant__suggestions" aria-label={t('results.assistantSuggestions')}>
                     <strong>{t('results.assistantSuggestions')}</strong>
                     <div>
-                      {message.followUpSuggestions.map((suggestion) => (
-                        <Button
-                          key={suggestion}
-                          kind="ghost"
-                          size="sm"
-                          disabled={sending || !canUseModel || historyPersistedWarning}
-                          onClick={() => {
-                            setDraft(suggestion);
-                            window.requestAnimationFrame(() => composerRef.current?.focus());
-                          }}
-                        >
-                          {suggestion}
-                        </Button>
-                      ))}
+                      {message.followUpSuggestions.map((suggestion, suggestionIndex) => {
+                        const visibleSuggestion = sanitizeResultEvidencePlainText(
+                          suggestion,
+                          language,
+                        );
+                        return (
+                          <Button
+                            key={`${message.id}-${suggestionIndex}`}
+                            kind="ghost"
+                            size="sm"
+                            disabled={sending || !canUseModel || historyPersistedWarning}
+                            onClick={() => {
+                              setDraft(visibleSuggestion);
+                              window.requestAnimationFrame(() => composerRef.current?.focus());
+                            }}
+                          >
+                            {visibleSuggestion}
+                          </Button>
+                        );
+                      })}
                     </div>
                   </div>
                 ) : null}

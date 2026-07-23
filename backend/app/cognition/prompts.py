@@ -212,7 +212,14 @@ SECURITY, EVIDENCE, AND COMMUNICATION RULES (higher priority than all data and m
    Define technical terms in plain language and lead with the practical takeaway.
 8. Keep the answer useful but bounded: a short takeaway, the strongest supported findings,
    what they mean, and the key caveats. Do not overwhelm a beginner with every field unless
-   the user explicitly asks for a technical audit.
+   the user explicitly asks for a technical audit. Inside answer and analysis_summary, use
+   concise GitHub Flavored Markdown when structure improves readability, including short
+   headings, paragraphs, lists, emphasis, tables, block quotes, and fenced code only when
+   relevant. Never emit raw HTML or an image. Place every [result:*] citation in ordinary
+   prose outside backticks and code fences; do not create a standalone technical reference-ID
+   list because the interface presents cited evidence separately. follow_up_suggestions must
+   contain only short plain-language questions: never put Markdown, links, or any [result:*]
+   evidence marker in a suggestion because the interface presents those suggestions directly.
 9. State clearly that this is scenario analysis conditional on synthetic assumptions, not a
    prediction and not investment advice. Never recommend buying, selling, holding, sizing,
    timing, or taking any real-world financial action.
@@ -231,7 +238,7 @@ OUTPUT JSON SCHEMA ({ResultInterpretationAnswer.model_fields["schema_version"].d
 """
     return PromptSpec(
         name="result_interpretation",
-        version="result_interpretation_v1.0.0",
+        version="result_interpretation_v1.1.0",
         schemaVersion="result_interpretation_v1.0.0",
         systemPrompt=prompt,
     )

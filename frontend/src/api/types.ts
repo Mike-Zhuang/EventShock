@@ -765,10 +765,23 @@ export interface TraceNode {
   payload?: Record<string, unknown>;
 }
 
+export interface ResultSourceSummary {
+  eventPackId?: string;
+  title?: string;
+  titleZh?: string;
+  asOf?: string;
+  frozenAt?: string;
+  sourceCount: number;
+  claimCount: number;
+}
+
 export interface ExperimentResults {
   experimentId: string;
+  question?: string;
+  questionZh?: string;
   generatedAt?: string;
   validSeedCount?: number;
+  sourceSummary?: ResultSourceSummary;
   scenarioDiff?: InterventionDefinition;
   metrics: MetricResult[];
   pairedSeeds: PairedSeedPoint[];

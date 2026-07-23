@@ -617,6 +617,28 @@ def test_interpretation_limits_each_follow_up_suggestion() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "suggestion",
+    (
+        "Can you explain the interval [result:metric-summary]?",
+        "Review this historical marker [result:legacy.v2:detail].",
+        "What does the empty marker [result:] mean?",
+    ),
+)
+def test_interpretation_rejects_result_references_in_follow_up_suggestions(
+    suggestion: str,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="follow_up_suggestions must not contain result evidence references",
+    ):
+        ResultInterpretationAnswer(
+            answer="Bounded scenario explanation. [result:overview]",
+            grounding_references=("result:overview",),
+            follow_up_suggestions=(suggestion,),
+        )
+
+
 def test_public_chat_request_requires_bounded_alternating_history() -> None:
     request = ResultInterpretationChatRequest.model_validate(
         {

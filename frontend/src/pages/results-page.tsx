@@ -24,7 +24,7 @@ import { translateAgentType, translateParameter, translateStatus, useI18n } from
 import { getPageGuide } from '../page-guidance';
 import { getParameterHelp } from '../parameter-help';
 import { useWorkflow } from '../state/workflow-context';
-import { formatInterval, formatMetricValue } from '../utils/format';
+import { formatInterval, formatMetricValue, safeDate } from '../utils/format';
 
 const METRIC_CATALOG = [
   { id: 'maxDrawdownPct', labelKey: 'metric.maxDrawdown' as const },
@@ -145,12 +145,12 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
       if (experiment.status === 'COMPLETED') {
         const nextResults = await loadResults(experiment.id);
         if (nextResults && requestGeneration === historyRequestGeneration.current) {
-          navigate('results', experiment.id);
+          navigate('results', { experimentId: experiment.id });
         }
         return;
       }
       if (experiment.status === 'INVALIDATED') {
-        navigate('results', experiment.id);
+        navigate('results', { experimentId: experiment.id });
         return;
       }
       navigate('runs');
@@ -254,6 +254,10 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
   const pairedSeries = results.pairedSeries[analysisMetricId] ?? [];
   const selectedMetric = results.metrics.find((metric) => metric.id === analysisMetricId);
   const distribution = buildHistogram(pairedSeries);
+  const overviewQuestion = language === 'zh-CN'
+    ? results.questionZh ?? activeExperiment.scenario?.questionZh ?? results.question ?? activeExperiment.scenario?.question
+    : results.question ?? activeExperiment.scenario?.question;
+  const overviewIntervention = activeExperiment.intervention ?? results.scenarioDiff;
   const robustness = results.robustness ?? (results.analysisDiagnostics ? {
     sensitivityStatus: results.analysisDiagnostics.localSensitivity.status,
     ablationStatus: 'NOT_EVALUATED',
@@ -347,20 +351,52 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
         ) : null}
       </Modal>
 
-      {results.narrativeReport ? (
-        <section className="result-narrative" aria-labelledby="result-narrative-heading">
-          <div>
-            <Tag type="cool-gray" size="sm">{results.narrativeReport.generatedBy.replaceAll('_', ' ')}</Tag>
-            <h2 id="result-narrative-heading">{language === 'zh-CN' ? results.narrativeReport.headlineZh ?? results.narrativeReport.headline : results.narrativeReport.headline}</h2>
-            <p>{language === 'zh-CN' ? results.narrativeReport.summaryZh ?? results.narrativeReport.summary : results.narrativeReport.summary}</p>
-          </div>
-          <aside>
-            <strong>{language === 'zh-CN' ? '解释边界' : 'Interpretation boundary'}</strong>
-            <p>{language === 'zh-CN' ? results.narrativeReport.interpretationBoundaryZh ?? results.narrativeReport.interpretationBoundary : results.narrativeReport.interpretationBoundary}</p>
-            <code>{results.narrativeReport.schemaVersion}</code>
-          </aside>
-        </section>
-      ) : null}
+      <section className="result-narrative" aria-labelledby="result-overview-heading">
+        <div>
+          <Tag type="cool-gray" size="sm">
+            {results.narrativeReport?.generatedBy.replaceAll('_', ' ')
+              ?? (language === 'zh-CN' ? '运行清单' : 'Run manifest')}
+          </Tag>
+          <h2 id="result-overview-heading">
+            {results.narrativeReport
+              ? language === 'zh-CN'
+                ? results.narrativeReport.headlineZh ?? results.narrativeReport.headline
+                : results.narrativeReport.headline
+              : language === 'zh-CN' ? '实验概览' : 'Experiment overview'}
+          </h2>
+          <p>
+            {results.narrativeReport
+              ? language === 'zh-CN'
+                ? results.narrativeReport.summaryZh ?? results.narrativeReport.summary
+                : results.narrativeReport.summary
+              : overviewQuestion ?? (language === 'zh-CN'
+                ? '本概览来自冻结实验配置与运行清单。'
+                : 'This overview comes from the frozen experiment configuration and run manifest.')}
+          </p>
+          <dl className="definition-list definition-list--compact">
+            {overviewQuestion && results.narrativeReport ? (
+              <div><dt>{language === 'zh-CN' ? '研究问题' : 'Research question'}</dt><dd>{overviewQuestion}</dd></div>
+            ) : null}
+            <div>
+              <dt>{language === 'zh-CN' ? '单一干预' : 'Single intervention'}</dt>
+              <dd>{overviewIntervention
+                ? `${translateParameter(overviewIntervention.parameter, t)}: ${overviewIntervention.baselineValue} → ${overviewIntervention.interventionValue}`
+                : t('common.unavailable')}</dd>
+            </div>
+            <div><dt>{language === 'zh-CN' ? '有效配对' : 'Valid pairs'}</dt><dd>{results.validSeedCount ?? t('common.unavailable')}</dd></div>
+            <div><dt>{language === 'zh-CN' ? '停止规则' : 'Stopping rule'}</dt><dd>{results.stoppingRule?.reason.replaceAll('_', ' ') ?? t('common.unavailable')}</dd></div>
+          </dl>
+        </div>
+        <aside>
+          <strong>{language === 'zh-CN' ? '解释边界' : 'Interpretation boundary'}</strong>
+          <p>{results.narrativeReport
+            ? language === 'zh-CN'
+              ? results.narrativeReport.interpretationBoundaryZh ?? results.narrativeReport.interpretationBoundary
+              : results.narrativeReport.interpretationBoundary
+            : t('results.disclaimer')}</p>
+          <code>{results.narrativeReport?.schemaVersion ?? results.validationStatus ?? 'RESULT_MANIFEST'}</code>
+        </aside>
+      </section>
 
       <ResultInterpretationAssistant experimentId={results.experimentId} navigate={navigate} />
 
@@ -533,7 +569,16 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
             <div><dt>{language === 'zh-CN' ? '观察区间半宽' : 'Observed interval half-width'}</dt><dd>{formatMetricValue(results.stoppingRule?.observedCiHalfWidth, primaryMetricUnit, language)}</dd></div>
             <div><dt>{language === 'zh-CN' ? '目标区间半宽' : 'Target interval half-width'}</dt><dd>{formatMetricValue(results.stoppingRule?.targetCiHalfWidth, primaryMetricUnit, language)}</dd></div>
           </dl>
-          <Button kind="tertiary" renderIcon={ArrowRight} onClick={() => navigate('trace')}>{t('nav.trace')}</Button>
+          <Button
+            kind="tertiary"
+            renderIcon={ArrowRight}
+            onClick={() => navigate('trace', {
+              experimentId: results.experimentId,
+              target: 'trace-timeline-heading',
+            })}
+          >
+            {t('nav.trace')}
+          </Button>
         </section>
       </div>
 
@@ -599,8 +644,11 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
                   subtitle={`${results.cognition.costBudget.semantics} Snapshot: ${results.cognition.costBudget.pricingSnapshotVersion}${results.cognition.costBudget.fxConversionApplied ? `; ¥${results.cognition.costBudget.cnyPerUsdBudgetFloor.toFixed(2)}/$.` : '.'}`}
                 />
               ) : null}
+              <div className="section-heading">
+                <h3 id="cognition-decisions-heading">{language === 'zh-CN' ? '代表性认知决策' : 'Representative cognition decisions'}</h3>
+              </div>
               {results.cognition.decisions.length > 0 ? (
-                <div className="cognition-decision-list">
+                <div className="cognition-decision-list" aria-labelledby="cognition-decisions-heading">
                   {results.cognition.decisions.map((decision, index) => (
                     <details key={decision.requestId ?? `${decision.agentId ?? 'agent'}-${index}`}>
                       <summary>
@@ -704,6 +752,45 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
           </div>
         </section>
       ) : null}
+
+      <section className="result-section result-manifest" aria-labelledby="result-manifest-heading">
+        <div className="section-heading">
+          <h2 id="result-manifest-heading">{language === 'zh-CN' ? '版本与来源' : 'Versions and provenance'}</h2>
+          <p>{language === 'zh-CN'
+            ? '这些标识来自本次结果和冻结 Event Pack，用于审计与复现。'
+            : 'These identifiers come from this result and its frozen Event Pack for audit and reproduction.'}</p>
+        </div>
+        <dl className="definition-list definition-list--compact">
+          <div><dt>{language === 'zh-CN' ? '实验' : 'Experiment'}</dt><dd><code>{results.experimentId}</code></dd></div>
+          <div><dt>Event Pack</dt><dd><code>{results.sourceSummary?.eventPackId ?? activeExperiment.eventPackId}</code></dd></div>
+          {results.sourceSummary?.title ? (
+            <div><dt>{language === 'zh-CN' ? '事件包名称' : 'Event Pack title'}</dt><dd>{language === 'zh-CN' ? results.sourceSummary.titleZh ?? results.sourceSummary.title : results.sourceSummary.title}</dd></div>
+          ) : null}
+          <div><dt>{language === 'zh-CN' ? '结果生成时间' : 'Generated at'}</dt><dd>{safeDate(results.generatedAt, language)}</dd></div>
+          <div><dt>{language === 'zh-CN' ? '有效配对' : 'Valid pairs'}</dt><dd>{results.validSeedCount ?? t('common.unavailable')}</dd></div>
+          {results.sourceSummary ? (
+            <div><dt>{language === 'zh-CN' ? '已冻结证据' : 'Frozen evidence'}</dt><dd>{results.sourceSummary.sourceCount} {language === 'zh-CN' ? '个来源' : 'sources'} / {results.sourceSummary.claimCount} {language === 'zh-CN' ? '项主张' : 'claims'}</dd></div>
+          ) : null}
+        </dl>
+        <div className="result-evidence-grid">
+          <div>
+            <h3>{language === 'zh-CN' ? '模型版本' : 'Model versions'}</h3>
+            {Object.keys(results.modelVersions).length > 0 ? (
+              <dl className="definition-list definition-list--compact">
+                {Object.entries(results.modelVersions).map(([key, value]) => <div key={key}><dt>{key}</dt><dd><code>{value}</code></dd></div>)}
+              </dl>
+            ) : <p className="empty-inline">{t('common.unavailable')}</p>}
+          </div>
+          <div>
+            <h3>{language === 'zh-CN' ? '数据与配置版本' : 'Data and configuration versions'}</h3>
+            {Object.keys(results.dataVersions).length > 0 ? (
+              <dl className="definition-list definition-list--compact">
+                {Object.entries(results.dataVersions).map(([key, value]) => <div key={key}><dt>{key}</dt><dd><code title={value}>{value}</code></dd></div>)}
+              </dl>
+            ) : <p className="empty-inline">{t('common.unavailable')}</p>}
+          </div>
+        </div>
+      </section>
 
       <section className="result-section run-limitations" aria-labelledby="result-limitations-heading">
         <div className="section-heading"><h2 id="result-limitations-heading">{t('common.limitations')}</h2></div>

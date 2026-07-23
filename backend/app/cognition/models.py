@@ -386,6 +386,13 @@ class ResultInterpretationAnswer(StrictFrozenModel):
             raise ValueError("follow_up_suggestions must not contain blank values")
         if any(len(suggestion) > 400 for suggestion in self.follow_up_suggestions):
             raise ValueError("follow_up_suggestions items must not exceed 400 characters")
+        # 建议按钮按纯文本展示并会直接写回下一轮问题，因此不能把仅供内部
+        # grounding 的证据标记泄露给普通用户或带入后续会话。
+        if any(
+            INLINE_RESULT_REFERENCE_PATTERN.search(suggestion)
+            for suggestion in self.follow_up_suggestions
+        ):
+            raise ValueError("follow_up_suggestions must not contain result evidence references")
         return self
 
     def evidenceIds(self) -> frozenset[str]:

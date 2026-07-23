@@ -49,6 +49,10 @@ describe('移动主导航', () => {
     window.history.replaceState(null, '', '#/cases');
     document.body.style.overflow = '';
     vi.stubGlobal('scrollTo', vi.fn());
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: vi.fn(),
+    });
     vi.stubGlobal('ResizeObserver', class {
       observe() {}
       unobserve() {}
@@ -68,13 +72,58 @@ describe('移动主导航', () => {
   });
 
   it('在结果深链中保留 experimentId，并可解析刷新路由', () => {
-    const hash = buildAppHash('results', 'exp-history/with space');
+    const hash = buildAppHash('results', {
+      experimentId: 'exp-history/with space',
+      target: 'metrics-heading',
+    });
 
-    expect(hash).toBe('#/results?experimentId=exp-history%2Fwith+space');
+    expect(hash).toBe('#/results?experimentId=exp-history%2Fwith+space&target=metrics-heading');
     expect(parseAppRoute(hash)).toEqual({
       view: 'results',
       experimentId: 'exp-history/with space',
+      target: 'metrics-heading',
     });
+  });
+
+  it('丢弃未知 target 以及不属于当前页面的白名单 target', () => {
+    expect(parseAppRoute('#/results?target=not-a-target')).toEqual({
+      view: 'results',
+      experimentId: undefined,
+      target: undefined,
+    });
+    expect(parseAppRoute('#/trace?target=metrics-heading')).toEqual({
+      view: 'trace',
+      experimentId: undefined,
+      target: undefined,
+    });
+    expect(buildAppHash('cases', {
+      experimentId: 'ignored',
+      target: 'metrics-heading',
+    })).toBe('#/cases');
+  });
+
+  it('用户要求减少动态效果时以无动画方式定位目标', async () => {
+    vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({
+      matches: query === '(prefers-reduced-motion: reduce)',
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })));
+    const target = document.createElement('h2');
+    target.id = 'metrics-heading';
+    target.textContent = 'External test target';
+    document.body.append(target);
+    window.history.replaceState(null, '', buildAppHash('results', { target: 'metrics-heading' }));
+
+    render(<App />);
+
+    await waitFor(() => expect(target).toHaveFocus());
+    expect(target.scrollIntoView).toHaveBeenCalledWith({ block: 'start', behavior: 'auto' });
+    target.remove();
   });
 
   it('刷新带 experimentId 的结果深链时恢复实验与结果', async () => {
@@ -101,13 +150,164 @@ describe('移动主导航', () => {
       dataVersions: {},
       pairedSeries: {},
     });
-    window.history.replaceState(null, '', buildAppHash('results', experimentId));
+    window.history.replaceState(null, '', buildAppHash('results', { experimentId }));
 
     render(<App />);
 
     await waitFor(() => expect(api.getExperiment).toHaveBeenCalledWith(experimentId));
     await waitFor(() => expect(api.getResults).toHaveBeenCalledWith(experimentId));
     expect(window.location.hash).toBe(`#/results?experimentId=${experimentId}`);
+  });
+
+  it('刷新追踪深链时恢复同一实验结果，并聚焦追踪区段', async () => {
+    const experimentId = 'exp-trace-restore';
+    vi.mocked(api.getExperiment).mockResolvedValue({
+      id: experimentId,
+      eventPackId: 'pack-trace',
+      status: 'COMPLETED',
+      progress: 100,
+      logs: [],
+    });
+    vi.mocked(api.getResults).mockResolvedValue({
+      experimentId,
+      metrics: [],
+      pairedSeeds: [],
+      distribution: [],
+      marketPaths: [],
+      agentFlows: [],
+      agentPnl: [],
+      traces: [{ id: 'trace-one', title: 'Fact', kind: 'FACT' }],
+      limitations: [],
+      limitationsZh: [],
+      modelVersions: {},
+      dataVersions: {},
+      pairedSeries: {},
+    });
+    window.history.replaceState(null, '', buildAppHash('trace', {
+      experimentId,
+      target: 'trace-timeline-heading',
+    }));
+
+    render(<App />);
+
+    await waitFor(() => expect(api.getResults).toHaveBeenCalledWith(experimentId));
+    const target = await screen.findByRole('heading', { name: 'Mechanism timeline' });
+    await waitFor(() => expect(target).toHaveFocus());
+    expect(target).toHaveAttribute('tabindex', '-1');
+    expect(target.scrollIntoView).toHaveBeenCalledWith({
+      block: 'start',
+      behavior: 'smooth',
+    });
+  });
+
+  it('跨实验 hash 跳转会等待新结果恢复后再聚焦同名目标', async () => {
+    const firstExperimentId = 'exp-focus-first';
+    const secondExperimentId = 'exp-focus-second';
+    const experiment = (id: string) => ({
+      id,
+      eventPackId: `pack-${id}`,
+      status: 'COMPLETED' as const,
+      progress: 100,
+      logs: [],
+    });
+    const results = (id: string) => ({
+      experimentId: id,
+      metrics: [],
+      pairedSeeds: [],
+      distribution: [],
+      marketPaths: [],
+      agentFlows: [],
+      agentPnl: [],
+      traces: [],
+      limitations: [],
+      limitationsZh: [],
+      modelVersions: {},
+      dataVersions: {},
+      pairedSeries: {},
+    });
+    let resolveSecondResults!: (value: ReturnType<typeof results>) => void;
+    const secondResults = new Promise<ReturnType<typeof results>>((resolve) => {
+      resolveSecondResults = resolve;
+    });
+    vi.mocked(api.getExperiment).mockImplementation(async (id) => experiment(id));
+    vi.mocked(api.getResults).mockImplementation((id) => (
+      id === firstExperimentId ? Promise.resolve(results(id)) : secondResults
+    ));
+    window.history.replaceState(null, '', buildAppHash('results', {
+      experimentId: firstExperimentId,
+      target: 'metrics-heading',
+    }));
+    render(<App />);
+
+    const firstTarget = await screen.findByRole('heading', { name: 'Primary metrics' });
+    await waitFor(() => expect(firstTarget).toHaveFocus());
+    document.getElementById('main-content')?.focus();
+
+    window.history.replaceState(null, '', buildAppHash('results', {
+      experimentId: secondExperimentId,
+      target: 'metrics-heading',
+    }));
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    await waitFor(() => expect(api.getResults).toHaveBeenCalledWith(secondExperimentId));
+    expect(firstTarget).not.toHaveFocus();
+    expect(screen.queryByRole('heading', { name: 'Primary metrics' })).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveSecondResults(results(secondExperimentId));
+      await secondResults;
+    });
+    await waitFor(() => expect(document.getElementById('metrics-heading')).toHaveFocus());
+  });
+
+  it('跨实验深链恢复失败时隐藏旧结果并显示可重试错误', async () => {
+    const firstExperimentId = 'exp-restore-visible-first';
+    const missingExperimentId = 'exp-restore-missing-second';
+    const firstExperiment = {
+      id: firstExperimentId,
+      eventPackId: 'pack-restore-first',
+      status: 'COMPLETED' as const,
+      progress: 100,
+      logs: [],
+    };
+    const firstResults = {
+      experimentId: firstExperimentId,
+      metrics: [],
+      pairedSeeds: [],
+      distribution: [],
+      marketPaths: [],
+      agentFlows: [],
+      agentPnl: [],
+      traces: [],
+      limitations: [],
+      limitationsZh: [],
+      modelVersions: {},
+      dataVersions: {},
+      pairedSeries: {},
+    };
+    vi.mocked(api.getExperiment).mockImplementation(async (id) => {
+      if (id === missingExperimentId) throw new Error('not found');
+      return firstExperiment;
+    });
+    vi.mocked(api.getResults).mockResolvedValue(firstResults);
+    window.history.replaceState(null, '', buildAppHash('results', {
+      experimentId: firstExperimentId,
+      target: 'metrics-heading',
+    }));
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: 'Primary metrics' })).toBeInTheDocument();
+    window.history.replaceState(null, '', buildAppHash('results', {
+      experimentId: missingExperimentId,
+      target: 'metrics-heading',
+    }));
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+
+    expect(await screen.findByRole('heading', {
+      name: 'Experiment could not be restored',
+    })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Primary metrics' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    expect(window.location.hash).toContain(`experimentId=${missingExperimentId}`);
   });
 
   // 该集成用例会懒加载完整 Results 页；GitHub 共享 runner 上首次模块转换可超过 Vitest 默认 5 秒。
@@ -158,7 +358,7 @@ describe('移动主导航', () => {
       dataVersions: {},
       pairedSeries: {},
     }));
-    window.history.replaceState(null, '', buildAppHash('results', experiments[0].id));
+    window.history.replaceState(null, '', buildAppHash('results', { experimentId: experiments[0].id }));
     render(<App />);
     const selector = await screen.findByLabelText(
       'View historical experiment result',
@@ -168,7 +368,7 @@ describe('移动主导航', () => {
 
     await user.selectOptions(selector, experiments[1].id);
 
-    await waitFor(() => expect(window.location.hash).toBe(buildAppHash('results', experiments[1].id)));
+    await waitFor(() => expect(window.location.hash).toBe(buildAppHash('results', { experimentId: experiments[1].id })));
     expect(api.getResults).toHaveBeenCalledWith(experiments[1].id);
     expect(vi.mocked(api.getExperiment).mock.calls.at(-1)?.[0]).toBe(experiments[1].id);
   }, 15_000);
@@ -181,7 +381,7 @@ describe('移动主导航', () => {
       resolveExperiment = resolve;
     });
     vi.mocked(api.getExperiment).mockReturnValue(experimentResponse);
-    window.history.replaceState(null, '', buildAppHash('results', experimentId));
+    window.history.replaceState(null, '', buildAppHash('results', { experimentId }));
     render(<App />);
 
     await waitFor(() => expect(api.getExperiment).toHaveBeenCalledWith(experimentId));

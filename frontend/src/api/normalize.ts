@@ -1055,6 +1055,19 @@ function normalizeManifest(value: unknown): { modelVersions: Record<string, stri
   };
 }
 
+function normalizeResultSourceSummary(value: unknown): ExperimentResults['sourceSummary'] {
+  if (!isRecord(value)) return undefined;
+  return {
+    eventPackId: asOptionalString(read(value, 'id', 'eventPackId', 'event_pack_id')),
+    title: asOptionalString(read(value, 'title', 'name')),
+    titleZh: asOptionalString(read(value, 'titleZh', 'title_zh', 'nameZh', 'name_zh')),
+    asOf: asOptionalString(read(value, 'asOf', 'as_of', 'pointInTime', 'point_in_time')),
+    frozenAt: asOptionalString(read(value, 'frozenAt', 'frozen_at')),
+    sourceCount: unwrapItems(read(value, 'sources')).length,
+    claimCount: unwrapItems(read(value, 'claims')).length,
+  };
+}
+
 function normalizeCognitionDecision(value: unknown): CognitionDecisionSummary | null {
   if (!isRecord(value)) return null;
   const decision = isRecord(read(value, 'decision')) ? read(value, 'decision') as JsonRecord : value;
@@ -1253,8 +1266,11 @@ export function normalizeResults(value: unknown): ExperimentResults {
   const pairedSeeds = primaryMetricId ? pairedSeries[primaryMetricId] ?? [] : [];
   return {
     experimentId: asString(read(value, 'experimentId', 'experiment_id', 'id')),
+    question: asOptionalString(read(value, 'question')),
+    questionZh: asOptionalString(read(value, 'questionZh', 'question_zh')),
     generatedAt: manifest.generatedAt,
     validSeedCount: manifest.validSeedCount ?? pairedSeeds.length,
+    sourceSummary: normalizeResultSourceSummary(read(value, 'eventPackManifest', 'event_pack_manifest')),
     scenarioDiff: normalizeIntervention(read(value, 'scenarioDiff', 'scenario_diff')),
     metrics: normalizeMetricSummaries(read(value, 'metricSummaries', 'metric_summaries')),
     pairedSeeds,
