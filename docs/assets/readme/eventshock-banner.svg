@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 480" role="img" aria-labelledby="title description">
+  <title id="title">EventShock Lab</title>
+  <desc id="description">Evidence-bound counterfactual market stress testing with matched simulations and traceable mechanisms.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#061724"/>
+      <stop offset="0.58" stop-color="#0a2235"/>
+      <stop offset="1" stop-color="#0b2d45"/>
+    </linearGradient>
+    <linearGradient id="signal" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffb000"/>
+      <stop offset="1" stop-color="#ffd166"/>
+    </linearGradient>
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M48 0H0V48" fill="none" stroke="#4f7f9d" stroke-opacity="0.17" stroke-width="1"/>
+    </pattern>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <clipPath id="chart-clip">
+      <rect x="875" y="66" width="635" height="330" rx="8"/>
+    </clipPath>
+  </defs>
+
+  <rect width="1600" height="480" fill="url(#background)"/>
+  <rect width="1600" height="480" fill="url(#grid)"/>
+  <path d="M0 408H1600" stroke="#8ab4cc" stroke-opacity="0.2"/>
+  <path d="M808 0V480" stroke="#8ab4cc" stroke-opacity="0.14"/>
+
+  <g transform="translate(78 70)">
+    <rect width="60" height="60" rx="12" fill="#102f45" stroke="#517d98" stroke-opacity="0.7"/>
+    <path d="M13 18h34M13 30h34M13 42h34M18 13v34M30 13v34M42 13v34" stroke="#315b74" stroke-width="1.5"/>
+    <path d="M11 34h9l5-15 8 26 6-18 4 7h8" fill="none" stroke="#ffb000" stroke-linecap="round" stroke-linejoin="round" stroke-width="3.5"/>
+  </g>
+
+  <g fill="#f4f7fb" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">
+    <text x="78" y="200" font-size="72" font-weight="650" letter-spacing="-2.5">EVENTSHOCK</text>
+    <text x="78" y="262" fill="#78a9ff" font-size="31" font-weight="560" letter-spacing="7">LAB</text>
+    <text x="78" y="322" fill="#c7d9e4" font-size="22" font-weight="430">Evidence-bound counterfactual market stress testing</text>
+    <text x="78" y="358" fill="#8eafc2" font-size="17">One intervention. Matched seeds. Traceable mechanisms.</text>
+    <text x="78" y="426" fill="#79a0b8" font-size="13" font-weight="600" letter-spacing="2.3">EVENT PACK  ·  HUMAN REVIEW  ·  PAIRED RUNS  ·  REPRODUCIBLE EXPORT</text>
+  </g>
+
+  <g clip-path="url(#chart-clip)">
+    <rect x="875" y="66" width="635" height="330" rx="8" fill="#071c2b" fill-opacity="0.88" stroke="#4b7893" stroke-opacity="0.55"/>
+    <g stroke="#6a96ae" stroke-opacity="0.19">
+      <path d="M875 132H1510M875 198H1510M875 264H1510M875 330H1510"/>
+      <path d="M980 66V396M1085 66V396M1190 66V396M1295 66V396M1400 66V396"/>
+    </g>
+    <path d="M1190 66V396" stroke="#ffb000" stroke-opacity="0.85" stroke-dasharray="6 8" stroke-width="2"/>
+    <path d="M885 290C940 274 970 281 1018 252S1103 217 1150 238S1212 229 1260 214S1332 206 1372 183S1445 172 1502 151" fill="none" stroke="#78a9ff" stroke-width="4"/>
+    <path d="M885 290C940 274 970 281 1018 252S1103 217 1150 238S1212 260 1260 286S1330 324 1376 306S1448 344 1502 332" fill="none" stroke="url(#signal)" stroke-width="4" filter="url(#glow)"/>
+    <path d="M885 314C940 306 986 314 1028 290S1110 270 1150 276S1224 296 1268 304S1342 296 1388 322S1460 318 1502 350" fill="none" stroke="#42be65" stroke-opacity="0.72" stroke-dasharray="9 8" stroke-width="2.5"/>
+    <circle cx="1190" cy="247" r="6" fill="#ffb000"/>
+    <circle cx="1502" cy="151" r="5" fill="#78a9ff"/>
+    <circle cx="1502" cy="332" r="5" fill="#ffb000"/>
+  </g>
+
+  <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">
+    <text x="895" y="98" fill="#94b8cd" font-size="13" font-weight="650" letter-spacing="1.8">MATCHED COUNTERFACTUAL</text>
+    <text x="1207" y="90" fill="#ffcf66" font-size="12" font-weight="650" letter-spacing="1.3">EVENT</text>
+    <g transform="translate(895 360)" font-size="12" font-weight="600">
+      <circle cx="5" cy="-4" r="4" fill="#78a9ff"/>
+      <text x="17" fill="#9fbacc">BASELINE</text>
+      <circle cx="112" cy="-4" r="4" fill="#ffb000"/>
+      <text x="124" fill="#9fbacc">INTERVENTION</text>
+      <circle cx="259" cy="-4" r="4" fill="#42be65"/>
+      <text x="271" fill="#9fbacc">PAIRED PATH</text>
+    </g>
+  </g>
+</svg>

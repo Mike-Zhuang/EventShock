@@ -1,0 +1,93 @@
+name: Feature request / 功能建议
+description: Propose a focused improvement with a clear user and observable outcome.
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        EventShock is an evidence-first research and stress-testing tool. Strong proposals identify a specific user problem, preserve human control, and define one observable success signal. / EventShock 是证据优先的研究与压力测试工具。高质量建议应说明具体用户问题、保留人工控制，并给出一个可观察的成功信号。
+
+  - type: checkboxes
+    id: duplicate-check
+    attributes:
+      label: Existing requests / 已有建议
+      options:
+        - label: I searched the existing issues and did not find the same request. / 我已搜索现有 Issue，没有发现相同建议。
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem / 用户问题
+      description: Describe the pain or blocked workflow, not only the feature name. / 请描述用户痛点或受阻流程，而不只是功能名称。
+      placeholder: Today, a user cannot... / 目前，用户无法……
+    validations:
+      required: true
+
+  - type: input
+    id: target-user
+    attributes:
+      label: Target user / 目标用户
+      description: Who has this problem? Be specific enough that the group can be identified. / 哪类用户遇到了这个问题？请尽量具体。
+      placeholder: e.g. event-risk analysts reviewing a matched experiment
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome / 期望结果
+      description: Explain the smallest useful behavior and what remains under human control. / 说明最小可用行为，以及哪些判断仍由人负责。
+    validations:
+      required: true
+
+  - type: input
+    id: success-signal
+    attributes:
+      label: Observable success signal / 可观察的成功信号
+      description: Give one number or yes/no behavior that would show the feature works. / 给出一个数字或是/否行为，用于判断功能是否有效。
+      placeholder: e.g. a first-time user can locate the cited result without guidance
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Product area / 产品区域
+      options:
+        - Case library and Event Packs / 案例库与 Event Pack
+        - AI providers and structured cognition / AI 供应商与结构化认知
+        - Scenario design and preflight / 情景设计与运行前检查
+        - Simulation and experiment operations / 仿真与实验运行
+        - Results, interpretation, and Trace / 结果、AI 解释与 Trace
+        - Study and validation / 研究与验证
+        - Accounts, history, and administration / 账号、历史与管理
+        - Export and reproducibility / 导出与可复现性
+        - Accessibility, documentation, or deployment / 可访问性、文档或部署
+        - Other / 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered / 已考虑的替代方案
+      description: Optional. What workaround or smaller scope did you consider? / 可选：你考虑过哪些临时方案或更小范围？
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context / 补充信息
+      description: Add a sanitized sketch, example, or link if it materially clarifies the proposal. / 如确有帮助，可添加已脱敏草图、示例或链接。
+
+  - type: checkboxes
+    id: guardrails
+    attributes:
+      label: Product and privacy boundaries / 产品与隐私边界
+      options:
+        - label: This request does not present scenario analysis as prediction or investment advice, and it preserves meaningful human control. / 本建议不会把情景分析包装成预测或投资建议，并保留有意义的人工控制。
+          required: true
+        - label: I did not include API keys, credentials, personal information, account identifiers, or confidential source content. / 我未提交 API Key、凭据、个人信息、账户标识或机密来源内容。
+          required: true

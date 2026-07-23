@@ -1,0 +1,104 @@
+name: Bug report / 问题报告
+description: Report a reproducible EventShock failure with sanitized diagnostics.
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping improve EventShock. / 感谢你帮助改进 EventShock。
+
+        Before submitting, remove API keys, tokens, authorization headers, email addresses, account identifiers, source documents, and other personal or confidential information. / 提交前请移除 API Key、令牌、认证请求头、邮箱、账户标识、来源文档及其他个人或机密信息。
+
+  - type: checkboxes
+    id: duplicate-check
+    attributes:
+      label: Existing issues / 已有问题
+      options:
+        - label: I searched the existing issues and did not find the same problem. / 我已搜索现有 Issue，没有发现相同问题。
+          required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area / 受影响区域
+      options:
+        - Web interface and accessibility / 网页界面与可访问性
+        - Account, email, and authentication / 账号、邮件与登录
+        - Event Pack import and review / Event Pack 导入与审核
+        - AI configuration or provider integration / AI 配置或供应商接入
+        - Scenario builder and preflight / 情景构建与运行前检查
+        - Experiment queue and simulation / 实验队列与仿真
+        - Results, interpretation, or Trace / 结果、AI 解释或 Trace
+        - Study Workbench / 研究工作台
+        - Export and history / 导出与历史
+        - Deployment or documentation / 部署或文档
+        - Other / 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Problem summary / 问题摘要
+      description: What failed, and what impact did it have? / 什么功能失败了，造成了什么影响？
+      placeholder: A concise description of the problem / 请简要描述问题
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps / 复现步骤
+      description: Include the page, selected mode, and the smallest sequence that reliably reproduces the problem. / 请包含页面、所选模式和能够稳定复现问题的最短操作步骤。
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior / 预期行为
+      placeholder: What should have happened? / 正常情况下应该发生什么？
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior / 实际行为
+      placeholder: What happened instead? Include a stable EventShock error code when available. / 实际发生了什么？如有稳定错误码，请一并提供。
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment / 运行环境
+      description: Use `GET /api/health` for the release commit when possible. Do not include cookies or headers. / 如条件允许，可从 `GET /api/health` 获取发布版本；不要提交 Cookie 或请求头。
+      value: |
+        - Deployment: public site / self-hosted / local development
+        - Release commit:
+        - Browser and version:
+        - Operating system:
+        - Interface language:
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics / 已脱敏诊断信息
+      description: Drag in sanitized screenshots or paste only the minimum relevant console/log excerpt. / 可拖入已脱敏截图，或只粘贴最少且相关的控制台/日志片段。
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy confirmation / 隐私确认
+      options:
+        - label: I removed all secrets, credentials, personal information, account identifiers, and confidential source content. / 我已移除所有密钥、凭据、个人信息、账户标识和机密来源内容。
+          required: true
