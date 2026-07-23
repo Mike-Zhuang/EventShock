@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation / 使用文档
+    url: https://github.com/Mike-Zhuang/EventShock#readme
+    about: Read the setup, workflow, limitations, and deployment documentation before filing an issue.
+  - name: Live deployment / 在线演示
+    url: https://eventshock.mikezhuang.cn
+    about: Reproduce the behavior on the current public deployment when possible; never enter secrets in an issue.

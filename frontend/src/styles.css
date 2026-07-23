@@ -291,6 +291,7 @@ code {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
+  overflow: hidden;
   border-right: 1px solid var(--border);
   background: var(--surface);
 }
@@ -298,8 +299,14 @@ code {
 .sidebar nav,
 .mobile-navigation nav {
   display: grid;
+  min-height: 0;
+  flex: 1 1 auto;
   grid-template-columns: minmax(0, 1fr);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
   padding: 18px 10px;
+  scrollbar-gutter: stable;
 }
 
 .navigation-section {
@@ -341,6 +348,7 @@ code {
 }
 
 .sidebar__footer {
+  flex: 0 0 auto;
   padding: 16px 22px 22px;
   border-top: 1px solid var(--border);
 }
@@ -2144,11 +2152,6 @@ code {
 
   .mobile-navigation[hidden] {
     display: none;
-  }
-
-  .mobile-navigation nav {
-    overflow-y: auto;
-    overscroll-behavior: contain;
   }
 
   .mobile-nav-backdrop {
