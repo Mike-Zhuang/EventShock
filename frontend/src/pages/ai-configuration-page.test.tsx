@@ -142,6 +142,7 @@ describe('多供应商 AI 配置', () => {
       apiKey: secret,
       thinkingEnabled: false,
       maxTokens: 2_048,
+      advancedParameters: {},
     }));
     expect(screen.getByLabelText('OpenAI API Key')).toHaveValue('');
     expect(localStorageWrite.mock.calls.flat().join(' ')).not.toContain(secret);
@@ -220,16 +221,75 @@ describe('多供应商 AI 配置', () => {
       model: 'gpt-recommended',
       thinkingEnabled: true,
       maxTokens: 8_192,
+      advancedParameters: { temperature: 0.2 },
     };
 
     expect(configurationMatchesDraft(
       config, 'openai', 'gpt-recommended', configuredModel, true, 8_192,
+      { temperature: 0.2 },
     )).toBe(true);
     expect(configurationMatchesDraft(
       config, 'openai', 'gpt-recommended', configuredModel, false, 8_192,
+      { temperature: 0.2 },
     )).toBe(false);
     expect(configurationMatchesDraft(
       config, 'openai', 'gpt-recommended', configuredModel, true, 4_096,
+      { temperature: 0.2 },
     )).toBe(false);
+    expect(configurationMatchesDraft(
+      config, 'openai', 'gpt-recommended', configuredModel, true, 8_192,
+      { temperature: 0.8 },
+    )).toBe(false);
+  });
+
+  it('按供应商能力启用白名单高级参数，并把草稿随临时密钥一同提交', async () => {
+    const user = userEvent.setup();
+    const catalogWithExplicitCapabilities: LlmCatalog = {
+      ...CATALOG,
+      providers: CATALOG.providers.map((item) => item.id === 'openai'
+        ? { ...item, supportedAdvancedParameters: ['temperature', 'timeoutSeconds'] }
+        : item),
+    };
+    vi.mocked(api.getLlmCatalog).mockResolvedValue(catalogWithExplicitCapabilities);
+    render(<I18nProvider><AiConfigurationPage /></I18nProvider>);
+
+    await user.selectOptions(await screen.findByLabelText('Provider'), 'openai');
+    await user.click(screen.getByText('Advanced request parameters (optional)'));
+
+    expect(screen.getByLabelText('Randomness (temperature)')).toBeEnabled();
+    expect(screen.getByLabelText('Per-request timeout (seconds)')).toBeEnabled();
+    expect(screen.getByLabelText('Topic repetition penalty (presence penalty)')).toBeDisabled();
+    expect(screen.getByLabelText('Provider random seed (seed)')).toBeDisabled();
+
+    await user.clear(screen.getByLabelText('Randomness (temperature)'));
+    await user.type(screen.getByLabelText('Randomness (temperature)'), '0.2');
+    await user.clear(screen.getByLabelText('Per-request timeout (seconds)'));
+    await user.type(screen.getByLabelText('Per-request timeout (seconds)'), '90');
+    await user.type(screen.getByLabelText('OpenAI API Key'), 'temporary-advanced-key');
+    await user.click(screen.getByRole('button', { name: 'Use for this sign-in' }));
+
+    await waitFor(() => expect(api.saveLlmConfig).toHaveBeenCalledWith(expect.objectContaining({
+      advancedParameters: {
+        temperature: 0.2,
+        timeoutSeconds: 90,
+      },
+    })));
+    expect(screen.getByText('Fixed security boundary')).toBeInTheDocument();
+    expect(screen.getByText(/Custom base URLs and headers are not accepted/)).toBeInTheDocument();
+  });
+
+  it('恢复供应商默认值会清空所有高级参数', async () => {
+    const user = userEvent.setup();
+    render(<I18nProvider><AiConfigurationPage /></I18nProvider>);
+
+    await user.click(await screen.findByText('Advanced request parameters (optional)'));
+    await user.clear(screen.getByLabelText('Randomness (temperature)'));
+    await user.type(screen.getByLabelText('Randomness (temperature)'), '0.7');
+    const restoreButton = screen.getByRole('button', { name: 'Restore provider defaults' });
+    expect(restoreButton).toBeEnabled();
+
+    await user.click(restoreButton);
+    expect(screen.getByLabelText('Randomness (temperature)')).toHaveValue(null);
+    expect(restoreButton).toBeDisabled();
   });
 });

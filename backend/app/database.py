@@ -474,12 +474,76 @@ class Database:
         """保存匿名会话创建的 Event Pack；不会覆盖仓库内的规范包。"""
         now = utcNow()
         with self.writeLock, self.connection() as connection:
-            self._saveCustomEventPackInConnection(
+            manifestJson = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
+            claimsJson = json.dumps(claims, ensure_ascii=False, separators=(",", ":"))
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO custom_event_packs(
+                        session_id, owner_user_id, event_pack_id, manifest_json,
+                        claims_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        sessionId,
+                        sessionId,
+                        eventPackId,
+                        manifestJson,
+                        claimsJson,
+                        now,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError as error:
+                raise ValueError(
+                    "an Event Pack with this immutable version ID already exists"
+                ) from error
+
+    def saveCustomEventPackWithAudit(
+        self,
+        sessionId: str,
+        eventPackId: str,
+        manifest: dict[str, Any],
+        claims: list[dict[str, Any]],
+        *,
+        auditAction: str,
+        auditPayload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """原子创建不可变 Event Pack 并追加审计，消除对象与审计之间的崩溃窗口。"""
+
+        now = utcNow()
+        manifestJson = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
+        claimsJson = json.dumps(claims, ensure_ascii=False, separators=(",", ":"))
+        with self.writeLock, self.connection() as connection:
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO custom_event_packs(
+                        session_id, owner_user_id, event_pack_id, manifest_json,
+                        claims_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        sessionId,
+                        sessionId,
+                        eventPackId,
+                        manifestJson,
+                        claimsJson,
+                        now,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError as error:
+                raise ValueError(
+                    "an Event Pack with this immutable version ID already exists"
+                ) from error
+            return self._appendAuditEventInConnection(
                 connection,
                 sessionId,
+                "EVENT_PACK",
                 eventPackId,
-                manifest,
-                claims,
+                auditAction,
+                auditPayload,
                 now,
             )
 
@@ -772,6 +836,32 @@ class Database:
             }
             for row in rows
         ]
+
+    def eventPackWasMaterializedFromFactoryBuild(
+        self,
+        *,
+        ownerUserId: str,
+        buildId: str,
+        eventPackId: str,
+    ) -> bool:
+        """验证 Factory build 与 Event Pack 的不可伪造审计关联。"""
+
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json
+                FROM audit_events
+                WHERE COALESCE(owner_user_id, session_id)=?
+                  AND entity_type='EVENT_PACK_FACTORY'
+                  AND entity_id=?
+                  AND action='EVENT_PACK_MATERIALIZED'
+                ORDER BY id DESC
+                """,
+                (ownerUserId, buildId),
+            ).fetchall()
+        return any(
+            json.loads(row["payload_json"]).get("eventPackId") == eventPackId for row in rows
+        )
 
     def verifyAuditChain(self, sessionId: str) -> dict[str, Any]:
         """重算账号名下全部原始审计链；迁移不会重写历史哈希。"""

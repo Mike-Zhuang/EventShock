@@ -6,10 +6,12 @@ import {
   CheckSquare,
   ClipboardText,
   Cpu,
+  Factory,
   FloppyDiskBack,
   Flask,
   GithubLogo,
   List,
+  Path,
   Moon,
   PlayCircle,
   ShieldCheck,
@@ -43,10 +45,14 @@ import {
 import { I18nProvider, useI18n } from './i18n';
 import { AuthenticationPage } from './pages/authentication-page';
 import { CaseLibraryPage } from './pages/case-library-page';
+import { LegalAcceptancePage } from './pages/legal-acceptance-page';
+import { OnboardingPage } from './pages/onboarding-page';
 import { AuthProvider, useAuth } from './state/auth-context';
 import { useWorkflow, WorkflowProvider } from './state/workflow-context';
 
 const EventPackPage = lazy(async () => ({ default: (await import('./pages/event-pack-page')).EventPackPage }));
+const EventPackFactoryPage = lazy(async () => ({ default: (await import('./pages/event-pack-factory-page')).EventPackFactoryPage }));
+const GuidedWorkflowPage = lazy(async () => ({ default: (await import('./pages/guided-workflow-page')).GuidedWorkflowPage }));
 const AiConfigurationPage = lazy(async () => ({ default: (await import('./pages/ai-configuration-page')).AiConfigurationPage }));
 const ExportHistoryPage = lazy(async () => ({ default: (await import('./pages/export-history-page')).ExportHistoryPage }));
 const GovernancePage = lazy(async () => ({ default: (await import('./pages/governance-page')).GovernancePage }));
@@ -58,7 +64,7 @@ const StudyWorkbenchPage = lazy(async () => ({ default: (await import('./pages/s
 const TraceExplorerPage = lazy(async () => ({ default: (await import('./pages/trace-explorer-page')).TraceExplorerPage }));
 const AdminPage = lazy(async () => ({ default: (await import('./pages/admin-page')).AdminPage }));
 
-export type ViewId = 'cases' | 'pack' | 'ai' | 'scenario' | 'preflight' | 'runs' | 'results' | 'study' | 'trace' | 'governance' | 'export' | 'admin';
+export type ViewId = 'guided' | 'cases' | 'factory' | 'pack' | 'ai' | 'scenario' | 'preflight' | 'runs' | 'results' | 'study' | 'trace' | 'governance' | 'export' | 'admin';
 export const ROUTE_TARGET_IDS = [
   'result-overview-heading',
   'metrics-heading',
@@ -83,7 +89,7 @@ export type Navigate = (view: ViewId, options?: NavigateOptions) => void;
 
 type RouteRestoreState = 'idle' | 'loading' | 'error';
 
-const VIEW_IDS: ViewId[] = ['cases', 'pack', 'ai', 'scenario', 'preflight', 'runs', 'results', 'study', 'trace', 'governance', 'export', 'admin'];
+const VIEW_IDS: ViewId[] = ['guided', 'cases', 'factory', 'pack', 'ai', 'scenario', 'preflight', 'runs', 'results', 'study', 'trace', 'governance', 'export', 'admin'];
 const MOBILE_NAVIGATION_ID = 'mobile-primary-navigation';
 const ROUTE_TARGET_VIEWS: Record<RouteTargetId, Extract<ViewId, 'results' | 'trace'>> = {
   'result-overview-heading': 'results',
@@ -197,7 +203,7 @@ function NavigationItems({
 
 function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: () => void }) {
   const { language, setLanguage, t } = useI18n();
-  const { user, logout } = useAuth();
+  const { user, preferences, completeOnboarding, logout } = useAuth();
   const { cancelPendingExperimentRequests, loadResults, selectExperiment } = useWorkflow();
   const loadResultsRef = useRef(loadResults);
   const routeGenerationRef = useRef(0);
@@ -214,6 +220,8 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [logoutError, setLogoutError] = useState(false);
+  const [workspaceModeBusy, setWorkspaceModeBusy] = useState(false);
+  const [workspaceModeError, setWorkspaceModeError] = useState(false);
   const mobileMenuButtonRef = useRef<HTMLButtonElement>(null);
   const mobileNavigationRef = useRef<HTMLElement>(null);
 
@@ -399,7 +407,9 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
       {
         label: t('nav.groupCore'),
         items: [
+          { id: 'guided', label: t('nav.guided'), icon: Path },
           { id: 'cases', label: t('nav.cases'), icon: Books },
+          { id: 'factory', label: t('nav.factory'), icon: Factory },
           { id: 'pack', label: t('nav.pack'), icon: ClipboardText },
           { id: 'scenario', label: t('nav.scenario'), icon: SlidersHorizontal },
           { id: 'preflight', label: t('nav.preflight'), icon: CheckSquare },
@@ -428,7 +438,9 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
   }, [t, user?.role]);
 
   const pages: Record<ViewId, React.ReactNode> = {
+    guided: <GuidedWorkflowPage navigate={navigate} />,
     cases: <CaseLibraryPage navigate={navigate} />,
+    factory: <EventPackFactoryPage navigate={navigate} />,
     pack: <EventPackPage navigate={navigate} />,
     ai: <AiConfigurationPage />,
     scenario: <ScenarioBuilderPage navigate={navigate} />,
@@ -477,6 +489,34 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
     }
   };
 
+  const switchWorkspaceMode = async () => {
+    if (
+      !preferences?.experienceLevel
+      || !preferences.assistancePreference
+      || !preferences.firstGoal
+      || !preferences.workspaceMode
+    ) {
+      setWorkspaceModeError(true);
+      return;
+    }
+    const nextMode = preferences.workspaceMode === 'GUIDED' ? 'EXPERT' : 'GUIDED';
+    setWorkspaceModeBusy(true);
+    setWorkspaceModeError(false);
+    try {
+      await completeOnboarding({
+        experienceLevel: preferences.experienceLevel,
+        assistancePreference: preferences.assistancePreference,
+        firstGoal: preferences.firstGoal,
+        workspaceMode: nextMode,
+      });
+      navigate(nextMode === 'GUIDED' ? 'guided' : 'cases');
+    } catch {
+      setWorkspaceModeError(true);
+    } finally {
+      setWorkspaceModeBusy(false);
+    }
+  };
+
   return (
     <Theme theme={isDark ? 'g100' : 'g10'} className="app-theme">
       <a className="skip-link" href="#main-content">{t('app.skip')}</a>
@@ -508,6 +548,18 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
               <span>{user?.email}</span>
               {user?.role === 'ADMIN' ? <small>{t('app.adminRole')}</small> : null}
             </div>
+            <Button
+              className="workspace-mode-button"
+              kind="ghost"
+              size="sm"
+              renderIcon={preferences?.workspaceMode === 'GUIDED' ? Books : Path}
+              disabled={workspaceModeBusy}
+              onClick={() => void switchWorkspaceMode()}
+            >
+              {preferences?.workspaceMode === 'GUIDED'
+                ? t('app.switchToExpert')
+                : t('app.switchToGuided')}
+            </Button>
             <div className="language-toggle" role="group" aria-label={t('app.language')}>
               <button type="button" className={language === 'en' ? 'is-active' : ''} onClick={() => setLanguage('en')}>EN</button>
               <button type="button" className={language === 'zh-CN' ? 'is-active' : ''} onClick={() => setLanguage('zh-CN')}>中文</button>
@@ -577,6 +629,15 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
               subtitle={t('app.signOutFailedBody')}
             />
           ) : null}
+          {workspaceModeError ? (
+            <InlineNotification
+              kind="error"
+              lowContrast
+              hideCloseButton
+              title={t('app.workspaceModeFailed')}
+              subtitle={t('app.workspaceModeFailedBody')}
+            />
+          ) : null}
           <ApiConnectionBanner />
           <Suspense fallback={<LoadingPanel />}>
             {currentPage}
@@ -601,7 +662,7 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
 }
 
 function AuthenticationBoundary() {
-  const { state } = useAuth();
+  const { state, legalAcceptance, preferences } = useAuth();
   const [isDark, setIsDark] = useState(() => window.localStorage.getItem('eventshock-theme') === 'dark');
 
   useEffect(() => {
@@ -610,6 +671,26 @@ function AuthenticationBoundary() {
   }, [isDark]);
 
   if (state === 'authenticated') {
+    if (legalAcceptance?.required) {
+      return (
+        <Theme theme={isDark ? 'g100' : 'g10'} className="app-theme">
+          <LegalAcceptancePage
+            isDark={isDark}
+            onToggleTheme={() => setIsDark((current) => !current)}
+          />
+        </Theme>
+      );
+    }
+    if (preferences?.onboardingRequired) {
+      return (
+        <Theme theme={isDark ? 'g100' : 'g10'} className="app-theme">
+          <OnboardingPage
+            isDark={isDark}
+            onToggleTheme={() => setIsDark((current) => !current)}
+          />
+        </Theme>
+      );
+    }
     return (
       <WorkflowProvider>
         <AppShell isDark={isDark} onToggleTheme={() => setIsDark((current) => !current)} />

@@ -27,6 +27,50 @@ class ChallengePurpose(StrEnum):
     RESET_PASSWORD = "RESET_PASSWORD"
 
 
+class ExperienceLevel(StrEnum):
+    NEW = "NEW"
+    INTERMEDIATE = "INTERMEDIATE"
+    ADVANCED = "ADVANCED"
+
+
+class WorkspaceMode(StrEnum):
+    GUIDED = "GUIDED"
+    EXPERT = "EXPERT"
+
+
+class AssistancePreference(StrEnum):
+    STEP_BY_STEP = "STEP_BY_STEP"
+    PROPOSE_AND_ADJUST = "PROPOSE_AND_ADJUST"
+    DIRECT_CONTROL = "DIRECT_CONTROL"
+
+
+class FirstGoal(StrEnum):
+    TRY_DEMO = "TRY_DEMO"
+    RESEARCH_NEW_EVENT = "RESEARCH_NEW_EVENT"
+    DESIGN_FULL_EXPERIMENT = "DESIGN_FULL_EXPERIMENT"
+
+
+class LegalAcceptanceStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    required: bool
+    version: str
+    acceptedAt: datetime | None = None
+
+
+class UserPreferences(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    onboardingRequired: bool
+    experienceLevel: ExperienceLevel | None = None
+    workspaceMode: WorkspaceMode | None = None
+    assistancePreference: AssistancePreference | None = None
+    firstGoal: FirstGoal | None = None
+    onboardingVersion: str | None = None
+    onboardingCompletedAt: datetime | None = None
+    updatedAt: datetime | None = None
+
+
 class PublicUser(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

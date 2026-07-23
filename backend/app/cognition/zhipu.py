@@ -32,11 +32,13 @@ from backend.app.cognition.gateway import (
     ModelResult,
     ModelUsage,
     buildRuleFallback,
+    validateAdvancedModelParameters,
     validateAllowedAction,
     validateEvidenceReferences,
 )
 from backend.app.cognition.models import ActionPreference
 from backend.app.cognition.prompts import (
+    MODEL_OUTPUT_VALIDATOR,
     buildRepairInstruction,
     encodeUntrustedPromptText,
 )
@@ -47,6 +49,7 @@ from backend.app.cognition.streaming import (
     emitModelStreamProgress,
     iterSseEvents,
 )
+from backend.app.security import UnsafeModelOutputError
 
 RETRYABLE_PROVIDER_CODES = frozenset({"1302", "1305"})
 
@@ -147,8 +150,7 @@ class ZhipuRestGateway:
             data = self._validateContent(
                 rawContent,
                 schema,
-                request.allowedEvidenceIds,
-                request.allowedActionValues,
+                request,
             )
             responseHash = hashlib.sha256(rawBody).hexdigest()
         except ModelGatewayError as error:
@@ -198,8 +200,7 @@ class ZhipuRestGateway:
                 data = self._validateContent(
                     repairedContent,
                     schema,
-                    request.allowedEvidenceIds,
-                    request.allowedActionValues,
+                    request,
                 )
                 responseHash = hashlib.sha256(rawBody).hexdigest()
                 lastError = None
@@ -277,6 +278,10 @@ class ZhipuRestGateway:
             raise ValueError("max_tokens exceeds the selected model limit")
         if request.samplingConfig.thinking_enabled and not descriptor.supports_thinking:
             raise ValueError("the selected model does not support thinking")
+        validateAdvancedModelParameters(
+            request.provider,
+            request.samplingConfig.advancedParameters(),
+        )
         if request.samplingConfig.reasoning_effort is not None and request.model != "glm-5.2":
             raise ValueError("reasoning_effort is only supported by glm-5.2")
         if not 6 <= len(request.requestId) <= 64:
@@ -336,6 +341,10 @@ class ZhipuRestGateway:
             }
         if request.samplingConfig.reasoning_effort is not None:
             payload["reasoning_effort"] = request.samplingConfig.reasoning_effort
+        if request.samplingConfig.temperature is not None:
+            payload["temperature"] = request.samplingConfig.temperature
+        if request.samplingConfig.top_p is not None:
+            payload["top_p"] = request.samplingConfig.top_p
         return payload
 
     @staticmethod
@@ -787,8 +796,7 @@ class ZhipuRestGateway:
     def _validateContent[ModelT: BaseModel](
         content: str,
         schema: type[ModelT],
-        allowedEvidenceIds: frozenset[str],
-        allowedActionValues: frozenset[str],
+        request: ModelRequest,
     ) -> ModelT:
         try:
             value = schema.model_validate_json(content)
@@ -804,8 +812,18 @@ class ZhipuRestGateway:
                 FailureCode.SCHEMA_INVALID,
                 f"structured output failed schema validation: {safeDetails}",
             ) from error
-        validateEvidenceReferences(value, allowedEvidenceIds)
-        validateAllowedAction(value, allowedActionValues)
+        validateEvidenceReferences(value, request.allowedEvidenceIds)
+        validateAllowedAction(value, request.allowedActionValues)
+        try:
+            MODEL_OUTPUT_VALIDATOR.validateModelOutput(
+                value,
+                protectedSecrets=(request.apiKey,),
+            )
+        except UnsafeModelOutputError as error:
+            raise ModelGatewayError(
+                FailureCode.PROMPT_DISCLOSURE_BLOCKED,
+                "model output failed deterministic disclosure safety validation",
+            ) from error
         return value
 
     @staticmethod

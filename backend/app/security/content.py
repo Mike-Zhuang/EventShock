@@ -297,8 +297,28 @@ _SENSITIVE_PATTERNS = (
     _PatternSpec(
         "US_SOCIAL_SECURITY_NUMBER",
         FindingSeverity.HIGH,
-        re.compile(r"(?<![0-9])(?:[0-8][0-9]{2})[- ]?(?:[0-9]{2})[- ]?(?:[0-9]{4})(?![0-9])"),
+        # 无上下文的连续九位数字常见于 UUID、工件 ID 和财经数据，不能一概
+        # 视为 SSN。这里要求规范分隔符，并排除 SSA 明确不会分配的段值。
+        re.compile(
+            r"(?<![0-9])(?!(?:000|666|9[0-9]{2})(?:[- ]))"
+            r"[0-8][0-9]{2}(?P<ssn_sep>[- ])"
+            r"(?!00)[0-9]{2}(?P=ssn_sep)(?!0000)[0-9]{4}(?![0-9])"
+        ),
         "highRiskPii",
+    ),
+    _PatternSpec(
+        "US_SOCIAL_SECURITY_NUMBER",
+        FindingSeverity.HIGH,
+        # 紧凑九位形式只在明确的 SSN 上下文后识别，兼顾保护与误报控制。
+        re.compile(
+            r"(?:\bssn\b|\bsocial\s+security(?:\s+number)?\b)"
+            r"\s*(?:is\s*)?[:#=]?\s*"
+            r"((?!(?:000|666|9[0-9]{2}))[0-8][0-9]{2}"
+            r"(?!00)[0-9]{2}(?!0000)[0-9]{4})(?![0-9])",
+            re.IGNORECASE,
+        ),
+        "highRiskPii",
+        captureGroup=1,
     ),
     _PatternSpec(
         "PHONE_NUMBER",

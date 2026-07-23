@@ -21,6 +21,45 @@ from backend.app.cognition.streaming import ModelStreamObserver
 
 LiteralOne = Literal[1]
 
+ADVANCED_PARAMETER_NAMES = frozenset(
+    {
+        "temperature",
+        "topP",
+        "presencePenalty",
+        "frequencyPenalty",
+        "seed",
+        "timeoutSeconds",
+    }
+)
+
+# 供应商能力按当前固定官方端点保守列出。未在这里声明的字段必须 fail closed，
+# 不能因为兼容 OpenAI 的路径长得相似，就推断供应商一定接受同名参数。
+PROVIDER_ADVANCED_PARAMETER_CAPABILITIES: dict[str, frozenset[str]] = {
+    "zhipu": frozenset({"temperature", "topP", "timeoutSeconds"}),
+    "openai": frozenset({"temperature", "topP", "timeoutSeconds"}),
+    "anthropic": frozenset({"temperature", "topP", "timeoutSeconds"}),
+    "google": ADVANCED_PARAMETER_NAMES,
+    "deepseek": frozenset(
+        {
+            "temperature",
+            "topP",
+            "presencePenalty",
+            "frequencyPenalty",
+            "timeoutSeconds",
+        }
+    ),
+    "alibaba": ADVANCED_PARAMETER_NAMES,
+    "moonshot": frozenset(
+        {
+            "temperature",
+            "topP",
+            "presencePenalty",
+            "frequencyPenalty",
+            "timeoutSeconds",
+        }
+    ),
+}
+
 
 class FailureCode(StrEnum):
     MODEL_TIMEOUT = "MODEL_TIMEOUT"
@@ -40,6 +79,7 @@ class FailureCode(StrEnum):
     CONTENT_FILTERED = "CONTENT_FILTERED"
     EVIDENCE_ID_UNKNOWN = "EVIDENCE_ID_UNKNOWN"
     ACTION_NOT_ALLOWED = "ACTION_NOT_ALLOWED"
+    PROMPT_DISCLOSURE_BLOCKED = "PROMPT_DISCLOSURE_BLOCKED"
     FALLBACK_USED = "FALLBACK_USED"
     RULE_FALLBACK_USED = "RULE_FALLBACK_USED"
 
@@ -67,6 +107,44 @@ class ModelGatewayError(RuntimeError):
         self.repairUsed = repairUsed
 
 
+class AdvancedModelParameters(StrictFrozenModel):
+    """可由用户调整、但不能扩展权限的模型参数白名单。
+
+    这里故意不提供 ``baseUrl``、请求头、system prompt、tools 或任意 JSON
+    扩展点。供应商不支持的已填写字段会在保存配置时被明确拒绝。
+    """
+
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    topP: float | None = Field(default=None, gt=0.0, le=1.0)
+    presencePenalty: float | None = Field(default=None, ge=-2.0, le=2.0)
+    frequencyPenalty: float | None = Field(default=None, ge=-2.0, le=2.0)
+    seed: int | None = Field(default=None, ge=0, le=2_147_483_647)
+    timeoutSeconds: float | None = Field(default=None, ge=1.0, le=300.0)
+
+    def configuredNames(self) -> frozenset[str]:
+        return frozenset(
+            name for name in ADVANCED_PARAMETER_NAMES if getattr(self, name) is not None
+        )
+
+
+def validateAdvancedModelParameters(
+    provider: str,
+    parameters: AdvancedModelParameters,
+) -> None:
+    """按供应商固定端点能力拒绝不支持字段，不做静默忽略。"""
+
+    supported = PROVIDER_ADVANCED_PARAMETER_CAPABILITIES.get(provider)
+    if supported is None:
+        raise ValueError(f"advanced parameters are unavailable for provider {provider}")
+    unsupported = parameters.configuredNames() - supported
+    if unsupported:
+        joined = ", ".join(sorted(unsupported))
+        raise ValueError(
+            f"{provider} does not support these advanced parameters through the "
+            f"configured endpoint: {joined}"
+        )
+
+
 class SamplingConfig(StrictFrozenModel):
     thinking_enabled: bool = False
     do_sample: bool = False
@@ -75,12 +153,39 @@ class SamplingConfig(StrictFrozenModel):
         default=None,
         pattern=r"^(max|xhigh|high|medium|low|minimal|none)$",
     )
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    top_p: float | None = Field(default=None, gt=0.0, le=1.0)
+    presence_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
+    frequency_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
+    seed: int | None = Field(default=None, ge=0, le=2_147_483_647)
+    timeout_seconds: float | None = Field(default=None, ge=1.0, le=300.0)
 
     @model_validator(mode="after")
     def validateReasoningEffort(self) -> SamplingConfig:
         if self.reasoning_effort is not None and not self.thinking_enabled:
             raise ValueError("reasoning_effort requires thinking_enabled")
+        if self.do_sample is False and any(
+            value is not None
+            for value in (
+                self.temperature,
+                self.top_p,
+                self.presence_penalty,
+                self.frequency_penalty,
+                self.seed,
+            )
+        ):
+            raise ValueError("sampling parameters require do_sample=true")
         return self
+
+    def advancedParameters(self) -> AdvancedModelParameters:
+        return AdvancedModelParameters(
+            temperature=self.temperature,
+            topP=self.top_p,
+            presencePenalty=self.presence_penalty,
+            frequencyPenalty=self.frequency_penalty,
+            seed=self.seed,
+            timeoutSeconds=self.timeout_seconds,
+        )
 
 
 class ModelPolicy(StrictFrozenModel):

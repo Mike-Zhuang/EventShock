@@ -195,10 +195,11 @@ EventShock 正式服务器不从开发机的未提交工作区更新，也不允
   -> 目标 commit 健康检查通过后切换版本
 ```
 
-当前服务器固定轮询 `codex/self-hosted-mvp`。在项目根目录执行：
+当前服务器固定轮询稳定分支 `main`。开发必须先在个人功能分支完成；以下以
+`codex/example-feature` 为例：
 
 ```bash
-git switch codex/self-hosted-mvp
+git switch -c codex/example-feature
 git fetch origin
 git status --short
 ```
@@ -218,25 +219,31 @@ git add frontend/src frontend/dist backend tests
 git diff --cached --check
 git diff --cached --stat
 git commit -m "feat: describe the completed change"
-git push --set-upstream origin codex/self-hosted-mvp
+git push --set-upstream origin codex/example-feature
 ```
 
-推送后再次 fetch，并确认本地与 GitHub 分支的 SHA 一致：
+推送后再次 fetch，并确认本地与 GitHub 功能分支的 SHA 一致：
 
 ```bash
 git fetch origin
 git rev-parse HEAD
-git rev-parse origin/codex/self-hosted-mvp
+git rev-parse origin/codex/example-feature
 ```
 
-服务器不会仅因分支出现新提交就部署。目标 SHA 的以下三项 GitHub 检查必须全部以 `success` 完成：
+随后创建 Pull Request，并在以下三项 GitHub 检查全部以 `success` 完成后合入
+`main`：
 
 - `Backend / Python 3.12.13`
 - `Frontend / Node 22`
 - `Production container`
 
-检查尚未结束时，服务器任务只记录 `WAIT_CI`；检查失败时记录 `CI_BLOCKED`。服务器以匿名 HTTPS 更新裸仓库镜像，拒绝 force-push、rebase 等非快进历史，并用 `git archive` 提取已通过检查的确定 commit。新发布必须通过容器健康检查和带目标 commit SHA 的公网 `/api/health` 检查，否则自动恢复上一版本。
+服务器不会部署尚未合入 `main` 的功能分支。`main` 的检查尚未结束时，服务器任务只记录
+`WAIT_CI`；检查失败时记录 `CI_BLOCKED`。服务器以匿名 HTTPS 更新裸仓库镜像，拒绝
+force-push、rebase 等非快进历史，并用 `git archive` 提取已通过检查的确定 commit。新发布
+必须通过容器健康检查和带目标 commit SHA 的公网 `/api/health` 检查，否则自动恢复上一版本。
 
-功能稳定后仍需创建 Pull Request，经 Review Approve 后才可合入稳定分支。禁止直接向 `main` 推送。服务器将来切换到稳定分支时，应修改服务器 root 配置并重新验证三项 CI 与快进关系，而不是在本地跳过 PR 流程。
+功能必须通过 Pull Request 合入稳定分支。项目负责人 `Mike-Zhuang` 发起的变更在所需 CI
+全绿后可自行合并；其他贡献者仍应完成团队审核。禁止直接向 `main` 推送，也不得绕过 CI、
+生产健康检查或回滚门禁。
 
 完整的宝塔任务注册、日志位置、回滚和运维命令见[自有服务器部署指南](server-deploy.md)。

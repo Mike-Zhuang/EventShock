@@ -14,20 +14,27 @@ from backend.app.auth.mailer import VerificationMailer
 from backend.app.auth.models import (
     ActivityView,
     AdminUserView,
+    AssistancePreference,
     AuthContext,
     AuthLocale,
     ChallengeDispatch,
     ChallengePurpose,
+    ExperienceLevel,
+    FirstGoal,
     IssuedSession,
+    LegalAcceptanceStatus,
     PublicUser,
+    UserPreferences,
     UserRole,
     UserStatus,
+    WorkspaceMode,
 )
 from backend.app.auth.passwords import hashPassword, verifyPassword
 from backend.app.auth.repository import (
     AuthRepository,
     ChallengeVerificationError,
 )
+from backend.app.legal import validateCurrentAcceptance
 
 EMAIL_LOCAL_PATTERN = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+$")
 
@@ -101,26 +108,44 @@ class AuthService:
         challengeId: str,
         code: str,
         password: str,
+        legalVersion: str,
+        legalDocumentHash: str,
+        legalLocale: AuthLocale,
+        acceptedTerms: bool,
+        acknowledgedPrivacy: bool,
+        confirmedMinimumAge: bool,
+        acknowledgedAiBoundary: bool,
     ) -> PublicUser:
         now = self._now()
-        # 先验证密码策略，避免用户因密码格式错误而损失一次性验证码。
+        # 先验证条款版本和密码策略，避免输入错误消耗一次性验证码。
+        document = validateCurrentAcceptance(
+            version=legalVersion,
+            documentHash=legalDocumentHash,
+            locale=legalLocale,
+            acceptedTerms=acceptedTerms and acknowledgedPrivacy,
+            confirmedMinimumAge=confirmedMinimumAge,
+            acknowledgedAiBoundary=acknowledgedAiBoundary,
+        )
         passwordHash = hashPassword(password)
         challenge = self.repository.getChallenge(challengeId)
         if challenge is None or challenge.purpose is not ChallengePurpose.REGISTER:
             raise ChallengeVerificationError("verification code is invalid or expired")
         codeHash = self._codeHash(challenge.id, challenge.email, challenge.purpose, code)
-        verified = self.repository.consumeChallenge(
+        user = self.repository.consumeRegistrationChallengeAndCreateUser(
             challengeId=challenge.id,
-            purpose=ChallengePurpose.REGISTER,
             codeHash=codeHash,
+            userId=f"usr-{uuid.uuid4().hex}",
+            passwordHash=passwordHash,
+            legalVersion=document.version,
+            legalDocumentHash=document.documentHash,
+            legalLocale=legalLocale,
             now=now,
         )
-        user = self.repository.createUser(
-            userId=f"usr-{uuid.uuid4().hex}",
-            email=verified.email,
-            passwordHash=passwordHash,
+        self.repository.recordActivity(
+            userId=user.id,
+            action="ACCOUNT_REGISTERED",
+            metadata={"legalVersion": document.version, "legalLocale": legalLocale},
         )
-        self.repository.recordActivity(userId=user.id, action="ACCOUNT_REGISTERED")
         return user
 
     async def registerWithLatestChallenge(
@@ -129,6 +154,13 @@ class AuthService:
         email: str,
         code: str,
         password: str,
+        legalVersion: str,
+        legalDocumentHash: str,
+        legalLocale: AuthLocale,
+        acceptedTerms: bool,
+        acknowledgedPrivacy: bool,
+        confirmedMinimumAge: bool,
+        acknowledgedAiBoundary: bool,
     ) -> PublicUser:
         normalized = normalizeEmail(email)
         challenge = self.repository.getLatestChallenge(
@@ -141,7 +173,84 @@ class AuthService:
             challengeId=challenge.id,
             code=code,
             password=password,
+            legalVersion=legalVersion,
+            legalDocumentHash=legalDocumentHash,
+            legalLocale=legalLocale,
+            acceptedTerms=acceptedTerms,
+            acknowledgedPrivacy=acknowledgedPrivacy,
+            confirmedMinimumAge=confirmedMinimumAge,
+            acknowledgedAiBoundary=acknowledgedAiBoundary,
         )
+
+    def legalAcceptanceStatus(self, userId: str) -> LegalAcceptanceStatus:
+        return self.repository.getLegalAcceptanceStatus(userId)
+
+    def acceptCurrentLegalDocuments(
+        self,
+        requester: AuthContext,
+        *,
+        version: str,
+        documentHash: str,
+        locale: AuthLocale,
+        acceptedTerms: bool,
+        acknowledgedPrivacy: bool,
+        confirmedMinimumAge: bool,
+        acknowledgedAiBoundary: bool,
+    ) -> LegalAcceptanceStatus:
+        document = validateCurrentAcceptance(
+            version=version,
+            documentHash=documentHash,
+            locale=locale,
+            acceptedTerms=acceptedTerms and acknowledgedPrivacy,
+            confirmedMinimumAge=confirmedMinimumAge,
+            acknowledgedAiBoundary=acknowledgedAiBoundary,
+        )
+        status = self.repository.acceptLegalDocuments(
+            userId=requester.userId,
+            version=document.version,
+            documentHash=document.documentHash,
+            locale=locale,
+            authSessionId=requester.authSessionId,
+        )
+        self.repository.recordActivity(
+            userId=requester.userId,
+            action="LEGAL_TERMS_ACCEPTED",
+            metadata={"version": document.version, "locale": locale},
+        )
+        return status
+
+    def getUserPreferences(self, requester: AuthContext) -> UserPreferences:
+        return self.repository.getUserPreferences(requester.userId)
+
+    def saveUserPreferences(
+        self,
+        requester: AuthContext,
+        *,
+        experienceLevel: ExperienceLevel,
+        workspaceMode: WorkspaceMode,
+        assistancePreference: AssistancePreference,
+        firstGoal: FirstGoal,
+    ) -> UserPreferences:
+        if self.repository.getLegalAcceptanceStatus(requester.userId).required:
+            raise AuthorizationError("current legal terms must be accepted before onboarding")
+        preferences = self.repository.saveUserPreferences(
+            userId=requester.userId,
+            experienceLevel=experienceLevel,
+            workspaceMode=workspaceMode,
+            assistancePreference=assistancePreference,
+            firstGoal=firstGoal,
+        )
+        self.repository.recordActivity(
+            userId=requester.userId,
+            action="ONBOARDING_COMPLETED",
+            metadata={
+                "experienceLevel": experienceLevel.value,
+                "workspaceMode": workspaceMode.value,
+                "assistancePreference": assistancePreference.value,
+                "firstGoal": firstGoal.value,
+            },
+        )
+        return preferences
 
     async def requestPasswordResetCode(
         self,

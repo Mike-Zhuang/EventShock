@@ -2,6 +2,7 @@ import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from './api/client';
+import type { UserPreferencesInput } from './api/types';
 import { App, buildAppHash, parseAppRoute } from './app';
 
 vi.mock('./api/client', () => ({
@@ -25,6 +26,46 @@ vi.mock('./api/client', () => ({
     })),
     login: vi.fn(),
     register: vi.fn(),
+    getLegalDocument: vi.fn(async (language: 'en' | 'zh-CN') => ({
+      schemaVersion: '1.0.0',
+      version: '2026-07-22-v1',
+      effectiveDate: '2026-07-22',
+      locale: language,
+      title: language === 'zh-CN'
+        ? 'EventShock Lab 使用条款与隐私告知'
+        : 'EventShock Lab Terms of Use and Privacy Notice',
+      summary: language === 'zh-CN' ? '继续前请完整阅读。' : 'Read this document before continuing.',
+      operatorLabel: 'EventShock Lab project operators',
+      minimumAge: 18,
+      sections: [
+        {
+          id: 'scope',
+          title: language === 'zh-CN' ? '1. 范围与接受' : '1. Scope and acceptance',
+          body: [language === 'zh-CN' ? '这些条款适用于本服务。' : 'These terms govern the Service.'],
+        },
+      ],
+      acceptanceStatements: [
+        language === 'zh-CN'
+          ? '我已阅读并同意本版本《使用条款与隐私告知》。'
+          : 'I have read and agree to this version of the Terms of Use and Privacy Notice.',
+        'I confirm that I am at least 18 years old.',
+        'I understand the AI boundary.',
+      ],
+      legalReviewNotice: 'Qualified counsel should review this document.',
+      documentHash: 'a'.repeat(64),
+    })),
+    acceptLegalDocuments: vi.fn(async () => ({
+      required: false,
+      version: '2026-07-22-v1',
+      acceptedAt: '2026-07-22T12:00:00Z',
+    })),
+    getUserPreferences: vi.fn(async () => ({ onboardingRequired: true })),
+    saveUserPreferences: vi.fn(async (input: UserPreferencesInput) => ({
+      ...input,
+      onboardingRequired: false,
+      onboardingVersion: '2026-07-22-v1',
+      onboardingCompletedAt: '2026-07-22T12:01:00Z',
+    })),
     requestVerificationCode: vi.fn(),
     resetPassword: vi.fn(async () => undefined),
     logout: vi.fn(async () => undefined),
@@ -36,6 +77,13 @@ vi.mock('./api/client', () => ({
     getAdminActivity: vi.fn(async () => ({ items: [], total: 0 })),
     getHealth: vi.fn(async () => ({ status: 'ok' })),
     getCases: vi.fn(async () => []),
+    getGuidedWorkflows: vi.fn(async () => []),
+    createGuidedWorkflow: vi.fn(),
+    getGuidedWorkflow: vi.fn(),
+    sendGuidedTurn: vi.fn(),
+    applyGuidedProposal: vi.fn(),
+    advanceGuidedWorkflow: vi.fn(),
+    linkGuidedWorkflowArtifacts: vi.fn(),
     getExperiments: vi.fn(async () => []),
     getExperiment: vi.fn(),
     getResults: vi.fn(),
@@ -86,6 +134,16 @@ describe('移动主导航', () => {
   });
 
   it('丢弃未知 target 以及不属于当前页面的白名单 target', () => {
+    expect(parseAppRoute('#/guided')).toEqual({
+      view: 'guided',
+      experimentId: undefined,
+      target: undefined,
+    });
+    expect(parseAppRoute('#/factory')).toEqual({
+      view: 'factory',
+      experimentId: undefined,
+      target: undefined,
+    });
     expect(parseAppRoute('#/results?target=not-a-target')).toEqual({
       view: 'results',
       experimentId: undefined,
@@ -100,6 +158,72 @@ describe('移动主导航', () => {
       experimentId: 'ignored',
       target: 'metrics-heading',
     })).toBe('#/cases');
+  });
+
+  it('恢复登录会话时只在空路由进入用户保存的默认工作区', async () => {
+    vi.mocked(api.getAuthSession).mockResolvedValueOnce({
+      authenticationRequired: true,
+      authenticated: true,
+      csrfToken: 'guided-csrf',
+      user: {
+        id: 'user-guided-home',
+        email: 'guided@example.com',
+        role: 'USER',
+        emailVerified: true,
+        createdAt: '2026-07-22T00:00:00Z',
+      },
+      legalAcceptance: { required: false, version: '2026-07-22-v1' },
+      preferences: {
+        onboardingRequired: false,
+        experienceLevel: 'NEW',
+        assistancePreference: 'STEP_BY_STEP',
+        firstGoal: 'RESEARCH_NEW_EVENT',
+        workspaceMode: 'GUIDED',
+      },
+    });
+    window.history.replaceState(null, '', window.location.pathname);
+
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: 'AI-guided workflow' }))
+      .toBeInTheDocument();
+    expect(window.location.hash).toBe('#/guided');
+  });
+
+  it('允许用户保存工作区模式并立即切换入口', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getAuthSession).mockResolvedValueOnce({
+      authenticationRequired: true,
+      authenticated: true,
+      csrfToken: 'guided-switch-csrf',
+      user: {
+        id: 'user-guided-switch',
+        email: 'guided-switch@example.com',
+        role: 'USER',
+        emailVerified: true,
+        createdAt: '2026-07-22T00:00:00Z',
+      },
+      legalAcceptance: { required: false, version: '2026-07-22-v1' },
+      preferences: {
+        onboardingRequired: false,
+        experienceLevel: 'NEW',
+        assistancePreference: 'STEP_BY_STEP',
+        firstGoal: 'RESEARCH_NEW_EVENT',
+        workspaceMode: 'GUIDED',
+      },
+    });
+    window.history.replaceState(null, '', '#/guided');
+
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: 'Expert workspace' }));
+
+    await waitFor(() => expect(api.saveUserPreferences).toHaveBeenCalledWith({
+      experienceLevel: 'NEW',
+      assistancePreference: 'STEP_BY_STEP',
+      firstGoal: 'RESEARCH_NEW_EVENT',
+      workspaceMode: 'EXPERT',
+    }));
+    await waitFor(() => expect(window.location.hash).toBe('#/cases'));
   });
 
   it('用户要求减少动态效果时以无动画方式定位目标', async () => {
@@ -568,6 +692,9 @@ describe('移动主导航', () => {
     await user.type(screen.getByLabelText('Email address'), 'new.analyst@example.com');
     await user.type(screen.getByLabelText('New password'), 'ResearchPass42');
     await user.type(screen.getByLabelText('Confirm password'), 'ResearchPass42');
+    const registrationChecks = await screen.findAllByRole('checkbox');
+    expect(registrationChecks).toHaveLength(3);
+    for (const checkbox of registrationChecks) await user.click(checkbox);
     await user.click(screen.getByRole('button', { name: 'Send verification code' }));
 
     await waitFor(() => expect(api.requestVerificationCode).toHaveBeenCalledWith({
@@ -583,8 +710,137 @@ describe('移动主导航', () => {
       password: 'ResearchPass42',
       verificationCode: '123456',
       language: 'en',
+      version: '2026-07-22-v1',
+      documentHash: 'a'.repeat(64),
+      acceptedTerms: true,
+      acknowledgedPrivacy: true,
+      confirmedMinimumAge: true,
+      acknowledgedAiBoundary: true,
     }));
     await waitFor(() => expect(api.getCases).toHaveBeenCalled());
+  });
+
+  it('现有用户必须先接受当前条款，且门禁期间不挂载研究工作流', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getAuthSession).mockResolvedValueOnce({
+      authenticationRequired: true,
+      authenticated: true,
+      csrfToken: 'legal-gate-csrf',
+      user: {
+        id: 'user-existing',
+        email: 'existing@example.com',
+        role: 'USER',
+        emailVerified: true,
+        createdAt: '2026-07-01T00:00:00Z',
+      },
+      legalAcceptance: { required: true, version: '2026-07-22-v1' },
+      preferences: { onboardingRequired: true },
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: 'Review the terms before entering your workspace.' })).toBeInTheDocument();
+    expect(api.getCases).not.toHaveBeenCalled();
+    expect(await screen.findByRole('button', { name: 'Accept and continue' })).toBeDisabled();
+
+    for (const checkbox of screen.getAllByRole('checkbox')) await user.click(checkbox);
+    await user.click(screen.getByRole('button', { name: 'Accept and continue' }));
+
+    await waitFor(() => expect(api.acceptLegalDocuments).toHaveBeenCalledWith({
+      language: 'en',
+      version: '2026-07-22-v1',
+      documentHash: 'a'.repeat(64),
+      acceptedTerms: true,
+      acknowledgedPrivacy: true,
+      confirmedMinimumAge: true,
+      acknowledgedAiBoundary: true,
+    }));
+    expect(await screen.findByRole('heading', { name: 'Choose how EventShock should guide you.' })).toBeInTheDocument();
+    expect(api.getCases).not.toHaveBeenCalled();
+  });
+
+  it('onboarding 要求三项自我描述和明确模式选择，保存后才加载工作区', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getAuthSession).mockResolvedValueOnce({
+      authenticationRequired: true,
+      authenticated: true,
+      csrfToken: 'onboarding-csrf',
+      user: {
+        id: 'user-onboarding',
+        email: 'new@example.com',
+        role: 'USER',
+        emailVerified: true,
+        createdAt: '2026-07-22T00:00:00Z',
+      },
+      legalAcceptance: {
+        required: false,
+        version: '2026-07-22-v1',
+        acceptedAt: '2026-07-22T00:00:00Z',
+      },
+      preferences: { onboardingRequired: true },
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: 'Choose how EventShock should guide you.' })).toBeInTheDocument();
+    expect(api.getCases).not.toHaveBeenCalled();
+    const continueButton = screen.getByRole('button', { name: 'Save and open workspace' });
+    expect(continueButton).toBeDisabled();
+
+    await user.click(screen.getByRole('radio', { name: /New to this workflow/ }));
+    await user.click(screen.getByRole('radio', { name: /Guide me step by step/ }));
+    await user.click(screen.getByRole('radio', { name: /Research a new event/ }));
+    expect(screen.getByText('Recommended starting mode')).toBeInTheDocument();
+    await user.click(screen.getByRole('radio', { name: /Guided mode/ }));
+    await user.click(continueButton);
+
+    await waitFor(() => expect(api.saveUserPreferences).toHaveBeenCalledWith({
+      experienceLevel: 'NEW',
+      workspaceMode: 'GUIDED',
+      assistancePreference: 'STEP_BY_STEP',
+      firstGoal: 'RESEARCH_NEW_EVENT',
+    }));
+    await waitFor(() => expect(window.location.hash).toBe('#/guided'));
+    await waitFor(() => expect(api.getCases).toHaveBeenCalled());
+  });
+
+  it('onboarding 选择专家模式后以案例库作为默认首页', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getAuthSession).mockResolvedValueOnce({
+      authenticationRequired: true,
+      authenticated: true,
+      csrfToken: 'expert-onboarding-csrf',
+      user: {
+        id: 'user-expert-onboarding',
+        email: 'expert@example.com',
+        role: 'USER',
+        emailVerified: true,
+        createdAt: '2026-07-22T00:00:00Z',
+      },
+      legalAcceptance: {
+        required: false,
+        version: '2026-07-22-v1',
+        acceptedAt: '2026-07-22T00:00:00Z',
+      },
+      preferences: { onboardingRequired: true },
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: 'Choose how EventShock should guide you.' })).toBeInTheDocument();
+    await user.click(screen.getByRole('radio', { name: /Experienced researcher/ }));
+    await user.click(screen.getByRole('radio', { name: /Give me direct control/ }));
+    await user.click(screen.getByRole('radio', { name: /Design a complete experiment/ }));
+    await user.click(screen.getByRole('radio', { name: /Expert mode/ }));
+    await user.click(screen.getByRole('button', { name: 'Save and open workspace' }));
+
+    await waitFor(() => expect(api.saveUserPreferences).toHaveBeenCalledWith({
+      experienceLevel: 'ADVANCED',
+      workspaceMode: 'EXPERT',
+      assistancePreference: 'DIRECT_CONTROL',
+      firstGoal: 'DESIGN_FULL_EXPERIMENT',
+    }));
+    await waitFor(() => expect(window.location.hash).toBe('#/cases'));
   });
 
   it('收到全局 401 会话失效事件后卸载工作流并返回登录页', async () => {

@@ -283,6 +283,7 @@ def test_public_catalog_prompts_config_and_live_connection_are_redacted() -> Non
         "hybrid_belief",
         "result_tool_planner",
         "result_interpretation",
+        "guided_workflow",
     }
     assert all(len(item.prompt_hash) == 64 for item in promptViews)
     assert service.getTelemetry().calls == 1

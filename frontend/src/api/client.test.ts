@@ -98,4 +98,234 @@ describe('API client event stream', () => {
       }),
     );
   });
+
+  it('keeps Factory revision, Reader, review, materialization, and deletion payloads explicit', async () => {
+    const build = {
+      id: 'epfb-12345678',
+      ownerUserId: 'user-1',
+      title: 'New event',
+      status: 'DRAFT',
+      revision: 4,
+      createdAt: '2026-07-22T10:00:00Z',
+      updatedAt: '2026-07-22T10:02:00Z',
+      retentionExpiresAt: '2026-07-29T10:02:00Z',
+    };
+    const mutationResponse = () => new Response(JSON.stringify({
+      build,
+      sources: [],
+      searchRun: null,
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    const fetchMock = vi.fn(async (path: string) => path.endsWith('/materialize')
+      ? new Response(JSON.stringify({
+        eventPackId: 'pack-factory',
+        title: 'Factory pack',
+        status: 'DRAFT',
+        sources: [],
+        claims: [],
+        limitations: [],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      : path.endsWith('/epfb-12345678') && fetchMock.mock.calls.length === 4
+        ? new Response(null, { status: 204 })
+        : mutationResponse());
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.addFactoryReaderSource(
+      build.id,
+      3,
+      'epfsrc-search-1234',
+      '2026-07-22T10:01:00Z',
+      'factory-reader-request-1234',
+    );
+    await api.reviewFactorySource(build.id, 'epfsrc-reader-1234', 4, 'APPROVED');
+    await api.materializeFactoryBuild(build.id, 5, {
+      title: 'Factory pack',
+      summary: 'A bounded research summary.',
+      asOf: '2026-07-22T10:01:00Z',
+      instrument: 'EXAMPLE',
+      maximumClaims: 16,
+      requestedImpactChannels: ['belief', 'socialAmplification'],
+      acknowledgedContentReview: true,
+    }, 'factory-materialize-request-1234');
+    await api.deleteFactoryBuild(build.id, 6);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      '/api/v1/event-pack-factory/builds/epfb-12345678/reader',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          clientRequestId: 'factory-reader-request-1234',
+          expectedRevision: 3,
+          searchResultSourceId: 'epfsrc-search-1234',
+          knownAt: '2026-07-22T10:01:00Z',
+        }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/v1/event-pack-factory/builds/epfb-12345678/sources/epfsrc-reader-1234/review',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ expectedRevision: 4, status: 'APPROVED' }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      '/api/v1/event-pack-factory/builds/epfb-12345678/materialize',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          clientRequestId: 'factory-materialize-request-1234',
+          expectedRevision: 5,
+          title: 'Factory pack',
+          summary: 'A bounded research summary.',
+          asOf: '2026-07-22T10:01:00Z',
+          instrument: 'EXAMPLE',
+          maximumClaims: 16,
+          requestedImpactChannels: ['belief', 'socialAmplification'],
+          acknowledgedContentReview: true,
+        }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      4,
+      '/api/v1/event-pack-factory/builds/epfb-12345678',
+      expect.objectContaining({
+        method: 'DELETE',
+        body: JSON.stringify({ expectedRevision: 6 }),
+      }),
+    );
+  });
+
+  it('loads and edits owner-only Factory raw text without cache reuse', async () => {
+    const build = {
+      id: 'epfb-12345678',
+      ownerUserId: 'user-1',
+      title: 'New event',
+      status: 'DRAFT',
+      revision: 5,
+      createdAt: '2026-07-22T10:00:00Z',
+      updatedAt: '2026-07-22T10:03:00Z',
+      retentionExpiresAt: '2026-07-29T10:03:00Z',
+    };
+    const rawResponse = {
+      buildId: build.id,
+      sourceId: 'epfsrc-reader-1234',
+      revision: 4,
+      rawText: 'Original retained source body.',
+      contentHash: 'a'.repeat(64),
+      contentLength: 30,
+      retentionExpiresAt: build.retentionExpiresAt,
+    };
+    const fetchMock = vi.fn(async (_path: string, options?: RequestInit) => (
+      options?.method === 'PUT'
+        ? new Response(JSON.stringify({
+          build,
+          sources: [],
+          searchRun: null,
+          idempotencyReplayed: false,
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+        : new Response(JSON.stringify(rawResponse), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(api.getFactorySourceRawText(build.id, rawResponse.sourceId))
+      .resolves.toMatchObject({
+        rawText: rawResponse.rawText,
+        contentHash: rawResponse.contentHash,
+      });
+    await api.updateFactorySourceRawText(
+      build.id,
+      rawResponse.sourceId,
+      rawResponse.revision,
+      'Corrected retained source body.',
+    );
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      '/api/v1/event-pack-factory/builds/epfb-12345678/sources/epfsrc-reader-1234/raw-text',
+      expect.objectContaining({ cache: 'no-store' }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/v1/event-pack-factory/builds/epfb-12345678/sources/epfsrc-reader-1234/raw-text',
+      expect.objectContaining({
+        method: 'PUT',
+        cache: 'no-store',
+        body: JSON.stringify({
+          expectedRevision: 4,
+          rawText: 'Corrected retained source body.',
+        }),
+      }),
+    );
+  });
+
+  it('sends guided proposals and stage acknowledgements through separate endpoints', async () => {
+    const guidedResponse = {
+      schemaVersion: '1.0.0',
+      id: 'guided-12345678',
+      stage: 'EVENT_GOAL',
+      status: 'ACTIVE',
+      version: 2,
+      language: 'en',
+      draft: {
+        eventMetadata: null,
+        sourceMethod: null,
+        searchQueries: [],
+        intervention: null,
+        eventPackBuildId: null,
+        eventPackId: null,
+        scenarioId: null,
+      },
+      pendingProposal: null,
+      pendingProposalId: null,
+      messages: [],
+      createdAt: '2026-07-22T10:00:00Z',
+      updatedAt: '2026-07-22T10:01:00Z',
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(guidedResponse), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.sendGuidedTurn(guidedResponse.id, {
+      message: 'Study an index-inclusion event.',
+      language: 'en',
+      expectedVersion: 1,
+      clientRequestId: 'guided-request-12345678',
+    });
+    await api.applyGuidedProposal(guidedResponse.id, 'proposal-12345678', 2);
+    await api.advanceGuidedWorkflow(guidedResponse.id, 3);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      '/api/v1/guided-workflows/guided-12345678/turn',
+      expect.objectContaining({
+        body: JSON.stringify({
+          message: 'Study an index-inclusion event.',
+          language: 'en',
+          expectedVersion: 1,
+          clientRequestId: 'guided-request-12345678',
+        }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/v1/guided-workflows/guided-12345678/apply',
+      expect.objectContaining({
+        body: JSON.stringify({ proposalId: 'proposal-12345678', expectedVersion: 2 }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      '/api/v1/guided-workflows/guided-12345678/advance',
+      expect.objectContaining({
+        body: JSON.stringify({ expectedVersion: 3, acknowledgedHumanReview: true }),
+      }),
+    );
+  });
 });

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ipaddress
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -14,6 +16,10 @@ from backend.app.cognition.catalog import (
     DEFAULT_PROVIDER,
     ProviderId,
     getModel,
+)
+from backend.app.cognition.gateway import (
+    AdvancedModelParameters,
+    validateAdvancedModelParameters,
 )
 
 
@@ -243,12 +249,34 @@ class EventSourceInput(StrictModel):
     sourceType: Literal["OFFICIAL", "REPORTING", "ESTIMATE", "USER_PROVIDED"]
     publishedAt: datetime
     knownAt: datetime
-    rawText: str = Field(min_length=1, max_length=50_000)
+    rawText: str = Field(min_length=1, max_length=100_000)
+    publicationTimeAssumed: bool = False
 
     @model_validator(mode="after")
     def validatePointInTime(self) -> EventSourceInput:
         if self.knownAt < self.publishedAt:
             raise ValueError("knownAt must not be earlier than publishedAt")
+        if self.url is not None:
+            parsed = urlsplit(self.url)
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.port not in {None, 443}
+            ):
+                raise ValueError(
+                    "source url must be a public HTTPS URL without credentials or a custom port"
+                )
+            host = parsed.hostname.rstrip(".").casefold()
+            if host == "localhost" or host.endswith(".localhost"):
+                raise ValueError("source url must not target localhost")
+            try:
+                address = ipaddress.ip_address(host)
+            except ValueError:
+                address = None
+            if address is not None and not address.is_global:
+                raise ValueError("source url must not target a private or non-global address")
         return self
 
 
@@ -259,8 +287,17 @@ class EventPackCreateRequest(StrictModel):
     summaryZh: str | None = Field(default=None, max_length=1_000)
     asOf: datetime
     instrument: str = Field(default="CUSTOM", min_length=1, max_length=32)
-    sources: list[EventSourceInput] = Field(min_length=1, max_length=8)
+    sources: list[EventSourceInput] = Field(min_length=1, max_length=24)
     acknowledgedContentReview: bool = False
+
+    @model_validator(mode="after")
+    def validateSourceCollection(self) -> EventPackCreateRequest:
+        sourceIds = [source.sourceId for source in self.sources]
+        if len(sourceIds) != len(set(sourceIds)):
+            raise ValueError("sources must not contain duplicate sourceId values")
+        if sum(len(source.rawText) for source in self.sources) > 400_000:
+            raise ValueError("sources must not exceed 400000 characters in total")
+        return self
 
 
 class EventPackExtractRequest(StrictModel):
@@ -270,8 +307,17 @@ class EventPackExtractRequest(StrictModel):
         default_factory=lambda: ["belief", "liquidity", "passiveFlow", "stopLoss"],
         max_length=12,
     )
-    sources: list[EventSourceInput] = Field(default_factory=list, max_length=8)
+    sources: list[EventSourceInput] = Field(default_factory=list, max_length=24)
     acknowledgedContentReview: bool = False
+
+    @model_validator(mode="after")
+    def validateSourceCollection(self) -> EventPackExtractRequest:
+        sourceIds = [source.sourceId for source in self.sources]
+        if len(sourceIds) != len(set(sourceIds)):
+            raise ValueError("sources must not contain duplicate sourceId values")
+        if sum(len(source.rawText) for source in self.sources) > 400_000:
+            raise ValueError("sources must not exceed 400000 characters in total")
+        return self
 
 
 class ScenarioSaveRequest(StrictModel):
@@ -301,6 +347,7 @@ class LlmConfigRequest(StrictModel):
     apiKey: str = Field(min_length=8, max_length=4_096)
     thinkingEnabled: bool = False
     maxTokens: int = Field(default=2_048, ge=256, le=APPLICATION_MAX_OUTPUT_TOKENS)
+    advancedParameters: AdvancedModelParameters = Field(default_factory=AdvancedModelParameters)
 
     @model_validator(mode="after")
     def validateProviderModelPair(self) -> LlmConfigRequest:
@@ -315,6 +362,7 @@ class LlmConfigRequest(StrictModel):
             )
         if self.thinkingEnabled and not descriptor.supports_thinking:
             raise ValueError(f"{self.provider}/{self.model} does not support thinking")
+        validateAdvancedModelParameters(self.provider, self.advancedParameters)
         return self
 
 

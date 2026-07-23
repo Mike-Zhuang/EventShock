@@ -64,7 +64,9 @@ Prices are produced by an integer-tick, price-time-priority limit order book—n
 
 - A flagship **SpaceX 2026 IPO and rapid Nasdaq-100 inclusion** Event Pack with traceable official facts, point-in-time boundaries, and clearly separated synthetic market mechanics.
 - Runnable **CrowdStrike 2024 outage** and **GameStop 2021 social cascade** historical case packs, explicitly marked as case-ready rather than historically calibrated validation results.
-- Text and file import, deterministic or model-assisted claim extraction, bilingual editing, rejection, approval, and frozen Event Packs.
+- An owner-isolated Event Pack Factory for multi-source paste ingestion and Zhipu Web Search discovery, followed by server-side Reader retrieval, source-by-source review, and materialization into a draft Event Pack.
+- Manual expert controls and a persisted, bounded AI-guided workflow. Onboarding recommends a mode from self-reported experience and assistance preference; it does not test or rank the user, and the user remains free to choose either mode.
+- Text and file import, deterministic or model-assisted claim extraction, bilingual editing, rejection, approval, and frozen Event Packs. Search snippets are discovery aids only and can never support claims or freezing.
 - Deterministic content-safety screening before extraction or external-model calls; blocked high-risk content is not persisted, and reviewable content requires human confirmation and redaction.
 - Seven single-variable interventions: market-maker capacity, social amplification, stop-loss sensitivity, clarification delay, liquidity depth, passive flow, and information delay.
 - Scenario create, save, clone, freeze, and diff workflows with typed market, population, network, cognition, metric, and stopping-rule configuration.
@@ -101,11 +103,15 @@ Provider outputs use native JSON Schema or JSON Object modes where available, fo
 
 The API key is isolated to the current authenticated session and held only in server-process memory. It is removed on sign-out, expiry, provider switch, or service restart, and is never written to the account, SQLite database, browser persistence, logs, or export bundle.
 
+Users may customize only the provider-supported subset of `temperature`, `topP`, `presencePenalty`, `frequencyPenalty`, `seed`, and `timeoutSeconds`, within server-enforced ranges. Arbitrary base URLs, request headers, tools, system prompts, and free-form provider payloads are intentionally unavailable.
+
 LLMs may propose candidate facts or bounded belief and action preferences. They cannot set prices, bypass risk controls, access undeclared real-time data, or submit orders directly. The deterministic policy, ledger, and matching layers remain authoritative.
 
 The result page also offers an explicit BYOK interpretation assistant. It reads a bounded authoritative result snapshot through allowlisted tools, streams safe progress, validates structured evidence citations, supports bilingual multi-turn follow-up, and stores only validated final conversations under the current account. It does not return private chain-of-thought.
 
-Provider capabilities, price references, endpoint policy, validation status, and privacy boundaries are documented in the [AI provider guide](usage_documents/ai-providers.md).
+System prompts are source-visible under this repository's source-available license. Runtime protection therefore does not depend on prompt secrecy: untrusted content is delimited as data, model outputs pass deterministic leak and injection checks plus strict schemas and allowlists, and unsafe output fails closed. These controls reduce—not eliminate—prompt-injection risk, so human review remains mandatory.
+
+Provider capabilities, price references, endpoint policy, validation status, and privacy boundaries are documented in the [AI provider guide](usage_documents/ai-providers.md). The ingestion lifecycle is documented separately in the [Event Pack Factory guide](usage_documents/event-pack-factory.md).
 
 ## Architecture
 
@@ -115,7 +121,7 @@ Browser
   -> BaoTa Nginx (private :18080 reverse proxy and traffic accounting)
   -> EventShock application
        ├─ FastAPI API + built React/TypeScript/Carbon assets
-       ├─ SQLite account, scenario, experiment, study, audit, and AI-chat state
+       ├─ SQLite account, Factory, guided-workflow, scenario, experiment, study, audit, and AI-chat state
        ├─ deterministic event queue, information network, ledger, and order book
        ├─ SMTP-over-SSL bilingual verification mail
        └─ allowlisted multi-provider structured-cognition gateways (optional BYOK)
@@ -247,6 +253,7 @@ requirements*.lock             reviewed production and development dependency lo
 - [中文 README](README.zh-CN.md)
 - [End-to-end product and research blueprint (Chinese)](EventShock_Lab_End_to_End_Blueprint_ENGIN170E_CN.md)
 - [Environment installation guide (Chinese)](usage_documents/install.md)
+- [Event Pack Factory and guided-workflow guide (Chinese)](usage_documents/event-pack-factory.md)
 - [AI provider integration guide (Chinese)](usage_documents/ai-providers.md)
 - [Git collaboration guide (Chinese)](usage_documents/git_use.md)
 - [Agent usage guide (Chinese)](usage_documents/agent_use.md)
@@ -270,7 +277,8 @@ Never include API keys, authorization headers, account identifiers, email addres
 - Production collects only the email address required for account access—not names, identity documents, payment details, brokerage credentials, behavioral IP profiles, or unrelated private communication.
 - Validated result-interpretation conversations are stored for cross-browser recovery and user-controlled deletion. Users must not place secrets or personal information in those prompts. Deletion removes message content while retaining only a non-content identifier hash that prevents stale-request resurrection.
 - Passwords use salted scrypt digests; verification codes and session tokens are stored only as irreversible digests. Provider API keys never enter the account database.
-- Uploaded source bodies are not persisted, but reviewed candidate-claim excerpts and source metadata may be stored under the current account. The deterministic scanner is not an antivirus sandbox, complete attachment parser, or substitute for a privacy-compliance program.
+- Event Pack Factory `PASTE` and Reader bodies are staged in an owner-isolated SQLite payload table for seven days from the latest substantive build mutation. Normal snapshots, logs, audit details, and exports exclude raw text; the owner can explicitly fetch it through a no-store review endpoint. Editing raw text creates a new revision, reruns safety checks, and resets review to `PENDING`. Rejecting a source or deleting/expiring a build removes its Factory data and attempts a WAL truncation, without deleting an already materialized Event Pack. Search, Reader, and materialization use persistent `clientRequestId + payload hash` idempotency to recover successes without duplicate dispatch.
+- Search-result snippets are stored only as discovery metadata and cannot support claims. A user must approve the discovery record, retrieve the full HTTPS page through Reader, and separately review the resulting evidence source. Users must submit only material they are authorized to retain and send to the selected provider. The deterministic scanner is not an antivirus sandbox, complete attachment parser, or substitute for a privacy-compliance program.
 
 ## License
 

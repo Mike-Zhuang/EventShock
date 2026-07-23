@@ -33,11 +33,13 @@ from backend.app.cognition.gateway import (
     ModelResult,
     ModelUsage,
     buildRuleFallback,
+    validateAdvancedModelParameters,
     validateAllowedAction,
     validateEvidenceReferences,
 )
 from backend.app.cognition.models import ActionPreference
 from backend.app.cognition.prompts import (
+    MODEL_OUTPUT_VALIDATOR,
     buildRepairInstruction,
     encodeUntrustedPromptText,
 )
@@ -49,6 +51,7 @@ from backend.app.cognition.streaming import (
     iterSseEvents,
 )
 from backend.app.cognition.zhipu import ZhipuRestGateway
+from backend.app.security import UnsafeModelOutputError
 
 NON_ZHIPU_PROVIDERS: tuple[ProviderId, ...] = (
     "openai",
@@ -431,6 +434,10 @@ class StructuredProviderRestGateway:
             raise ValueError("max_tokens exceeds the selected model limit")
         if request.samplingConfig.thinking_enabled and not descriptor.supports_thinking:
             raise ValueError("the selected model does not support thinking")
+        validateAdvancedModelParameters(
+            request.provider,
+            request.samplingConfig.advancedParameters(),
+        )
         if (
             self._provider == "anthropic"
             and request.model == "claude-haiku-4-5-20251001"
@@ -516,6 +523,7 @@ class StructuredProviderRestGateway:
                 payload["reasoning"] = {
                     "effort": request.samplingConfig.reasoning_effort or "medium"
                 }
+            self._applyAdvancedSamplingParameters(payload, request)
             return payload
 
         if self._provider == "anthropic":
@@ -537,6 +545,7 @@ class StructuredProviderRestGateway:
                     }
                 else:
                     payload["thinking"] = {"type": "adaptive"}
+            self._applyAdvancedSamplingParameters(payload, request)
             return payload
 
         if self._provider == "google":
@@ -549,6 +558,7 @@ class StructuredProviderRestGateway:
                 ),
                 "thinking_summaries": "none",
             }
+            self._applyAdvancedSamplingParameters(generationConfig, request)
             return {
                 "model": request.model,
                 "system_instruction": request.systemPrompt,
@@ -590,6 +600,7 @@ class StructuredProviderRestGateway:
             }
             if streamEnabled:
                 payload["stream_options"] = {"include_usage": True}
+            self._applyAdvancedSamplingParameters(payload, request)
             return payload
 
         payload = {
@@ -609,9 +620,29 @@ class StructuredProviderRestGateway:
                 )
         elif self._provider == "alibaba":
             payload["enable_thinking"] = request.samplingConfig.thinking_enabled
+        self._applyAdvancedSamplingParameters(payload, request)
         if streamEnabled:
             payload["stream_options"] = {"include_usage": True}
         return payload
+
+    @staticmethod
+    def _applyAdvancedSamplingParameters(
+        payload: dict[str, Any],
+        request: ModelRequest,
+    ) -> None:
+        """只透传已在供应商能力矩阵验证过的采样字段。"""
+
+        sampling = request.samplingConfig
+        values = {
+            "temperature": sampling.temperature,
+            "top_p": sampling.top_p,
+            "presence_penalty": sampling.presence_penalty,
+            "frequency_penalty": sampling.frequency_penalty,
+            "seed": sampling.seed,
+        }
+        for name, value in values.items():
+            if value is not None:
+                payload[name] = value
 
     def _headers(self, apiKey: str) -> dict[str, str]:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -1174,6 +1205,16 @@ class StructuredProviderRestGateway:
             ) from error
         validateEvidenceReferences(value, request.allowedEvidenceIds)
         validateAllowedAction(value, request.allowedActionValues)
+        try:
+            MODEL_OUTPUT_VALIDATOR.validateModelOutput(
+                value,
+                protectedSecrets=(request.apiKey,),
+            )
+        except UnsafeModelOutputError as error:
+            raise ModelGatewayError(
+                FailureCode.PROMPT_DISCLOSURE_BLOCKED,
+                "model output failed deterministic disclosure safety validation",
+            ) from error
         return value
 
     def _usageFromBody(self, body: dict[str, Any]) -> ModelUsage:
