@@ -19,7 +19,7 @@ import {
   SlidersHorizontal,
   Trash,
 } from '@phosphor-icons/react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ViewId } from '../app';
 import type {
   InterventionParameter,
@@ -32,6 +32,10 @@ import type {
 } from '../api/types';
 import { api } from '../api/client';
 import { EmptyState, ExplainedLabel, Notice, PageHeader, ParameterHelp, StatusBadge } from '../components/common';
+import {
+  clearScenarioGuidedHandoff,
+  readScenarioGuidedHandoff,
+} from '../guided-handoff';
 import { translateValidation, useI18n } from '../i18n';
 import { getPageGuide } from '../page-guidance';
 import { getParameterHelp } from '../parameter-help';
@@ -175,6 +179,27 @@ export function SecondaryOutcomeOption({
   );
 }
 
+export class GuidedScenarioReplacementError extends Error {}
+
+export async function linkSavedScenarioToGuidedWorkflow(
+  workflowId: string,
+  savedScenario: SavedScenario,
+): Promise<void> {
+  if (!savedScenario.frozen || !savedScenario.contentHash) {
+    throw new GuidedScenarioReplacementError(
+      'Only a successfully frozen scenario can be linked to guided workflow.',
+    );
+  }
+  const currentWorkflow = await api.getGuidedWorkflow(workflowId);
+  const linkedScenarioId = currentWorkflow.draft.scenarioId;
+  if (linkedScenarioId !== savedScenario.id) {
+    await api.linkGuidedWorkflowArtifacts(currentWorkflow.id, {
+      expectedVersion: currentWorkflow.version,
+      scenarioId: savedScenario.id,
+    });
+  }
+}
+
 export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => void }) {
   const { language, t } = useI18n();
   const {
@@ -201,6 +226,9 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
   const [scenarioAction, setScenarioAction] = useState<'create' | 'update' | 'clone' | 'freeze' | 'delete' | 'diff'>();
   const [scenarioManagementError, setScenarioManagementError] = useState<string>();
   const [savedScenarioDiff, setSavedScenarioDiff] = useState<ScenarioDiffResult>();
+  const [guidedHandoff] = useState(readScenarioGuidedHandoff);
+  const [guidedLinkComplete, setGuidedLinkComplete] = useState(false);
+  const guidedHandoffApplied = useRef(false);
   const isFrozen = eventPack?.status.toUpperCase() === 'FROZEN' || Boolean(eventPack?.frozenAt);
   const selectedOption = OPTIONS.find((option) => option.parameter === scenario.intervention.parameter) ?? OPTIONS[0];
   const market: NonNullable<ScenarioDraft['market']> = scenario.market ?? {
@@ -250,6 +278,29 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
       setScenarioName(`${eventPack.name} - ${scenario.intervention.parameter}`.slice(0, 150));
     }
   }, [eventPack?.id]);
+
+  useEffect(() => {
+    if (
+      guidedHandoffApplied.current
+      || !guidedHandoff
+      || eventPack?.id !== guidedHandoff.eventPackId
+    ) return;
+    // 交接只负责预填可编辑草稿；不会替用户保存、冻结或通过运行前检查。
+    guidedHandoffApplied.current = true;
+    setScenario({
+      ...scenario,
+      eventPackId: guidedHandoff.eventPackId,
+      question: guidedHandoff.eventMetadata.researchQuestion,
+      intervention: {
+        parameter: guidedHandoff.intervention.parameter,
+        baselineValue: guidedHandoff.intervention.baselineValue,
+        interventionValue: guidedHandoff.intervention.interventionValue,
+      },
+    });
+    setScenarioName(
+      `${guidedHandoff.eventMetadata.title} - ${guidedHandoff.intervention.parameter}`.slice(0, 150),
+    );
+  }, [eventPack?.id, guidedHandoff, scenario, setScenario]);
 
   const scenarioIsWithinBounds = useMemo(() => (
     scenario.intervention.baselineValue >= selectedOption.min
@@ -330,6 +381,26 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
         setSelectedScenarioId(saved.id);
         setScenarioName(saved.name);
         setScenario(saved.config);
+        if (
+          guidedHandoff
+          && action === 'freeze'
+          && saved.frozen
+          && Boolean(saved.contentHash)
+          && saved.config.eventPackId === guidedHandoff.eventPackId
+        ) {
+          try {
+            await linkSavedScenarioToGuidedWorkflow(guidedHandoff.workflowId, saved);
+            setGuidedLinkComplete(true);
+            clearScenarioGuidedHandoff();
+          } catch (linkError) {
+            const linkDetail = isZh && linkError instanceof GuidedScenarioReplacementError
+              ? '只有已成功冻结且带有内容哈希的情景才能关联回引导。'
+              : linkError instanceof Error ? linkError.message : String(linkError);
+            setScenarioManagementError(isZh
+              ? `情景已保存，但未能关联回引导：${linkDetail}`
+              : `The scenario was saved, but could not be linked back to guidance: ${linkDetail}`);
+          }
+        }
       } else {
         setSelectedScenarioId('');
         setSavedScenarioDiff(undefined);
@@ -368,6 +439,28 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
   return (
     <div className="page page--scenario">
       <PageHeader title={t('scenario.title')} subtitle={t('scenario.subtitle')} guide={getPageGuide('scenario', language)} />
+      {guidedHandoff && eventPack.id === guidedHandoff.eventPackId ? (
+        <div className="inline-action-notice">
+          <InlineNotification
+            kind={guidedLinkComplete ? 'success' : 'info'}
+            lowContrast
+            hideCloseButton
+            title={guidedLinkComplete
+              ? isZh ? '真实情景已关联回 AI 引导' : 'Real scenario linked back to AI guidance'
+              : isZh ? '已载入 AI 引导中的可编辑草稿' : 'Editable guided draft loaded'}
+            subtitle={guidedLinkComplete
+              ? isZh
+                ? '你仍需在对应阶段核对冻结状态与运行前检查，关联本身不会推进工作流。'
+                : 'You still need to review freeze status and preflight in the corresponding stage; linking does not advance the workflow.'
+              : isZh
+                ? '研究问题和单一干预已预填。请逐字段检查、按需编辑，再亲自保存和冻结；页面不会自动提交。'
+                : 'The research question and one intervention are prefilled. Review and edit every field, then explicitly save and freeze it; this page never auto-submits.'}
+          />
+          <Button kind="ghost" size="sm" onClick={() => navigate('guided')}>
+            {isZh ? '返回 AI 引导' : 'Return to AI guidance'}
+          </Button>
+        </div>
+      ) : null}
       {!isFrozen ? (
         <div className="inline-action-notice">
           <InlineNotification

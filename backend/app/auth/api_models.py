@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
-from backend.app.auth.models import AuthLocale, ChallengePurpose, UserStatus
+from backend.app.auth.models import (
+    AssistancePreference,
+    AuthLocale,
+    ChallengePurpose,
+    ExperienceLevel,
+    FirstGoal,
+    UserStatus,
+    WorkspaceMode,
+)
 
 
 class AuthLoginRequest(BaseModel):
@@ -23,13 +31,40 @@ class VerificationCodeRequest(BaseModel):
     language: AuthLocale = "en"
 
 
-class AuthCredentialRequest(BaseModel):
+class AuthPasswordResetRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     email: str = Field(min_length=3, max_length=254)
     password: str = Field(min_length=8, max_length=128)
     verificationCode: str = Field(pattern=r"^[0-9]{6}$")
     language: AuthLocale = "en"
+
+
+class LegalConsentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    language: AuthLocale = "en"
+    version: str = Field(min_length=6, max_length=64)
+    documentHash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    acceptedTerms: StrictBool
+    acknowledgedPrivacy: StrictBool
+    confirmedMinimumAge: StrictBool
+    acknowledgedAiBoundary: StrictBool
+
+
+class AuthRegistrationRequest(LegalConsentRequest):
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=8, max_length=128)
+    verificationCode: str = Field(pattern=r"^[0-9]{6}$")
+
+
+class UserPreferencesRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    experienceLevel: ExperienceLevel
+    workspaceMode: WorkspaceMode
+    assistancePreference: AssistancePreference
+    firstGoal: FirstGoal
 
 
 class UserStatusRequest(BaseModel):

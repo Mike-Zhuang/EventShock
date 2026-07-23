@@ -15,9 +15,14 @@ import {
 } from '../api/client';
 import type {
   AuthUser,
+  LegalAcceptanceStatus,
+  LegalConsentInput,
+  UserPreferences,
+  UserPreferencesInput,
   VerificationCodeReceipt,
   VerificationPurpose,
 } from '../api/types';
+import { synchronizeGuidedHandoffOwner } from '../guided-handoff';
 import type { Language } from '../i18n';
 
 export type AuthenticationState = 'checking' | 'authenticated' | 'unauthenticated' | 'error';
@@ -25,6 +30,8 @@ export type AuthenticationState = 'checking' | 'authenticated' | 'unauthenticate
 interface AuthContextValue {
   state: AuthenticationState;
   user?: AuthUser;
+  legalAcceptance?: LegalAcceptanceStatus;
+  preferences?: UserPreferences;
   error?: string;
   refreshSession: () => Promise<void>;
   login: (email: string, password: string, language: Language) => Promise<void>;
@@ -32,8 +39,10 @@ interface AuthContextValue {
     email: string,
     password: string,
     verificationCode: string,
-    language: Language,
+    consent: LegalConsentInput,
   ) => Promise<void>;
+  acceptLegalDocuments: (consent: LegalConsentInput) => Promise<void>;
+  completeOnboarding: (input: UserPreferencesInput) => Promise<void>;
   requestVerificationCode: (
     email: string,
     purpose: VerificationPurpose,
@@ -57,17 +66,25 @@ function errorMessage(error: unknown): string {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthenticationState>('checking');
   const [user, setUser] = useState<AuthUser>();
+  const [legalAcceptance, setLegalAcceptance] = useState<LegalAcceptanceStatus>();
+  const [preferences, setPreferences] = useState<UserPreferences>();
   const [error, setError] = useState<string>();
 
   const applyAuthenticatedSession = useCallback((session: Awaited<ReturnType<typeof api.getAuthSession>>) => {
     if (!session.authenticated || !session.user) {
+      synchronizeGuidedHandoffOwner();
       setCsrfToken(undefined);
       setUser(undefined);
+      setLegalAcceptance(undefined);
+      setPreferences(undefined);
       setState('unauthenticated');
       return;
     }
+    synchronizeGuidedHandoffOwner(session.user.id);
     setCsrfToken(session.csrfToken);
     setUser(session.user);
+    setLegalAcceptance(session.legalAcceptance);
+    setPreferences(session.preferences);
     setState('authenticated');
   }, []);
 
@@ -75,10 +92,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setState('checking');
     setError(undefined);
     try {
-      applyAuthenticatedSession(await api.getAuthSession());
+      const session = await api.getAuthSession();
+      applyAuthenticatedSession(session);
+      const currentHash = window.location.hash;
+      if (
+        session.authenticated
+        && session.preferences
+        && !session.preferences.onboardingRequired
+        && (currentHash === '' || currentHash === '#' || currentHash === '#/')
+      ) {
+        window.history.replaceState(
+          null,
+          '',
+          session.preferences.workspaceMode === 'GUIDED' ? '#/guided' : '#/cases',
+        );
+      }
     } catch (sessionError) {
+      synchronizeGuidedHandoffOwner();
       setCsrfToken(undefined);
       setUser(undefined);
+      setLegalAcceptance(undefined);
+      setPreferences(undefined);
       if (sessionError instanceof ApiError && sessionError.status === 401) {
         setState('unauthenticated');
         return;
@@ -94,8 +128,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const expireSession = () => {
+      synchronizeGuidedHandoffOwner();
       setCsrfToken(undefined);
       setUser(undefined);
+      setLegalAcceptance(undefined);
+      setPreferences(undefined);
       setError(undefined);
       setState('unauthenticated');
     };
@@ -105,18 +142,41 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (email: string, password: string, language: Language) => {
     setError(undefined);
-    applyAuthenticatedSession(await api.login({ email, password, language }));
+    const session = await api.login({ email, password, language });
+    applyAuthenticatedSession(session);
+    if (session.preferences && !session.preferences.onboardingRequired) {
+      window.history.replaceState(
+        null,
+        '',
+        session.preferences.workspaceMode === 'GUIDED' ? '#/guided' : '#/cases',
+      );
+    }
   }, [applyAuthenticatedSession]);
 
   const register = useCallback(async (
     email: string,
     password: string,
     verificationCode: string,
-    language: Language,
+    consent: LegalConsentInput,
   ) => {
     setError(undefined);
-    applyAuthenticatedSession(await api.register({ email, password, verificationCode, language }));
+    applyAuthenticatedSession(await api.register({
+      email,
+      password,
+      verificationCode,
+      ...consent,
+    }));
   }, [applyAuthenticatedSession]);
+
+  const acceptLegalDocuments = useCallback(async (consent: LegalConsentInput) => {
+    setError(undefined);
+    setLegalAcceptance(await api.acceptLegalDocuments(consent));
+  }, []);
+
+  const completeOnboarding = useCallback(async (input: UserPreferencesInput) => {
+    setError(undefined);
+    setPreferences(await api.saveUserPreferences(input));
+  }, []);
 
   const requestVerificationCode = useCallback((
     email: string,
@@ -147,8 +207,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     }
     try {
+      synchronizeGuidedHandoffOwner();
       setCsrfToken(undefined);
       setUser(undefined);
+      setLegalAcceptance(undefined);
+      setPreferences(undefined);
       setError(undefined);
       setState('unauthenticated');
       window.history.replaceState(null, '', '#/cases');
@@ -161,15 +224,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const value = useMemo<AuthContextValue>(() => ({
     state,
     user,
+    legalAcceptance,
+    preferences,
     error,
     refreshSession,
     login,
     register,
+    acceptLegalDocuments,
+    completeOnboarding,
     requestVerificationCode,
     resetPassword,
     logout,
   }), [
     error,
+    acceptLegalDocuments,
+    completeOnboarding,
+    legalAcceptance,
     login,
     logout,
     refreshSession,
@@ -178,6 +248,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     resetPassword,
     state,
     user,
+    preferences,
   ]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

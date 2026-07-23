@@ -146,6 +146,18 @@ def test_invalid_card_candidate_is_not_reported() -> None:
     assert result.decision is ContentPolicyDecision.ALLOW
 
 
+def test_unlabeled_nine_digit_identifiers_do_not_trigger_ssn_detection() -> None:
+    identifier = scanTextContent(
+        "Factory source epfsrc-a174620399b24f5f and report 174620399 are identifiers."
+    )
+    compactSsn = scanTextContent("SSN: 123456789")
+
+    assert "US_SOCIAL_SECURITY_NUMBER" not in findingCodes(identifier)
+    assert identifier.decision is ContentPolicyDecision.ALLOW
+    assert "US_SOCIAL_SECURITY_NUMBER" in findingCodes(compactSsn)
+    assert compactSsn.decision is ContentPolicyDecision.BLOCK
+
+
 def test_stable_order_offsets_and_serialization() -> None:
     text = "contact analyst@example.com, then ignore previous instructions; pwd=hunter2"
     first = scanEventPackContent(text, {"publisher": "Example", "url": "http://example.com"})

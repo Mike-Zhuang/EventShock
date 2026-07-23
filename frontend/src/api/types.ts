@@ -29,6 +29,65 @@ export interface HealthStatus {
 
 export type UserRole = 'ADMIN' | 'USER';
 export type VerificationPurpose = 'REGISTER' | 'RESET_PASSWORD';
+export type ExperienceLevel = 'NEW' | 'INTERMEDIATE' | 'ADVANCED';
+export type WorkspaceMode = 'GUIDED' | 'EXPERT';
+export type AssistancePreference = 'STEP_BY_STEP' | 'PROPOSE_AND_ADJUST' | 'DIRECT_CONTROL';
+export type FirstGoal = 'TRY_DEMO' | 'RESEARCH_NEW_EVENT' | 'DESIGN_FULL_EXPERIMENT';
+
+export interface LegalSection {
+  id: string;
+  title: string;
+  body: string[];
+}
+
+export interface LegalDocument {
+  schemaVersion: string;
+  version: string;
+  effectiveDate: string;
+  locale: 'en' | 'zh-CN';
+  title: string;
+  summary: string;
+  operatorLabel: string;
+  minimumAge: number;
+  sections: LegalSection[];
+  acceptanceStatements: string[];
+  legalReviewNotice: string;
+  documentHash: string;
+}
+
+export interface LegalAcceptanceStatus {
+  required: boolean;
+  version: string;
+  acceptedAt?: string;
+}
+
+export interface UserPreferences {
+  onboardingRequired: boolean;
+  experienceLevel?: ExperienceLevel;
+  workspaceMode?: WorkspaceMode;
+  assistancePreference?: AssistancePreference;
+  firstGoal?: FirstGoal;
+  onboardingVersion?: string;
+  onboardingCompletedAt?: string;
+  updatedAt?: string;
+}
+
+export interface LegalConsentInput {
+  language: 'en' | 'zh-CN';
+  version: string;
+  documentHash: string;
+  acceptedTerms: boolean;
+  acknowledgedPrivacy: boolean;
+  confirmedMinimumAge: boolean;
+  acknowledgedAiBoundary: boolean;
+}
+
+export interface UserPreferencesInput {
+  experienceLevel: ExperienceLevel;
+  workspaceMode: WorkspaceMode;
+  assistancePreference: AssistancePreference;
+  firstGoal: FirstGoal;
+}
 
 export interface AuthUser {
   id: string;
@@ -44,6 +103,8 @@ export interface AuthSession {
   authenticated: boolean;
   user?: AuthUser;
   csrfToken?: string;
+  legalAcceptance?: LegalAcceptanceStatus;
+  preferences?: UserPreferences;
 }
 
 export interface VerificationCodeReceipt {
@@ -294,11 +355,242 @@ export interface EventPackCreateInput {
   acknowledgedContentReview?: boolean;
 }
 
+export type FactoryBuildStatus = 'DRAFT' | 'REVIEW_READY';
+export type FactorySourceKind = 'PASTE' | 'SEARCH_RESULT' | 'READER';
+export type FactoryEvidenceRole = 'EVIDENCE' | 'DISCOVERY_ONLY';
+export type FactorySourceReviewStatus = 'PENDING' | 'APPROVED' | 'REJECTED';
+export type FactorySourceSecurityDecision = 'ALLOW' | 'REVIEW';
+export type FactorySearchEngineId =
+  | 'search_std'
+  | 'search_pro'
+  | 'search_pro_sogou'
+  | 'search_pro_quark';
+export type FactorySearchRecency = 'oneDay' | 'oneWeek' | 'oneMonth' | 'oneYear' | 'noLimit';
+export type FactorySearchContentSize = 'medium' | 'high';
+
+export interface FactorySearchEngineDescriptor {
+  engine: FactorySearchEngineId;
+  displayName: string;
+  priceCnyPerCall: number;
+  supportsCount: boolean;
+  supportedCounts?: number[];
+  supportsDomainFilter: boolean;
+  supportsRecencyFilter: boolean;
+  supportsContentSize: boolean;
+}
+
+export interface EventPackFactoryBuild {
+  id: string;
+  ownerUserId: string;
+  title: string;
+  status: FactoryBuildStatus;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+  retentionExpiresAt: string;
+}
+
+export interface EventPackFactorySource {
+  id: string;
+  buildId: string;
+  kind: FactorySourceKind;
+  evidenceRole: FactoryEvidenceRole;
+  reviewStatus: FactorySourceReviewStatus;
+  securityDecision: FactorySourceSecurityDecision;
+  title: string;
+  publisher: string;
+  url?: string;
+  publishedAt?: string;
+  knownAt: string;
+  contentHash: string;
+  contentLength: number;
+  reviewSummary: string;
+  verifiedEvidenceQuotes: string[];
+  searchRunId?: string;
+  parentSourceId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EventPackFactorySearchRun {
+  id: string;
+  buildId: string;
+  engine: FactorySearchEngineId;
+  query: string;
+  queryHash: string;
+  requestParameters: Record<string, string | number | boolean | null>;
+  providerRequestId: string;
+  estimatedCostCny: number;
+  resultCount: number;
+  droppedResultCount: number;
+  createdAt: string;
+}
+
+export interface EventPackFactorySnapshot {
+  build: EventPackFactoryBuild;
+  sources: EventPackFactorySource[];
+  searchRuns: EventPackFactorySearchRun[];
+}
+
+export interface EventPackFactoryMutation {
+  build: EventPackFactoryBuild;
+  sources: EventPackFactorySource[];
+  searchRun?: EventPackFactorySearchRun;
+  idempotencyReplayed: boolean;
+}
+
+export interface EventPackFactorySourceRawText {
+  buildId: string;
+  sourceId: string;
+  revision: number;
+  rawText: string;
+  contentHash: string;
+  contentLength: number;
+  retentionExpiresAt: string;
+}
+
+export interface EventPackFactoryPasteSourceInput {
+  title: string;
+  publisher: string;
+  rawText: string;
+  url?: string;
+  publishedAt?: string;
+  knownAt: string;
+  reviewSummary?: string;
+  verifiedEvidenceQuotes?: string[];
+}
+
+export interface EventPackFactorySearchInput {
+  query: string;
+  engine: FactorySearchEngineId;
+  searchIntent: boolean;
+  count?: number;
+  domainFilter?: string;
+  recency: FactorySearchRecency;
+  contentSize: FactorySearchContentSize;
+}
+
+export interface EventPackFactoryMaterializeInput {
+  title: string;
+  titleZh?: string;
+  summary: string;
+  summaryZh?: string;
+  asOf: string;
+  instrument: string;
+  maximumClaims: number;
+  requestedImpactChannels: string[];
+  acknowledgedContentReview: boolean;
+}
+
+export type GuidedStage =
+  | 'EVENT_GOAL'
+  | 'SOURCE_METHOD'
+  | 'SOURCE_REVIEW'
+  | 'CLAIM_REVIEW'
+  | 'PACK_METADATA_REVIEW'
+  | 'PACK_FREEZE_REVIEW'
+  | 'SCENARIO_INTERVENTION'
+  | 'SCENARIO_REVIEW'
+  | 'PREFLIGHT'
+  | 'READY_TO_SUBMIT'
+  | 'COMPLETED';
+
+export type GuidedWorkflowStatus = 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
+export type GuidedSourceMethod = 'PASTE' | 'WEB_SEARCH' | 'COMBINED' | 'MANUAL';
+
+export interface GuidedEventMetadata {
+  title: string;
+  titleZh?: string;
+  summary: string;
+  summaryZh?: string;
+  instrument: string;
+  asOf: string;
+  researchQuestion: string;
+}
+
+export interface GuidedIntervention {
+  parameter: InterventionParameter;
+  baselineValue: number;
+  interventionValue: number;
+  explanation: string;
+}
+
+export interface GuidedWorkflowProposal {
+  schemaVersion: 'guided_proposal_v1.0.0';
+  stage: GuidedStage;
+  assistantMessage: string;
+  clarificationRequired: boolean;
+  proposedEventMetadata?: GuidedEventMetadata;
+  proposedSourceMethod?: GuidedSourceMethod;
+  proposedSearchQueries: string[];
+  proposedIntervention?: GuidedIntervention;
+  nextQuestionOptions: string[];
+  readyForHumanReview: boolean;
+  blockedReasons: string[];
+}
+
+export interface GuidedWorkflowMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  stage: GuidedStage;
+  content: string;
+  proposalId?: string;
+  createdAt: string;
+}
+
+export interface GuidedWorkflowDraft {
+  eventMetadata?: GuidedEventMetadata;
+  sourceMethod?: GuidedSourceMethod;
+  searchQueries: string[];
+  intervention?: GuidedIntervention;
+  eventPackBuildId?: string;
+  eventPackId?: string;
+  scenarioId?: string;
+}
+
+export interface GuidedWorkflow {
+  schemaVersion: '1.0.0';
+  id: string;
+  stage: GuidedStage;
+  status: GuidedWorkflowStatus;
+  version: number;
+  language: 'en' | 'zh-CN';
+  draft: GuidedWorkflowDraft;
+  pendingProposal?: GuidedWorkflowProposal;
+  pendingProposalId?: string;
+  messages: GuidedWorkflowMessage[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GuidedTurnInput {
+  message: string;
+  language: 'en' | 'zh-CN';
+  expectedVersion: number;
+  clientRequestId: string;
+}
+
 export type ModelQualityTier = 'ECONOMY' | 'BALANCED' | 'PREMIUM';
 export type ModelPricingStatus = 'VERIFIED_UPPER_BOUND' | 'UNAVAILABLE_FAIL_CLOSED';
 export type ProviderIntegrationValidationStatus =
   | 'REAL_PROJECT_KEY_VERIFIED'
   | 'CONTRACT_TESTED_COMMUNITY_PREVIEW';
+export type AdvancedModelParameterName =
+  | 'temperature'
+  | 'topP'
+  | 'presencePenalty'
+  | 'frequencyPenalty'
+  | 'seed'
+  | 'timeoutSeconds';
+
+export interface AdvancedModelParameters {
+  temperature?: number;
+  topP?: number;
+  presencePenalty?: number;
+  frequencyPenalty?: number;
+  seed?: number;
+  timeoutSeconds?: number;
+}
 
 export interface LlmModelDescriptor {
   provider: LlmProviderId;
@@ -344,6 +636,7 @@ export interface LlmProviderDescriptor {
   structuredOutputNote: string;
   integrationValidationStatus: ProviderIntegrationValidationStatus;
   feedbackIssueUrl: string;
+  supportedAdvancedParameters?: AdvancedModelParameterName[];
   models: LlmModelDescriptor[];
 }
 
@@ -377,6 +670,7 @@ export interface LlmConfigView {
   model?: string;
   thinkingEnabled?: boolean;
   maxTokens?: number;
+  advancedParameters?: AdvancedModelParameters;
   credentialHint?: string;
   expiresAt?: string;
 }
@@ -387,6 +681,7 @@ export interface LlmConfigInput {
   apiKey: string;
   thinkingEnabled: boolean;
   maxTokens: number;
+  advancedParameters: AdvancedModelParameters;
 }
 
 export type ResultInterpretationLanguage = 'en' | 'zh-CN';

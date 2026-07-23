@@ -12,6 +12,10 @@ from datetime import UTC, datetime
 from pydantic import Field
 
 from backend.app.cognition.catalog import DEFAULT_PROVIDER, ProviderId, getModel
+from backend.app.cognition.gateway import (
+    AdvancedModelParameters,
+    validateAdvancedModelParameters,
+)
 from backend.app.cognition.models import StrictFrozenModel
 from backend.app.cognition.pricing import getTokenPrice, getZhipuTokenPrice
 
@@ -28,6 +32,7 @@ class SessionProviderConfigView(StrictFrozenModel):
     model: str | None = None
     thinking_enabled: bool | None = None
     max_tokens: int | None = Field(default=None, ge=1)
+    advanced_parameters: AdvancedModelParameters | None = None
     credential_hint: str | None = None
     expires_at: datetime | None = None
 
@@ -38,6 +43,7 @@ class RuntimeProviderConfig:
     model: str
     thinkingEnabled: bool
     maxTokens: int
+    advancedParameters: AdvancedModelParameters
     apiKey: str = field(repr=False)
 
 
@@ -47,6 +53,7 @@ class _SessionCredential:
     model: str
     thinkingEnabled: bool
     maxTokens: int
+    advancedParameters: AdvancedModelParameters
     expiresAt: float
     apiKey: str = field(repr=False)
 
@@ -76,6 +83,7 @@ class SessionConfigStore:
         provider: ProviderId = DEFAULT_PROVIDER,
         thinkingEnabled: bool = False,
         maxTokens: int = 2_048,
+        advancedParameters: AdvancedModelParameters | None = None,
     ) -> SessionProviderConfigView:
         self._validateSessionId(sessionId)
         self._validateApiKey(apiKey)
@@ -98,6 +106,8 @@ class SessionConfigStore:
             )
         if thinkingEnabled and not descriptor.supports_thinking:
             raise ValueError(f"{model} does not support thinking")
+        resolvedAdvancedParameters = advancedParameters or AdvancedModelParameters()
+        validateAdvancedModelParameters(provider, resolvedAdvancedParameters)
 
         expiresAt = self._clock() + self._ttlSeconds
         credential = _SessionCredential(
@@ -105,6 +115,7 @@ class SessionConfigStore:
             model=model,
             thinkingEnabled=thinkingEnabled,
             maxTokens=maxTokens,
+            advancedParameters=resolvedAdvancedParameters,
             expiresAt=expiresAt,
             apiKey=apiKey,
         )
@@ -125,6 +136,7 @@ class SessionConfigStore:
                 model=credential.model,
                 thinkingEnabled=credential.thinkingEnabled,
                 maxTokens=credential.maxTokens,
+                advancedParameters=credential.advancedParameters,
                 apiKey=credential.apiKey,
             )
 
@@ -186,6 +198,7 @@ class SessionConfigStore:
             model=credential.model,
             thinking_enabled=credential.thinkingEnabled,
             max_tokens=credential.maxTokens,
+            advanced_parameters=credential.advancedParameters,
             credential_hint=f"••••{credential.apiKey[-4:]}",
             expires_at=datetime.fromtimestamp(credential.expiresAt, tz=UTC),
         )

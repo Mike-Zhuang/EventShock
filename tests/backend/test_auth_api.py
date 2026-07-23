@@ -11,11 +11,59 @@ import backend.app.main as mainModule
 from backend.app.auth import ChallengePurpose
 from backend.app.auth.bootstrap_admin import bootstrapAdmin
 from backend.app.database import Database
+from backend.app.legal import legalDocument
 from backend.app.main import createApp
 
 ADMIN_EMAIL = "admin@example.com"
 ADMIN_PASSWORD = "Administrator password!"
 AUTH_SECRET = "integration-auth-secret-with-at-least-thirty-two-bytes"
+
+
+def legalPayload(language: str = "en") -> dict[str, object]:
+    document = legalDocument("zh-CN" if language == "zh-CN" else "en")
+    return {
+        "language": language,
+        "version": document.version,
+        "documentHash": document.documentHash,
+        "acceptedTerms": True,
+        "acknowledgedPrivacy": True,
+        "confirmedMinimumAge": True,
+        "acknowledgedAiBoundary": True,
+    }
+
+
+@pytest.mark.parametrize("acceptedTermsValue", [1, "true"])
+def test_legal_consent_requires_explicit_json_booleans(
+    tmp_path: Path,
+    acceptedTermsValue: object,
+) -> None:
+    """数字或字符串不能被宽松转换成具有法律含义的明确勾选（StrictBool 类型层拒绝）。
+
+    显式 false 类型合法但语义上是“未同意”，其拒绝在
+    ``test_legal_consent_validation_rejects_false_statements`` 中直接验证。
+    """
+
+    payload = {
+        "email": "analyst@example.com",
+        "password": "Analyst password 123!",
+        "verificationCode": "123456",
+        **legalPayload("en"),
+        "acceptedTerms": acceptedTermsValue,
+    }
+    with TestClient(createApp(tmp_path)) as client:
+        response = client.post("/api/v1/auth/register", json=payload)
+
+    assert response.status_code == 422
+
+
+def acceptCurrentTerms(client: TestClient, csrfToken: str, language: str = "en") -> None:
+    accepted = client.post(
+        "/api/v1/auth/legal-acceptance",
+        headers={"X-CSRF-Token": csrfToken, "Origin": "https://testserver"},
+        json=legalPayload(language),
+    )
+    assert accepted.status_code == 200, accepted.json()
+    assert accepted.json()["required"] is False
 
 
 @dataclass(frozen=True)
@@ -112,6 +160,8 @@ def test_production_auth_cookie_csrf_owner_migration_and_session_only_api_key(
         assert "Secure" in cookieHeader
         assert "SameSite=lax" in cookieHeader
         assert login.json()["user"]["id"] == adminId
+        assert login.json()["legalAcceptance"]["required"] is True
+        acceptCurrentTerms(client, csrfToken)
 
         refreshed = client.get("/api/v1/auth/session")
         assert refreshed.status_code == 200
@@ -172,6 +222,61 @@ def test_production_auth_cookie_csrf_owner_migration_and_session_only_api_key(
     assert b"temporary-api-key" not in (tmp_path / "eventshock.db").read_bytes()
 
 
+def test_legal_gate_blocks_workspace_reads_and_writes_but_allows_recovery_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configureProduction(monkeypatch)
+    monkeypatch.setattr(mainModule, "SmtpVerificationMailer", CapturingMailer)
+    bootstrapTestAdmin(tmp_path)
+
+    with TestClient(createApp(tmp_path), base_url="https://testserver") as client:
+        login = client.post(
+            "/api/v1/auth/login",
+            json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD, "language": "en"},
+        )
+        assert login.status_code == 200
+        csrfToken = login.json()["csrfToken"]
+        assert login.json()["legalAcceptance"]["required"] is True
+
+        # 会话、条款、接受与退出必须始终可用，否则用户无法解除法律门禁。
+        session = client.get("/api/v1/auth/session")
+        terms = client.get("/api/v1/legal/terms", params={"language": "en"})
+        assert session.status_code == 200
+        assert session.json()["legalAcceptance"]["required"] is True
+        assert terms.status_code == 200
+
+        blockedRead = client.get("/api/v1/cases")
+        blockedWrite = client.put(
+            "/api/v1/llm/config",
+            headers={"X-CSRF-Token": csrfToken, "Origin": "https://testserver"},
+            json={
+                "provider": "zhipu",
+                "model": "glm-4.5-air",
+                "apiKey": "temporary-api-key",
+                "thinkingEnabled": False,
+                "maxTokens": 2048,
+            },
+        )
+        for response in (blockedRead, blockedWrite):
+            assert response.status_code == 428
+            assert response.json()["error"]["code"] == "LEGAL_ACCEPTANCE_REQUIRED"
+
+        logout = client.post(
+            "/api/v1/auth/logout",
+            headers={"X-CSRF-Token": csrfToken, "Origin": "https://testserver"},
+        )
+        assert logout.status_code == 204
+
+        relogin = client.post(
+            "/api/v1/auth/login",
+            json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD, "language": "en"},
+        )
+        assert relogin.status_code == 200
+        acceptCurrentTerms(client, relogin.json()["csrfToken"])
+        assert client.get("/api/v1/cases").status_code == 200
+
+
 def test_email_registration_reset_and_user_data_isolation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -198,6 +303,7 @@ def test_email_registration_reset_and_user_data_isolation(
                 "password": userPassword,
                 "verificationCode": registrationCode.code,
                 "language": "zh-CN",
+                **legalPayload("zh-CN"),
             },
         )
         assert registered.status_code == 201
@@ -317,6 +423,7 @@ def test_anonymous_requests_cannot_exhaust_authenticated_interpretation_quota(
             "/api/v1/auth/login",
             json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD, "language": "en"},
         )
+        acceptCurrentTerms(client, login.json()["csrfToken"])
         authenticated = client.post(
             url,
             headers={
@@ -352,6 +459,7 @@ def test_authenticated_users_on_same_nat_have_independent_interpretation_quota(
         )
         assert adminLogin.status_code == 200
         adminCsrf = adminLogin.json()["csrfToken"]
+        acceptCurrentTerms(client, adminCsrf)
         adminToken = client.cookies.get(mainModule.AUTH_COOKIE_NAME)
         assert adminToken
 
@@ -367,6 +475,7 @@ def test_authenticated_users_on_same_nat_have_independent_interpretation_quota(
                 "password": userPassword,
                 "verificationCode": CapturingMailer.messages[-1].code,
                 "language": "en",
+                **legalPayload("en"),
             },
         )
         assert registered.status_code == 201

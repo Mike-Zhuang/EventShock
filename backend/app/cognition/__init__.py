@@ -102,6 +102,7 @@ from backend.app.cognition.pricing import (
 )
 from backend.app.cognition.prompts import (
     EVENT_EXTRACTION_PROMPT,
+    GUIDED_WORKFLOW_PROMPT,
     HYBRID_BELIEF_PROMPT,
     PROMPT_REGISTRY,
     RESULT_INTERPRETATION_PROMPT,
@@ -109,6 +110,7 @@ from backend.app.cognition.prompts import (
     PromptSpec,
     buildBeliefUserMessage,
     buildEvidenceUserMessage,
+    buildGuidedWorkflowUserMessage,
     buildResultInterpretationUserMessage,
     buildResultPlannerUserMessage,
 )
@@ -145,6 +147,7 @@ __all__ = [
     "DEFAULT_MODEL",
     "DEFAULT_PROVIDER",
     "EVENT_EXTRACTION_PROMPT",
+    "GUIDED_WORKFLOW_PROMPT",
     "HYBRID_BELIEF_PROMPT",
     "PROMPT_REGISTRY",
     "RESULT_INTERPRETATION_PROMPT",
@@ -234,6 +237,7 @@ __all__ = [
     "buildBeliefUserMessage",
     "buildDecisionCacheKey",
     "buildEvidenceUserMessage",
+    "buildGuidedWorkflowUserMessage",
     "buildResultIndex",
     "buildResultInterpretationUserMessage",
     "buildResultPlannerUserMessage",

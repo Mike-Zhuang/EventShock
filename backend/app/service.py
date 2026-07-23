@@ -190,16 +190,17 @@ class EventPackService:
         claims: list[dict[str, Any]] | None = None,
         extractionMode: str = "RULE_FALLBACK",
         contentSecurity: dict[str, Any] | None = None,
+        eventPackId: str | None = None,
     ) -> dict[str, Any]:
         asOf = requestData.asOf.isoformat()
         self.validateSourcesAtCutoff(requestData.sources, requestData.asOf)
         slug = re.sub(r"[^a-z0-9]+", "-", requestData.title.lower()).strip("-")[:44]
-        sourceMaterial = "|".join(
-            f"{source.sourceId}:{source.knownAt.isoformat()}:{source.rawText}"
-            for source in requestData.sources
-        )
-        digest = hashlib.sha256(sourceMaterial.encode()).hexdigest()[:10]
-        eventPackId = f"custom-{slug or 'event'}-{digest}"
+        # 每次创建都是一个新的不可变版本。旧实现只对部分来源字段求摘要，
+        # 相同标题和正文可能命中同一 ID 并通过 UPSERT 改写已冻结清单。
+        if eventPackId is None:
+            eventPackId = f"custom-{slug or 'event'}-{uuid.uuid4().hex[:16]}"
+        elif len(eventPackId) > 100 or re.fullmatch(r"custom-[a-z0-9-]+", eventPackId) is None:
+            raise ValueError("eventPackId must be a valid custom immutable identifier")
         sourceRecords = [self._sourceRecord(source) for source in requestData.sources]
         extractedClaims = claims or self.extractCandidateClaims(requestData, maximumClaims=16)
         manifest = {
@@ -268,13 +269,13 @@ class EventPackService:
                 },
             ],
         }
-        self.database.saveCustomEventPack(sessionId, eventPackId, manifest, extractedClaims)
-        self.database.appendAuditEvent(
+        self.database.saveCustomEventPackWithAudit(
             sessionId,
-            "EVENT_PACK",
             eventPackId,
-            "CREATED",
-            {
+            manifest,
+            extractedClaims,
+            auditAction="CREATED",
+            auditPayload={
                 "sourceCount": len(sourceRecords),
                 "claimCount": len(extractedClaims),
                 "extractionMode": extractionMode,
@@ -1057,6 +1058,7 @@ class EventPackService:
             "tier": "T1" if source.sourceType == "OFFICIAL" else "T2",
             "publishedAt": source.publishedAt.isoformat(),
             "knownAt": source.knownAt.isoformat(),
+            "publicationTimeAssumed": bool(getattr(source, "publicationTimeAssumed", False)),
             "contentHash": contentHash,
             "isOfficial": source.sourceType == "OFFICIAL",
             "rawTextRetained": False,

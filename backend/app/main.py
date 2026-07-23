@@ -40,8 +40,11 @@ from backend.app.auth import (
     normalizeEmail,
 )
 from backend.app.auth.api_models import (
-    AuthCredentialRequest,
     AuthLoginRequest,
+    AuthPasswordResetRequest,
+    AuthRegistrationRequest,
+    LegalConsentRequest,
+    UserPreferencesRequest,
     UserStatusRequest,
     VerificationCodeRequest,
 )
@@ -64,6 +67,7 @@ from backend.app.cognition.catalog import (
 from backend.app.cognition.catalog import (
     listModels as listCognitionModels,
 )
+from backend.app.cognition.gateway import PROVIDER_ADVANCED_PARAMETER_CAPABILITIES
 from backend.app.cognition.golden_suite import (
     builtInEvalCases,
     codeGraderSelfTestSamples,
@@ -77,9 +81,45 @@ from backend.app.database import (
     ResultInterpretationRequestConflictError,
 )
 from backend.app.errors import ApiError
+from backend.app.event_pack_factory import (
+    SEARCH_ENGINE_CATALOG,
+    EventPackFactoryError,
+    EventPackFactoryRepository,
+    EventPackFactoryService,
+    FactoryRevisionConflictError,
+    SourceInputKind,
+    SourceReviewInput,
+    ZhipuWebSearchClient,
+)
+from backend.app.event_pack_factory.api_models import (
+    FactoryBuildCreateRequest,
+    FactoryDeleteBuildRequest,
+    FactoryMaterializeRequest,
+    FactoryPasteMutationRequest,
+    FactoryReaderMutationRequest,
+    FactoryReviewMutationRequest,
+    FactorySearchMutationRequest,
+    FactorySourceRawTextUpdateRequest,
+)
+from backend.app.event_pack_factory.reader import (
+    READER_CAPABILITY,
+    ZhipuReaderClient,
+)
 from backend.app.governance.redteam import RED_TEAM_CASES, scoreRedTeamSuite
 from backend.app.governance.registry import inventoryHash, inventorySnapshot
 from backend.app.governance.release_gate import P0_GATES, ReleaseContext, evaluateP0Release
+from backend.app.guided_workflow import (
+    GuidedAdvanceRequest,
+    GuidedCreateRequest,
+    GuidedLinkRequest,
+    GuidedProposalActionRequest,
+    GuidedTurnRequest,
+    GuidedWorkflowConflictError,
+    GuidedWorkflowRepository,
+    GuidedWorkflowService,
+)
+from backend.app.guided_workflow.artifacts import GuidedArtifactValidator
+from backend.app.legal import publicLegalPayload
 from backend.app.observability import RuntimeMetrics
 from backend.app.rate_limit import RateLimitExceeded, RateLimitRule, SlidingWindowRateLimiter
 from backend.app.scenario_service import ScenarioService
@@ -128,6 +168,13 @@ PUBLIC_AUTH_PATHS = frozenset(
         "/api/v1/auth/verification-code",
         "/api/v1/auth/register",
         "/api/v1/auth/password-reset",
+        "/api/v1/legal/terms",
+    }
+)
+LEGAL_GATE_EXEMPT_PATHS = frozenset(
+    {
+        "/api/v1/auth/legal-acceptance",
+        "/api/v1/auth/logout",
     }
 )
 
@@ -147,6 +194,10 @@ MODEL_ERROR_PUBLIC_MESSAGES: dict[FailureCode, str] = {
     FailureCode.CONTENT_FILTERED: "The model provider filtered the result explanation.",
     FailureCode.EVIDENCE_ID_UNKNOWN: "The model cited evidence outside the approved result slices.",
     FailureCode.ACTION_NOT_ALLOWED: "The model response crossed an allowed-action boundary.",
+    FailureCode.PROMPT_DISCLOSURE_BLOCKED: (
+        "The model response was blocked because it resembled protected instructions or "
+        "contained unsafe disclosure content."
+    ),
 }
 
 RESULT_INTERPRETATION_PRIVATE_INPUT_CODES = frozenset(
@@ -288,6 +339,17 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def lifespan(appInstance: FastAPI):
         database = Database(settings.databasePath)
         database.initialize()
+        guidedWorkflowRepository = GuidedWorkflowRepository(database)
+        guidedWorkflowRepository.initialize()
+        factoryRepository = EventPackFactoryRepository(settings.databasePath)
+        factoryRepository.initialize()
+        factorySearchClient = ZhipuWebSearchClient()
+        factoryReaderClient = ZhipuReaderClient()
+        factoryService = EventPackFactoryService(
+            factoryRepository,
+            factorySearchClient,
+            factoryReaderClient,
+        )
         authRepository: AuthRepository | None = None
         authService: AuthService | None = None
         if settings.authenticationRequired:
@@ -336,6 +398,15 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             cognitionService,
         )
         scenarioService = ScenarioService(database, eventPackService)
+        guidedWorkflowService = GuidedWorkflowService(
+            guidedWorkflowRepository,
+            GuidedArtifactValidator(
+                database=database,
+                factory=factoryService,
+                eventPacks=eventPackService,
+                scenarios=scenarioService,
+            ),
+        )
         experimentService = ExperimentService(database, eventPackService, cognitionService)
         studyService = StudyApiService(database)
         appInstance.state.database = database
@@ -349,6 +420,8 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         appInstance.state.scenarioService = scenarioService
         appInstance.state.experimentService = experimentService
         appInstance.state.studyService = studyService
+        appInstance.state.guidedWorkflowService = guidedWorkflowService
+        appInstance.state.eventPackFactoryService = factoryService
         appInstance.state.resultInterpretationSingleFlight = resultInterpretationSingleFlight
 
         async def purgeExpiredCredentials() -> None:
@@ -369,6 +442,8 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 await credentialPurgeTask
             cognitionService.purgeExpiredCredentials()
             await resultInterpretationSingleFlight.purgeExpired()
+            await factorySearchClient.aclose()
+            await factoryReaderClient.aclose()
             experimentService.shutdown()
 
     appInstance = FastAPI(
@@ -441,6 +516,23 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                     statusCode=response.status_code,
                 )
                 return response
+            if _legalAcceptanceProtected(request):
+                legalStatus = authService.legalAcceptanceStatus(request.state.authContext.userId)
+                if legalStatus.required:
+                    response = _authenticationErrorResponse(
+                        request,
+                        code="LEGAL_ACCEPTANCE_REQUIRED",
+                        message=(
+                            "The current Terms of Use and Privacy Notice must be accepted "
+                            "before the authenticated workspace can be used."
+                        ),
+                        statusCode=428,
+                    )
+                    runtimeMetrics.record(
+                        durationMs=(time.perf_counter() - requestStartedAt) * 1_000,
+                        statusCode=response.status_code,
+                    )
+                    return response
 
         # 生产保护路由必须先完成认证和 CSRF 校验。否则匿名请求可以提前消耗
         # 付费写接口的共享额度，并让同一校园 NAT 下的真实用户被拒绝。
@@ -508,6 +600,23 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             content={
                 "error": {
                     "code": error.code,
+                    "message": error.message,
+                    "traceId": getattr(request.state, "traceId", None),
+                    **error.details,
+                }
+            },
+        )
+
+    @appInstance.exception_handler(EventPackFactoryError)
+    async def eventPackFactoryErrorHandler(
+        request: Request,
+        error: EventPackFactoryError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=error.statusCode,
+            content={
+                "error": {
+                    "code": error.code.value,
                     "message": error.message,
                     "traceId": getattr(request.state, "traceId", None),
                     **error.details,
@@ -650,6 +759,12 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             "simulationConcurrency": 1,
         }
 
+    @appInstance.get("/api/v1/legal/terms")
+    async def getCurrentLegalTerms(
+        language: Annotated[Literal["en", "zh-CN"], Query()] = "en",
+    ) -> dict[str, Any]:
+        return publicLegalPayload(language)
+
     @appInstance.get("/api/v1/auth/session")
     async def getAuthSession(request: Request) -> Response:
         if not settings.authenticationRequired:
@@ -690,6 +805,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             _authSessionPayload(
                 user,
                 csrfToken=authService.csrfToken(rawToken),
+                authService=authService,
             )
         )
 
@@ -700,7 +816,13 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             issued = authService.login(email=login.email, password=login.password)
         except ValueError as error:
             raise ApiError("INVALID_EMAIL", 422, str(error)) from error
-        response = JSONResponse(_authSessionPayload(issued.user, csrfToken=issued.csrfToken))
+        response = JSONResponse(
+            _authSessionPayload(
+                issued.user,
+                csrfToken=issued.csrfToken,
+                authService=authService,
+            )
+        )
         _setAuthCookie(response, issued.token, settings.authCookieSecure)
         return response
 
@@ -731,19 +853,39 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         }
 
     @appInstance.post("/api/v1/auth/register", status_code=201)
-    async def registerAccount(payload: AuthCredentialRequest, request: Request) -> Response:
+    async def registerAccount(payload: AuthRegistrationRequest, request: Request) -> Response:
         authService = _requiredAuthService(request)
         try:
             await authService.registerWithLatestChallenge(
                 email=payload.email,
                 code=payload.verificationCode,
                 password=payload.password,
+                legalVersion=payload.version,
+                legalDocumentHash=payload.documentHash,
+                legalLocale=payload.language,
+                acceptedTerms=payload.acceptedTerms,
+                acknowledgedPrivacy=payload.acknowledgedPrivacy,
+                confirmedMinimumAge=payload.confirmedMinimumAge,
+                acknowledgedAiBoundary=payload.acknowledgedAiBoundary,
             )
             issued = authService.login(email=payload.email, password=payload.password)
         except ValueError as error:
-            raise ApiError("INVALID_ACCOUNT_INPUT", 422, str(error)) from error
+            code = (
+                "LEGAL_DOCUMENT_VERSION_STALE"
+                if "version changed" in str(error)
+                else "INVALID_ACCOUNT_INPUT"
+            )
+            raise ApiError(
+                code,
+                409 if code == "LEGAL_DOCUMENT_VERSION_STALE" else 422,
+                str(error),
+            ) from error
         response = JSONResponse(
-            _authSessionPayload(issued.user, csrfToken=issued.csrfToken),
+            _authSessionPayload(
+                issued.user,
+                csrfToken=issued.csrfToken,
+                authService=authService,
+            ),
             status_code=201,
         )
         _setAuthCookie(response, issued.token, settings.authCookieSecure)
@@ -751,7 +893,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
 
     @appInstance.post("/api/v1/auth/password-reset")
     async def resetAccountPassword(
-        payload: AuthCredentialRequest,
+        payload: AuthPasswordResetRequest,
         request: Request,
     ) -> dict[str, bool]:
         authService = _requiredAuthService(request)
@@ -764,6 +906,280 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         except ValueError as error:
             raise ApiError("INVALID_ACCOUNT_INPUT", 422, str(error)) from error
         return {"ok": True}
+
+    @appInstance.post("/api/v1/auth/legal-acceptance")
+    async def acceptCurrentLegalTerms(
+        payload: LegalConsentRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        authService = _requiredAuthService(request)
+        context = _authContext(request)
+        try:
+            status = authService.acceptCurrentLegalDocuments(
+                context,
+                version=payload.version,
+                documentHash=payload.documentHash,
+                locale=payload.language,
+                acceptedTerms=payload.acceptedTerms,
+                acknowledgedPrivacy=payload.acknowledgedPrivacy,
+                confirmedMinimumAge=payload.confirmedMinimumAge,
+                acknowledgedAiBoundary=payload.acknowledgedAiBoundary,
+            )
+        except ValueError as error:
+            code = (
+                "LEGAL_DOCUMENT_VERSION_STALE"
+                if "version changed" in str(error)
+                else "INVALID_LEGAL_ACCEPTANCE"
+            )
+            raise ApiError(
+                code,
+                409 if code == "LEGAL_DOCUMENT_VERSION_STALE" else 422,
+                str(error),
+            ) from error
+        return status.model_dump(mode="json")
+
+    @appInstance.get("/api/v1/auth/preferences")
+    async def getCurrentUserPreferences(request: Request) -> dict[str, Any]:
+        authService = _requiredAuthService(request)
+        preferences = authService.getUserPreferences(_authContext(request))
+        return preferences.model_dump(mode="json")
+
+    @appInstance.put("/api/v1/auth/preferences")
+    async def saveCurrentUserPreferences(
+        payload: UserPreferencesRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        authService = _requiredAuthService(request)
+        preferences = authService.saveUserPreferences(
+            _authContext(request),
+            experienceLevel=payload.experienceLevel,
+            workspaceMode=payload.workspaceMode,
+            assistancePreference=payload.assistancePreference,
+            firstGoal=payload.firstGoal,
+        )
+        return preferences.model_dump(mode="json")
+
+    @appInstance.get("/api/v1/guided-workflows")
+    async def listGuidedWorkflows(
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        service: GuidedWorkflowService = request.app.state.guidedWorkflowService
+        ownerUserId = _sessionId(sessionId)
+        return {
+            "items": [workflow.model_dump(mode="json") for workflow in service.list(ownerUserId)]
+        }
+
+    @appInstance.post("/api/v1/guided-workflows", status_code=201)
+    async def createGuidedWorkflow(
+        payload: GuidedCreateRequest,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        service: GuidedWorkflowService = request.app.state.guidedWorkflowService
+        ownerUserId = _sessionId(sessionId)
+        workflow = service.create(ownerUserId, payload.language)
+        database: Database = request.app.state.database
+        database.appendAuditEvent(
+            ownerUserId,
+            "GUIDED_WORKFLOW",
+            workflow.id,
+            "CREATED",
+            {"language": payload.language, "stage": workflow.stage.value},
+        )
+        return workflow.model_dump(mode="json")
+
+    @appInstance.get("/api/v1/guided-workflows/{workflowId}")
+    async def getGuidedWorkflow(
+        workflowId: str,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        service: GuidedWorkflowService = request.app.state.guidedWorkflowService
+        try:
+            workflow = service.get(workflowId, _sessionId(sessionId))
+        except LookupError as error:
+            raise ApiError(
+                "GUIDED_WORKFLOW_NOT_FOUND",
+                404,
+                "The guided workflow does not exist.",
+            ) from error
+        return workflow.model_dump(mode="json")
+
+    @appInstance.post("/api/v1/guided-workflows/{workflowId}/turn")
+    async def createGuidedWorkflowTurn(
+        workflowId: str,
+        payload: GuidedTurnRequest,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        ownerUserId = _sessionId(sessionId)
+        credentialId = credentialSessionId(request, ownerUserId)
+        service: GuidedWorkflowService = request.app.state.guidedWorkflowService
+        cognition: CognitionService = request.app.state.cognitionService
+        try:
+            # 必须先于任何凭据查找或供应商调用执行，避免恶意文本进入模型边界。
+            earlyScan = scanTextContent(payload.message, field="guidedWorkflowMessage")
+            if earlyScan.decision is not ContentPolicyDecision.ALLOW:
+                raise ValueError(
+                    "guided workflow messages must not contain secrets, personal data, "
+                    "executable content, or prompt-injection instructions"
+                )
+            claim = service.claimTurn(
+                workflowId=workflowId,
+                ownerUserId=ownerUserId,
+                request=payload,
+            )
+            if claim.replayed:
+                return claim.workflow.model_dump(mode="json")
+            try:
+                if cognition.getConfig(credentialId).configured:
+                    proposal = await cognition.proposeGuidedWorkflow(
+                        sessionId=credentialId,
+                        workflow=claim.workflow,
+                        latestUserMessage=payload.message,
+                        language=payload.language,
+                    )
+                else:
+                    proposal = service.deterministicProposal(
+                        workflow=claim.workflow,
+                        language=payload.language,
+                    )
+                updated = service.completeTurn(
+                    workflowId=workflowId,
+                    ownerUserId=ownerUserId,
+                    request=payload,
+                    claim=claim,
+                    proposal=proposal,
+                    recordAudit=True,
+                )
+            except Exception as error:
+                # 模型是否已计费可能无法确定，因此保留 UNKNOWN operation，
+                # 后续相同或替换 clientRequestId 都不得自动再次调用供应商。
+                service.markTurnUnknown(
+                    workflowId=workflowId,
+                    ownerUserId=ownerUserId,
+                    request=payload,
+                    claim=claim,
+                    errorCode=type(error).__name__,
+                )
+                raise
+        except LookupError as error:
+            raise ApiError(
+                "GUIDED_WORKFLOW_NOT_FOUND",
+                404,
+                "The guided workflow does not exist.",
+            ) from error
+        except GuidedWorkflowConflictError as error:
+            raise ApiError("GUIDED_WORKFLOW_CONFLICT", 409, str(error)) from error
+        except CredentialNotConfiguredError as error:
+            raise ApiError(
+                "LLM_CREDENTIAL_NOT_CONFIGURED",
+                409,
+                "The temporary model credential expired; configure it again.",
+            ) from error
+        except ModelGatewayError as error:
+            raise _modelGatewayApiError(error) from error
+        except ValueError as error:
+            raise ApiError("INVALID_GUIDED_WORKFLOW_TURN", 422, str(error)) from error
+        return updated.model_dump(mode="json")
+
+    @appInstance.post("/api/v1/guided-workflows/{workflowId}/apply")
+    async def applyGuidedWorkflowProposal(
+        workflowId: str,
+        payload: GuidedProposalActionRequest,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        ownerUserId = _sessionId(sessionId)
+        service: GuidedWorkflowService = request.app.state.guidedWorkflowService
+        try:
+            workflow = service.applyProposal(workflowId, ownerUserId, payload)
+        except LookupError as error:
+            raise ApiError(
+                "GUIDED_WORKFLOW_NOT_FOUND",
+                404,
+                "The guided workflow does not exist.",
+            ) from error
+        except GuidedWorkflowConflictError as error:
+            raise ApiError("GUIDED_WORKFLOW_CONFLICT", 409, str(error)) from error
+        request.app.state.database.appendAuditEvent(
+            ownerUserId,
+            "GUIDED_WORKFLOW",
+            workflowId,
+            "PROPOSAL_APPLIED_BY_HUMAN",
+            {"stage": workflow.stage.value, "proposalId": payload.proposalId},
+        )
+        return workflow.model_dump(mode="json")
+
+    @appInstance.post("/api/v1/guided-workflows/{workflowId}/advance")
+    async def advanceGuidedWorkflow(
+        workflowId: str,
+        payload: GuidedAdvanceRequest,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        ownerUserId = _sessionId(sessionId)
+        service: GuidedWorkflowService = request.app.state.guidedWorkflowService
+        try:
+            workflow = service.advance(
+                workflowId,
+                ownerUserId,
+                payload,
+                credentialSessionId=credentialSessionId(request, ownerUserId),
+            )
+        except LookupError as error:
+            raise ApiError(
+                "GUIDED_WORKFLOW_NOT_FOUND",
+                404,
+                "The guided workflow does not exist.",
+            ) from error
+        except GuidedWorkflowConflictError as error:
+            raise ApiError("GUIDED_WORKFLOW_CONFLICT", 409, str(error)) from error
+        except ValueError as error:
+            raise ApiError("GUIDED_WORKFLOW_STAGE_INCOMPLETE", 422, str(error)) from error
+        request.app.state.database.appendAuditEvent(
+            ownerUserId,
+            "GUIDED_WORKFLOW",
+            workflowId,
+            "ADVANCED_BY_HUMAN",
+            {"stage": workflow.stage.value},
+        )
+        return workflow.model_dump(mode="json")
+
+    @appInstance.patch("/api/v1/guided-workflows/{workflowId}/links")
+    async def linkGuidedWorkflowArtifacts(
+        workflowId: str,
+        payload: GuidedLinkRequest,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        ownerUserId = _sessionId(sessionId)
+        service: GuidedWorkflowService = request.app.state.guidedWorkflowService
+        try:
+            workflow = service.linkArtifacts(workflowId, ownerUserId, payload)
+        except LookupError as error:
+            raise ApiError(
+                "GUIDED_WORKFLOW_NOT_FOUND",
+                404,
+                "The guided workflow does not exist.",
+            ) from error
+        except GuidedWorkflowConflictError as error:
+            raise ApiError("GUIDED_WORKFLOW_CONFLICT", 409, str(error)) from error
+        except ValueError as error:
+            raise ApiError("GUIDED_ARTIFACT_INVALID", 422, str(error)) from error
+        request.app.state.database.appendAuditEvent(
+            ownerUserId,
+            "GUIDED_WORKFLOW",
+            workflowId,
+            "ARTIFACT_LINKED_BY_HUMAN",
+            {
+                "eventPackBuildId": payload.eventPackBuildId,
+                "eventPackId": payload.eventPackId,
+                "scenarioId": payload.scenarioId,
+            },
+        )
+        return workflow.model_dump(mode="json")
 
     @appInstance.post("/api/v1/auth/logout")
     async def logoutAccount(request: Request) -> Response:
@@ -881,6 +1297,500 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         service: EventPackService = request.app.state.eventPackService
         return {"items": service.listCases(_optionalSessionId(sessionId))}
 
+    @appInstance.get("/api/v1/event-pack-factory/search-engines")
+    async def getEventPackFactorySearchEngines() -> dict[str, Any]:
+        return {
+            "items": [
+                descriptor.model_dump(mode="json") for descriptor in SEARCH_ENGINE_CATALOG.values()
+            ],
+            "reader": READER_CAPABILITY.model_dump(mode="json"),
+        }
+
+    @appInstance.get("/api/v1/event-pack-factory/builds")
+    async def listEventPackFactoryBuilds(
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        factory: EventPackFactoryService = request.app.state.eventPackFactoryService
+        return {
+            "items": [
+                item.model_dump(mode="json")
+                for item in factory.listBuilds(ownerUserId=_sessionId(sessionId))
+            ]
+        }
+
+    @appInstance.post("/api/v1/event-pack-factory/builds", status_code=201)
+    async def createEventPackFactoryBuild(
+        payload: FactoryBuildCreateRequest,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        ownerUserId = _sessionId(sessionId)
+        factory: EventPackFactoryService = request.app.state.eventPackFactoryService
+        build = factory.createBuild(ownerUserId=ownerUserId, title=payload.title)
+        database: Database = request.app.state.database
+        database.appendAuditEvent(
+            ownerUserId,
+            "EVENT_PACK_FACTORY",
+            build.id,
+            "BUILD_CREATED",
+            {"revision": build.revision},
+        )
+        return build.model_dump(mode="json")
+
+    @appInstance.get("/api/v1/event-pack-factory/builds/{buildId}")
+    async def getEventPackFactoryBuild(
+        buildId: str,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        factory: EventPackFactoryService = request.app.state.eventPackFactoryService
+        snapshot = factory.getBuild(
+            ownerUserId=_sessionId(sessionId),
+            buildId=buildId,
+        )
+        return snapshot.model_dump(mode="json")
+
+    @appInstance.delete("/api/v1/event-pack-factory/builds/{buildId}", status_code=204)
+    async def deleteEventPackFactoryBuild(
+        buildId: str,
+        payload: FactoryDeleteBuildRequest,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> Response:
+        ownerUserId = _sessionId(sessionId)
+        factory: EventPackFactoryService = request.app.state.eventPackFactoryService
+        checkpointSucceeded = factory.deleteBuild(
+            ownerUserId=ownerUserId,
+            buildId=buildId,
+            expectedRevision=payload.expectedRevision,
+        )
+        database: Database = request.app.state.database
+        database.appendAuditEvent(
+            ownerUserId,
+            "EVENT_PACK_FACTORY",
+            buildId,
+            "BUILD_DELETED",
+            {
+                "deletedRawSourcePayloads": True,
+                "walCheckpointAttempted": True,
+                "walCheckpointSucceeded": checkpointSucceeded,
+            },
+        )
+        return Response(status_code=204)
+
+    @appInstance.post(
+        "/api/v1/event-pack-factory/builds/{buildId}/paste",
+        status_code=201,
+    )
+    async def addEventPackFactoryPasteSource(
+        buildId: str,
+        payload: FactoryPasteMutationRequest,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        ownerUserId = _sessionId(sessionId)
+        factory: EventPackFactoryService = request.app.state.eventPackFactoryService
+        result = factory.addPasteSource(
+            ownerUserId=ownerUserId,
+            buildId=buildId,
+            expectedRevision=payload.expectedRevision,
+            sourceInput=payload.source.toDomainInput(),
+        )
+        request.app.state.database.appendAuditEvent(
+            ownerUserId,
+            "EVENT_PACK_FACTORY",
+            buildId,
+            "PASTE_SOURCE_ADDED",
+            {
+                "revision": result.build.revision,
+                "sourceIds": [source.id for source in result.sources],
+                "contentLengths": [source.contentLength for source in result.sources],
+            },
+        )
+        return result.model_dump(mode="json")
+
+    @appInstance.get("/api/v1/event-pack-factory/builds/{buildId}/sources/{sourceId}/raw-text")
+    async def getEventPackFactorySourceRawText(
+        buildId: str,
+        sourceId: str,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> JSONResponse:
+        ownerUserId = _sessionId(sessionId)
+        factory: EventPackFactoryService = request.app.state.eventPackFactoryService
+        result = factory.getSourceRawText(
+            ownerUserId=ownerUserId,
+            buildId=buildId,
+            sourceId=sourceId,
+        )
+        request.app.state.database.appendAuditEvent(
+            ownerUserId,
+            "EVENT_PACK_FACTORY",
+            buildId,
+            "SOURCE_RAW_TEXT_VIEWED",
+            {
+                "revision": result.revision,
+                "sourceId": sourceId,
+                "contentHash": result.contentHash,
+                "contentLength": result.contentLength,
+            },
+        )
+        return JSONResponse(
+            content=result.model_dump(mode="json"),
+            headers={
+                "Cache-Control": "no-store, max-age=0",
+                "Pragma": "no-cache",
+            },
+        )
+
+    @appInstance.put("/api/v1/event-pack-factory/builds/{buildId}/sources/{sourceId}/raw-text")
+    async def updateEventPackFactorySourceRawText(
+        buildId: str,
+        sourceId: str,
+        payload: FactorySourceRawTextUpdateRequest,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> JSONResponse:
+        ownerUserId = _sessionId(sessionId)
+        factory: EventPackFactoryService = request.app.state.eventPackFactoryService
+        previous = factory.getSourceRawText(
+            ownerUserId=ownerUserId,
+            buildId=buildId,
+            sourceId=sourceId,
+        )
+        result = factory.updateSourceRawText(
+            ownerUserId=ownerUserId,
+            buildId=buildId,
+            sourceId=sourceId,
+            expectedRevision=payload.expectedRevision,
+            rawText=payload.revealedRawText(),
+            reviewSummary=payload.reviewSummary,
+            verifiedEvidenceQuotes=payload.verifiedEvidenceQuotes,
+        )
+        revised = result.sources[0]
+        request.app.state.database.appendAuditEvent(
+            ownerUserId,
+            "EVENT_PACK_FACTORY",
+            buildId,
+            "SOURCE_RAW_TEXT_EDITED",
+            {
+                "previousRevision": previous.revision,
+                "revision": result.build.revision,
+                "sourceId": sourceId,
+                "previousContentHash": previous.contentHash,
+                "contentHash": revised.contentHash,
+                "previousContentLength": previous.contentLength,
+                "contentLength": revised.contentLength,
+                "securityDecision": revised.securityDecision.value,
+                "reviewReset": True,
+            },
+        )
+        return JSONResponse(
+            content=result.model_dump(mode="json"),
+            headers={
+                "Cache-Control": "no-store, max-age=0",
+                "Pragma": "no-cache",
+            },
+        )
+
+    @appInstance.post("/api/v1/event-pack-factory/builds/{buildId}/search")
+    async def searchEventPackFactorySources(
+        buildId: str,
+        payload: FactorySearchMutationRequest,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        ownerUserId = _sessionId(sessionId)
+        credentialId = credentialSessionId(request, ownerUserId)
+        cognition: CognitionService = request.app.state.cognitionService
+        try:
+            apiKey = cognition.requireTemporaryApiKey(credentialId, provider="zhipu")
+        except CredentialNotConfiguredError as error:
+            raise ApiError(
+                "ZHIPU_TEMPORARY_CREDENTIAL_REQUIRED",
+                409,
+                "Configure a temporary Zhipu API key before using Web Search.",
+            ) from error
+        factory: EventPackFactoryService = request.app.state.eventPackFactoryService
+        result = await factory.searchSources(
+            ownerUserId=ownerUserId,
+            buildId=buildId,
+            expectedRevision=payload.expectedRevision,
+            request=payload.request,
+            apiKey=apiKey,
+            clientRequestId=payload.clientRequestId,
+        )
+        if not result.idempotencyReplayed:
+            request.app.state.database.appendAuditEvent(
+                ownerUserId,
+                "EVENT_PACK_FACTORY",
+                buildId,
+                "WEB_SEARCH_COMPLETED",
+                {
+                    "revision": result.build.revision,
+                    "engine": payload.request.engine.value,
+                    "queryHash": hashlib.sha256(payload.request.query.encode()).hexdigest(),
+                    "resultCount": len(result.sources),
+                    "estimatedCostCny": (
+                        result.searchRun.estimatedCostCny if result.searchRun else None
+                    ),
+                },
+            )
+        return result.model_dump(mode="json")
+
+    @appInstance.post(
+        "/api/v1/event-pack-factory/builds/{buildId}/reader",
+        status_code=201,
+    )
+    async def readEventPackFactorySource(
+        buildId: str,
+        payload: FactoryReaderMutationRequest,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        ownerUserId = _sessionId(sessionId)
+        credentialId = credentialSessionId(request, ownerUserId)
+        cognition: CognitionService = request.app.state.cognitionService
+        try:
+            apiKey = cognition.requireTemporaryApiKey(credentialId, provider="zhipu")
+        except CredentialNotConfiguredError as error:
+            raise ApiError(
+                "ZHIPU_TEMPORARY_CREDENTIAL_REQUIRED",
+                409,
+                "Configure a temporary Zhipu API key before using Reader.",
+            ) from error
+        factory: EventPackFactoryService = request.app.state.eventPackFactoryService
+        result = await factory.fetchReaderSource(
+            ownerUserId=ownerUserId,
+            buildId=buildId,
+            expectedRevision=payload.expectedRevision,
+            searchResultSourceId=payload.searchResultSourceId,
+            knownAt=payload.knownAt,
+            apiKey=apiKey,
+            clientRequestId=payload.clientRequestId,
+        )
+        if not result.idempotencyReplayed:
+            request.app.state.database.appendAuditEvent(
+                ownerUserId,
+                "EVENT_PACK_FACTORY",
+                buildId,
+                "READER_SOURCE_ADDED",
+                {
+                    "revision": result.build.revision,
+                    "parentSourceId": payload.searchResultSourceId,
+                    "sourceIds": [source.id for source in result.sources],
+                    "readerBillingStatus": READER_CAPABILITY.billingStatus.value,
+                },
+            )
+        return result.model_dump(mode="json")
+
+    @appInstance.post("/api/v1/event-pack-factory/builds/{buildId}/sources/{sourceId}/review")
+    async def reviewEventPackFactorySource(
+        buildId: str,
+        sourceId: str,
+        payload: FactoryReviewMutationRequest,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        ownerUserId = _sessionId(sessionId)
+        factory: EventPackFactoryService = request.app.state.eventPackFactoryService
+        result = factory.reviewSource(
+            ownerUserId=ownerUserId,
+            buildId=buildId,
+            sourceId=sourceId,
+            expectedRevision=payload.expectedRevision,
+            reviewInput=SourceReviewInput(status=payload.status),
+        )
+        request.app.state.database.appendAuditEvent(
+            ownerUserId,
+            "EVENT_PACK_FACTORY",
+            buildId,
+            "SOURCE_REVIEWED",
+            {
+                "revision": result.build.revision,
+                "sourceId": sourceId,
+                "status": payload.status.value,
+            },
+        )
+        return result.model_dump(mode="json")
+
+    @appInstance.post(
+        "/api/v1/event-pack-factory/builds/{buildId}/materialize",
+        status_code=201,
+    )
+    async def materializeEventPackFactoryBuild(
+        buildId: str,
+        payload: FactoryMaterializeRequest,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        ownerUserId = _sessionId(sessionId)
+        factory: EventPackFactoryService = request.app.state.eventPackFactoryService
+        payloadHash = factory.canonicalPayloadHash(
+            "MATERIALIZE",
+            buildId,
+            payload.model_dump(mode="json", exclude={"clientRequestId"}),
+        )
+        eventPackService: EventPackService = request.app.state.eventPackService
+        database: Database = request.app.state.database
+        materializationDigest = hashlib.blake2s(
+            (f"{ownerUserId}:{buildId}:{payload.clientRequestId}:{payloadHash}").encode(),
+            digest_size=12,
+        ).hexdigest()
+        eventPackSlug = re.sub(r"[^a-z0-9]+", "-", payload.title.lower()).strip("-")[:44]
+        deterministicEventPackId = f"custom-{eventPackSlug or 'event'}-{materializationDigest}"
+
+        def ensureMaterializationAudit(
+            result: dict[str, Any],
+            *,
+            extractionMode: str,
+            sourceCount: int,
+            publicationTimeAssumedSourceIds: list[str],
+        ) -> None:
+            if database.eventPackWasMaterializedFromFactoryBuild(
+                ownerUserId=ownerUserId,
+                buildId=buildId,
+                eventPackId=str(result["id"]),
+            ):
+                return
+            database.appendAuditEvent(
+                ownerUserId,
+                "EVENT_PACK_FACTORY",
+                buildId,
+                "EVENT_PACK_MATERIALIZED",
+                {
+                    "factoryRevision": payload.expectedRevision,
+                    "eventPackId": result["id"],
+                    "sourceCount": sourceCount,
+                    "publicationTimeAssumedSourceIds": publicationTimeAssumedSourceIds,
+                    "extractionMode": extractionMode,
+                    "humanClaimReviewRequired": True,
+                    "allEvidenceSourcesReviewed": True,
+                    "materializationRequestHash": payloadHash,
+                    "frozen": False,
+                },
+            )
+
+        async def materializeOnce() -> dict[str, object]:
+            snapshot = factory.getBuild(ownerUserId=ownerUserId, buildId=buildId)
+            if snapshot.build.revision != payload.expectedRevision:
+                raise FactoryRevisionConflictError(
+                    expectedRevision=payload.expectedRevision,
+                    actualRevision=snapshot.build.revision,
+                )
+            approvedInputs = factory.approvedEvidenceInputsForMaterialization(
+                ownerUserId=ownerUserId,
+                buildId=buildId,
+            )
+            sources = [
+                EventSourceInput(
+                    sourceId=item.source.id,
+                    title=item.source.title,
+                    publisher=item.source.publisher,
+                    url=item.source.url,
+                    sourceType=(
+                        "USER_PROVIDED"
+                        if item.source.kind is SourceInputKind.PASTE
+                        else "REPORTING"
+                    ),
+                    publishedAt=item.source.publishedAt or item.source.knownAt,
+                    knownAt=item.source.knownAt,
+                    rawText=item.rawText,
+                    publicationTimeAssumed=item.source.publishedAt is None,
+                )
+                for item in approvedInputs
+            ]
+            eventPack = EventPackCreateRequest(
+                title=payload.title,
+                titleZh=payload.titleZh,
+                summary=payload.summary,
+                summaryZh=payload.summaryZh,
+                asOf=payload.asOf,
+                instrument=payload.instrument,
+                sources=sources,
+                acknowledgedContentReview=payload.acknowledgedContentReview,
+            )
+            contentSecurity = _scanEventPackSources(
+                eventPack.sources,
+                acknowledged=eventPack.acknowledgedContentReview,
+                eventPackMetadata={
+                    "title": eventPack.title,
+                    "titleZh": eventPack.titleZh or "",
+                    "summary": eventPack.summary,
+                    "summaryZh": eventPack.summaryZh or "",
+                    "value": eventPack.instrument,
+                    "factoryBuildId": buildId,
+                },
+            )
+            eventPack = _sanitizeAcknowledgedEventPack(eventPack, contentSecurity)
+            cognition: CognitionService = request.app.state.cognitionService
+            claims, extractionMode = await _extractEventClaimsInBatches(
+                cognition,
+                credentialId=credentialSessionId(request, ownerUserId),
+                sources=eventPack.sources,
+                maximumClaims=payload.maximumClaims,
+                requestedImpactChannels=payload.requestedImpactChannels,
+            )
+            result = eventPackService.createEventPack(
+                eventPack,
+                ownerUserId,
+                claims=claims,
+                extractionMode=extractionMode,
+                contentSecurity=contentSecurity,
+                eventPackId=deterministicEventPackId,
+            )
+            ensureMaterializationAudit(
+                result,
+                extractionMode=extractionMode,
+                sourceCount=len(sources),
+                publicationTimeAssumedSourceIds=[
+                    source.sourceId for source in sources if source.publicationTimeAssumed
+                ],
+            )
+            return result
+
+        async def recoverMaterializedEventPack() -> dict[str, object] | None:
+            try:
+                recovered = eventPackService.getEventPack(
+                    deterministicEventPackId,
+                    ownerUserId,
+                )
+            except ApiError as error:
+                if error.code == "EVENT_PACK_NOT_FOUND":
+                    return None
+                raise
+            recoveredSources = recovered.get("sources")
+            sourceRecords = recoveredSources if isinstance(recoveredSources, list) else []
+            extraction = recovered.get("extraction")
+            extractionMode = (
+                str(extraction.get("mode", "UNKNOWN"))
+                if isinstance(extraction, dict)
+                else "UNKNOWN"
+            )
+            ensureMaterializationAudit(
+                recovered,
+                extractionMode=extractionMode,
+                sourceCount=len(sourceRecords),
+                publicationTimeAssumedSourceIds=[
+                    str(source.get("sourceId"))
+                    for source in sourceRecords
+                    if isinstance(source, dict) and source.get("publicationTimeAssumed") is True
+                ],
+            )
+            return recovered
+
+        idempotentResult = await factory.executeIdempotentJson(
+            ownerUserId=ownerUserId,
+            buildId=buildId,
+            operation="MATERIALIZE",
+            clientRequestId=payload.clientRequestId,
+            payloadHash=payloadHash,
+            callback=materializeOnce,
+            recovery=recoverMaterializedEventPack,
+        )
+        return idempotentResult.payload
+
     @appInstance.post("/api/v1/event-packs", status_code=201)
     async def createEventPack(
         eventPack: EventPackCreateRequest,
@@ -903,31 +1813,12 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             },
         )
         eventPack = _sanitizeAcknowledgedEventPack(eventPack, contentSecurity)
-        claims = None
-        extractionMode = "RULE_FALLBACK_NO_LLM_CONFIG"
-        if cognition.getConfig(credentialId).configured:
-            try:
-                extraction = await cognition.extractEventClaims(
-                    sessionId=credentialId,
-                    sources=_cognitionSources(eventPack.sources),
-                    maximumClaims=16,
-                )
-                if extraction.event_pack_claims:
-                    claims = list(extraction.event_pack_claims)
-                    providerLabel = extraction.provider.upper()
-                    extractionMode = (
-                        f"{providerLabel}_{extraction.model}_FALLBACK"
-                        if extraction.fallback_used
-                        else f"{providerLabel}_{extraction.model}"
-                    )
-                else:
-                    extractionMode = (
-                        f"{extraction.provider.upper()}_{extraction.model}_ABSTAINED_RULE_FALLBACK"
-                    )
-            except CredentialNotConfiguredError:
-                extractionMode = "RULE_FALLBACK_LLM_CONFIG_EXPIRED"
-            except ModelGatewayError as error:
-                extractionMode = f"RULE_FALLBACK_{error.code.value}"
+        claims, extractionMode = await _extractEventClaimsInBatches(
+            cognition,
+            credentialId=credentialId,
+            sources=eventPack.sources,
+            maximumClaims=16,
+        )
         return service.createEventPack(
             eventPack,
             validatedSessionId,
@@ -1009,6 +1900,12 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                     "defaultModel": provider.default_model_id,
                     "catalogVerifiedAt": provider.verified_at,
                     "integrationValidationStatus": (provider.integration_validation_status),
+                    "supportedAdvancedParameters": sorted(
+                        PROVIDER_ADVANCED_PARAMETER_CAPABILITIES.get(
+                            provider.provider,
+                            frozenset(),
+                        )
+                    ),
                     "feedbackIssueUrl": provider.feedback_issue_url,
                     "structuredOutputMode": "/".join(structuredModes),
                     "structuredOutputNote": (
@@ -1080,6 +1977,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 provider=config.provider,
                 thinkingEnabled=config.thinkingEnabled,
                 maxTokens=config.maxTokens,
+                advancedParameters=config.advancedParameters,
             )
         except ValueError as error:
             raise ApiError("INVALID_LLM_CONFIG", 422, str(error)) from error
@@ -1093,6 +1991,10 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 "model": config.model,
                 "thinkingEnabled": config.thinkingEnabled,
                 "maxTokens": config.maxTokens,
+                "advancedParameters": config.advancedParameters.model_dump(
+                    mode="json",
+                    exclude_none=True,
+                ),
             },
         )
         return view.model_dump(mode="json")
@@ -1500,6 +2402,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                     sessionId=credentialId,
                     sources=_cognitionSources(extraction.sources),
                     maximumClaims=extraction.maximumClaims,
+                    requestedImpactChannels=tuple(extraction.requestedImpactChannels),
                 )
                 if llmExtraction.event_pack_claims:
                     claims = list(llmExtraction.event_pack_claims)
@@ -2627,6 +3530,11 @@ def _authenticationProtected(request: Request) -> bool:
     return path.startswith("/api/v1/") and path not in PUBLIC_AUTH_PATHS
 
 
+def _legalAcceptanceProtected(request: Request) -> bool:
+    path = request.url.path.rstrip("/") or "/"
+    return path.startswith("/api/v1/") and path not in LEGAL_GATE_EXEMPT_PATHS
+
+
 def _validateSameOrigin(request: Request) -> None:
     """CSRF token 是主防线；若浏览器提供 Origin，再严格校验同源。"""
 
@@ -2697,12 +3605,19 @@ def _adminUserPayload(user: Any) -> dict[str, Any]:
     return payload
 
 
-def _authSessionPayload(user: PublicUser, *, csrfToken: str) -> dict[str, Any]:
+def _authSessionPayload(
+    user: PublicUser,
+    *,
+    csrfToken: str,
+    authService: AuthService,
+) -> dict[str, Any]:
     return {
         "authenticationRequired": True,
         "authenticated": True,
         "user": _publicUserPayload(user),
         "csrfToken": csrfToken,
+        "legalAcceptance": authService.legalAcceptanceStatus(user.id).model_dump(mode="json"),
+        "preferences": authService.repository.getUserPreferences(user.id).model_dump(mode="json"),
     }
 
 
@@ -2775,9 +3690,108 @@ def _cognitionSources(
             rawText=source.rawText,
             sourceType=source.sourceType,
             knownAt=source.knownAt,
+            title=source.title,
+            publisher=source.publisher,
+            url=source.url,
+            publishedAt=source.publishedAt,
         )
         for source in sources
     )
+
+
+def _cognitionSourceBatches(
+    sources: list[EventSourceInput],
+    *,
+    maximumSourcesPerBatch: int = 8,
+    maximumCharactersPerBatch: int = 160_000,
+) -> tuple[tuple[ExternalEvidenceSource, ...], ...]:
+    """按模型契约和保守字符预算切分来源，避免大量上传挤爆单次上下文。"""
+
+    batches: list[tuple[ExternalEvidenceSource, ...]] = []
+    current: list[EventSourceInput] = []
+    currentCharacters = 0
+    for source in sources:
+        sourceCharacters = len(source.rawText)
+        if current and (
+            len(current) >= maximumSourcesPerBatch
+            or currentCharacters + sourceCharacters > maximumCharactersPerBatch
+        ):
+            batches.append(_cognitionSources(current))
+            current = []
+            currentCharacters = 0
+        current.append(source)
+        currentCharacters += sourceCharacters
+    if current:
+        batches.append(_cognitionSources(current))
+    return tuple(batches)
+
+
+async def _extractEventClaimsInBatches(
+    cognition: CognitionService,
+    *,
+    credentialId: str,
+    sources: list[EventSourceInput],
+    maximumClaims: int,
+    requestedImpactChannels: tuple[str, ...] = (
+        "belief",
+        "liquidity",
+        "passiveFlow",
+        "stopLoss",
+    ),
+) -> tuple[list[dict[str, Any]] | None, str]:
+    """批量抽取仍保持一次 Event Pack 最多 ``maximumClaims`` 条候选主张。"""
+
+    if not cognition.getConfig(credentialId).configured:
+        return None, "RULE_FALLBACK_NO_LLM_CONFIG"
+
+    batches = _cognitionSourceBatches(sources)
+    claims: list[dict[str, Any]] = []
+    seenClaims: set[tuple[str, tuple[str, ...]]] = set()
+    providerLabel = ""
+    modelLabel = ""
+    fallbackUsed = False
+    try:
+        for batchIndex, batch in enumerate(batches):
+            remainingClaims = maximumClaims - len(claims)
+            if remainingClaims <= 0:
+                break
+            remainingBatches = len(batches) - batchIndex
+            batchMaximum = max(1, (remainingClaims + remainingBatches - 1) // remainingBatches)
+            extraction = await cognition.extractEventClaims(
+                sessionId=credentialId,
+                sources=batch,
+                maximumClaims=batchMaximum,
+                requestedImpactChannels=requestedImpactChannels,
+            )
+            providerLabel = extraction.provider.upper()
+            modelLabel = extraction.model
+            fallbackUsed = fallbackUsed or extraction.fallback_used
+            for claim in extraction.event_pack_claims:
+                claimKey = (
+                    " ".join(str(claim.get("text", "")).split()),
+                    tuple(sorted(str(item) for item in claim.get("sourceIds", []))),
+                )
+                if not claimKey[0] or claimKey in seenClaims:
+                    continue
+                seenClaims.add(claimKey)
+                claims.append(claim)
+                if len(claims) >= maximumClaims:
+                    break
+    except CredentialNotConfiguredError:
+        return None, "RULE_FALLBACK_LLM_CONFIG_EXPIRED"
+    except ModelGatewayError as error:
+        # 不能把部分成功的批次伪装成完整抽取；失败时统一回退到确定性规则。
+        return None, f"RULE_FALLBACK_{error.code.value}"
+
+    if not claims:
+        label = f"{providerLabel}_{modelLabel}" if providerLabel and modelLabel else "MODEL"
+        return None, f"{label}_ABSTAINED_RULE_FALLBACK"
+    mode = f"{providerLabel}_{modelLabel}"
+    if len(batches) > 1:
+        mode += "_BATCHED"
+    if fallbackUsed:
+        mode += "_FALLBACK"
+    return claims, mode
 
 
 def _scanEventPackSources(
@@ -2958,6 +3972,12 @@ def _rateLimitRules(request: Request) -> list[RateLimitRule]:
             path,
         )
     )
+    isFactoryProviderCall = bool(
+        re.fullmatch(
+            r"/api/v1/event-pack-factory/builds/[^/]+/(?:search|reader|materialize)",
+            path,
+        )
+    )
     isLimitedWrite = (
         isExperimentCreate
         or isStudyRun
@@ -2970,6 +3990,12 @@ def _rateLimitRules(request: Request) -> list[RateLimitRule]:
                 r"/api/v1/event-packs/[^/]+/claims/[^/]+/review",
                 r"/api/v1/event-packs/[^/]+/claims/approve-all",
                 r"/api/v1/event-packs/[^/]+/freeze",
+                r"/api/v1/event-pack-factory/builds",
+                r"/api/v1/event-pack-factory/builds/[^/]+",
+                r"/api/v1/event-pack-factory/builds/[^/]+/(?:paste|search|reader|materialize)",
+                r"/api/v1/event-pack-factory/builds/[^/]+/sources/[^/]+/(?:review|raw-text)",
+                r"/api/v1/guided-workflows",
+                r"/api/v1/guided-workflows/[^/]+/(?:turn|apply|advance|links)",
                 r"/api/v1/scenarios(?:/[^/]+(?:/(?:clone|freeze))?)?",
                 r"/api/v1/llm/(?:config|test)",
                 r"/api/v1/evals/run",
@@ -3023,6 +4049,23 @@ def _rateLimitRules(request: Request) -> list[RateLimitRule]:
                 RateLimitRule(
                     key=f"result-interpretation:session:{sessionDigest}",
                     limit=8,
+                ),
+            )
+        )
+    if isFactoryProviderCall:
+        # 搜索、Reader 与模型物化都可能计费；校园共享 NAT 采用宽 IP 桶，
+        # 真实防滥用边界落在已认证会话。
+        rules.extend(
+            (
+                RateLimitRule(
+                    key=f"factory-provider:ip:{clientIp}",
+                    limit=120 if isAuthenticatedRequest else 10,
+                    windowSeconds=300,
+                ),
+                RateLimitRule(
+                    key=f"factory-provider:session:{sessionDigest}",
+                    limit=12,
+                    windowSeconds=300,
                 ),
             )
         )

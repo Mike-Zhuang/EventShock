@@ -1,4 +1,6 @@
 import {
+  Accordion,
+  AccordionItem,
   Button,
   InlineNotification,
   NumberInput,
@@ -12,6 +14,8 @@ import { CheckCircle, FloppyDisk, Key, Plug, Trash } from '@phosphor-icons/react
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type {
+  AdvancedModelParameterName,
+  AdvancedModelParameters,
   CognitionEvaluationRun,
   LlmCatalog,
   LlmConfigView,
@@ -28,6 +32,52 @@ import { getParameterHelp } from '../parameter-help';
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+const ADVANCED_PARAMETER_NAMES: readonly AdvancedModelParameterName[] = [
+  'temperature',
+  'topP',
+  'presencePenalty',
+  'frequencyPenalty',
+  'seed',
+  'timeoutSeconds',
+];
+
+const CONSERVATIVE_ADVANCED_PARAMETER_CAPABILITIES: Record<
+  LlmProviderId,
+  readonly AdvancedModelParameterName[]
+> = {
+  zhipu: ['temperature', 'topP', 'timeoutSeconds'],
+  openai: ['temperature', 'topP', 'timeoutSeconds'],
+  anthropic: ['temperature', 'topP', 'timeoutSeconds'],
+  google: ADVANCED_PARAMETER_NAMES,
+  deepseek: ['temperature', 'topP', 'presencePenalty', 'frequencyPenalty', 'timeoutSeconds'],
+  alibaba: ADVANCED_PARAMETER_NAMES,
+  moonshot: ['temperature', 'topP', 'presencePenalty', 'frequencyPenalty', 'timeoutSeconds'],
+};
+
+export function supportedAdvancedParameters(
+  provider: LlmProviderDescriptor | undefined,
+): ReadonlySet<AdvancedModelParameterName> {
+  if (!provider) return new Set();
+  return new Set(
+    provider.supportedAdvancedParameters
+      ?? CONSERVATIVE_ADVANCED_PARAMETER_CAPABILITIES[provider.id]
+      ?? [],
+  );
+}
+
+function advancedParametersEqual(
+  first: AdvancedModelParameters | undefined,
+  second: AdvancedModelParameters | undefined,
+): boolean {
+  return ADVANCED_PARAMETER_NAMES.every((name) => first?.[name] === second?.[name]);
+}
+
+function optionalNumber(value: string | number): number | undefined {
+  if (String(value).trim() === '') return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 export function selectRecommendedPricedModel(
@@ -73,13 +123,15 @@ export function configurationMatchesDraft(
   model: LlmModelDescriptor | undefined,
   thinkingEnabled: boolean,
   maxTokens: number,
+  advancedParameters: AdvancedModelParameters = {},
 ): boolean {
   return Boolean(
     config?.configured
     && config.provider === provider
     && config.model === modelId
     && effectiveThinkingSetting(model, config.thinkingEnabled) === effectiveThinkingSetting(model, thinkingEnabled)
-    && config.maxTokens === maxTokens,
+    && config.maxTokens === maxTokens
+    && advancedParametersEqual(config.advancedParameters, advancedParameters)
   );
 }
 
@@ -150,6 +202,7 @@ export function AiConfigurationPage() {
   const [apiKey, setApiKey] = useState('');
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [maxTokens, setMaxTokens] = useState(2_048);
+  const [advancedParameters, setAdvancedParameters] = useState<AdvancedModelParameters>({});
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<'save' | 'test' | 'clear'>();
   const [error, setError] = useState<string>();
@@ -185,6 +238,7 @@ export function AiConfigurationPage() {
           setMaxTokens(outputLimit === undefined
             ? requestedMaxTokens
             : Math.min(requestedMaxTokens, outputLimit));
+          setAdvancedParameters(configuredModel ? nextConfig.advancedParameters ?? {} : {});
         }
       }
     } catch (loadError) {
@@ -208,6 +262,10 @@ export function AiConfigurationPage() {
   );
   const selectedApplicationOutputLimit = applicationOutputLimit(selectedModel);
   const selectedOfficialOutputLimit = officialOutputLimit(selectedModel);
+  const supportedAdvancedParameterSet = useMemo(
+    () => supportedAdvancedParameters(selectedProvider),
+    [selectedProvider],
+  );
   const hasActiveConfig = Boolean(config?.configured);
   const hasMatchingConfig = configurationMatchesDraft(
     config,
@@ -216,6 +274,7 @@ export function AiConfigurationPage() {
     selectedModel,
     thinkingEnabled,
     maxTokens,
+    advancedParameters,
   );
   const hasUnsavedDraft = hasActiveConfig && !hasMatchingConfig;
 
@@ -230,6 +289,7 @@ export function AiConfigurationPage() {
       const outputLimit = applicationOutputLimit(nextModel);
       setMaxTokens(outputLimit === undefined ? 2_048 : Math.min(2_048, outputLimit));
     }
+    setAdvancedParameters({});
     setApiKey('');
     setTestResult(undefined);
   };
@@ -245,6 +305,7 @@ export function AiConfigurationPage() {
         apiKey,
         thinkingEnabled: effectiveThinkingSetting(selectedModel, thinkingEnabled),
         maxTokens,
+        advancedParameters,
       });
       setConfig(nextConfig);
       setApiKey('');
@@ -476,6 +537,135 @@ export function AiConfigurationPage() {
               onToggle={(value) => setThinkingEnabled(effectiveThinkingSetting(selectedModel, value))}
             />
           </div>
+          <Accordion className="advanced-settings" align="start">
+            <AccordionItem title={isZh ? '高级请求参数（可选）' : 'Advanced request parameters (optional)'}>
+              <p>
+                {isZh
+                  ? '留空时使用供应商默认值。调整采样参数可能降低跨次调用的一致性；供应商未明确支持的字段会被禁用，后端仍会在发送请求前再次校验。'
+                  : 'Leave fields blank to use provider defaults. Sampling changes can reduce consistency across calls. Fields without explicit provider support are disabled, and the backend validates them again before dispatch.'}
+              </p>
+              <div className="config-form-grid">
+                <NumberInput
+                  id="llm-temperature"
+                  label={isZh ? '随机性（temperature）' : 'Randomness (temperature)'}
+                  helperText={supportedAdvancedParameterSet.has('temperature')
+                    ? isZh ? '0–2。值越低通常越稳定；不建议同时调整 top P。' : '0–2. Lower values are usually more stable; avoid tuning top P at the same time.'
+                    : isZh ? '当前供应商端点未明确支持。' : 'Not explicitly supported by this provider endpoint.'}
+                  min={0}
+                  max={2}
+                  step={0.1}
+                  value={advancedParameters.temperature ?? ''}
+                  disabled={!supportedAdvancedParameterSet.has('temperature')}
+                  onChange={(_event, state) => setAdvancedParameters((current) => ({
+                    ...current,
+                    temperature: optionalNumber(state.value),
+                  }))}
+                />
+                <NumberInput
+                  id="llm-top-p"
+                  label={isZh ? '核采样阈值（top P）' : 'Nucleus threshold (top P)'}
+                  helperText={supportedAdvancedParameterSet.has('topP')
+                    ? isZh ? '大于 0 且不超过 1。通常只调整它或 temperature 之一。' : 'Greater than 0 and at most 1. Usually tune either this or temperature, not both.'
+                    : isZh ? '当前供应商端点未明确支持。' : 'Not explicitly supported by this provider endpoint.'}
+                  min={0.01}
+                  max={1}
+                  step={0.05}
+                  value={advancedParameters.topP ?? ''}
+                  disabled={!supportedAdvancedParameterSet.has('topP')}
+                  onChange={(_event, state) => setAdvancedParameters((current) => ({
+                    ...current,
+                    topP: optionalNumber(state.value),
+                  }))}
+                />
+                <NumberInput
+                  id="llm-presence-penalty"
+                  label={isZh ? '主题重复惩罚（presence penalty）' : 'Topic repetition penalty (presence penalty)'}
+                  helperText={supportedAdvancedParameterSet.has('presencePenalty')
+                    ? isZh ? '−2 至 2。正值倾向引入尚未出现的内容。' : '−2 to 2. Positive values favor content not yet mentioned.'
+                    : isZh ? '当前供应商端点未明确支持。' : 'Not explicitly supported by this provider endpoint.'}
+                  min={-2}
+                  max={2}
+                  step={0.1}
+                  value={advancedParameters.presencePenalty ?? ''}
+                  disabled={!supportedAdvancedParameterSet.has('presencePenalty')}
+                  onChange={(_event, state) => setAdvancedParameters((current) => ({
+                    ...current,
+                    presencePenalty: optionalNumber(state.value),
+                  }))}
+                />
+                <NumberInput
+                  id="llm-frequency-penalty"
+                  label={isZh ? '词频重复惩罚（frequency penalty）' : 'Token repetition penalty (frequency penalty)'}
+                  helperText={supportedAdvancedParameterSet.has('frequencyPenalty')
+                    ? isZh ? '−2 至 2。正值按既有出现次数抑制重复。' : '−2 to 2. Positive values discourage repetition based on prior frequency.'
+                    : isZh ? '当前供应商端点未明确支持。' : 'Not explicitly supported by this provider endpoint.'}
+                  min={-2}
+                  max={2}
+                  step={0.1}
+                  value={advancedParameters.frequencyPenalty ?? ''}
+                  disabled={!supportedAdvancedParameterSet.has('frequencyPenalty')}
+                  onChange={(_event, state) => setAdvancedParameters((current) => ({
+                    ...current,
+                    frequencyPenalty: optionalNumber(state.value),
+                  }))}
+                />
+                <NumberInput
+                  id="llm-seed"
+                  label={isZh ? '供应商随机种子（seed）' : 'Provider random seed (seed)'}
+                  helperText={supportedAdvancedParameterSet.has('seed')
+                    ? isZh ? '0–2,147,483,647。只能提高复现概率，不保证输出完全一致。' : '0–2,147,483,647. It may improve repeatability but cannot guarantee identical output.'
+                    : isZh ? '当前供应商端点未明确支持。' : 'Not explicitly supported by this provider endpoint.'}
+                  min={0}
+                  max={2_147_483_647}
+                  step={1}
+                  value={advancedParameters.seed ?? ''}
+                  disabled={!supportedAdvancedParameterSet.has('seed')}
+                  onChange={(_event, state) => {
+                    const value = optionalNumber(state.value);
+                    setAdvancedParameters((current) => ({
+                      ...current,
+                      seed: value === undefined ? undefined : Math.round(value),
+                    }));
+                  }}
+                />
+                <NumberInput
+                  id="llm-timeout-seconds"
+                  label={isZh ? '单次请求超时（秒）' : 'Per-request timeout (seconds)'}
+                  helperText={supportedAdvancedParameterSet.has('timeoutSeconds')
+                    ? isZh ? '1–300 秒。达到上限会中止等待，但不能保证供应商不计费。' : '1–300 seconds. The wait stops at the limit, but provider billing may still occur.'
+                    : isZh ? '当前供应商端点未明确支持。' : 'Not explicitly supported by this provider endpoint.'}
+                  min={1}
+                  max={300}
+                  step={1}
+                  value={advancedParameters.timeoutSeconds ?? ''}
+                  disabled={!supportedAdvancedParameterSet.has('timeoutSeconds')}
+                  onChange={(_event, state) => setAdvancedParameters((current) => ({
+                    ...current,
+                    timeoutSeconds: optionalNumber(state.value),
+                  }))}
+                />
+              </div>
+              <Button
+                kind="ghost"
+                size="sm"
+                disabled={ADVANCED_PARAMETER_NAMES.every(
+                  (name) => advancedParameters[name] === undefined,
+                )}
+                onClick={() => setAdvancedParameters({})}
+              >
+                {isZh ? '恢复供应商默认值' : 'Restore provider defaults'}
+              </Button>
+              <InlineNotification
+                kind="info"
+                lowContrast
+                hideCloseButton
+                title={isZh ? '固定的安全边界' : 'Fixed security boundary'}
+                subtitle={isZh
+                  ? '不接受自定义 base URL 或请求头，以防止服务端请求伪造（SSRF）和凭据外泄；系统提示词与工具权限由应用版本控制，不能在此改写，以避免权限扩大。API Key 仍只在当前登录的服务器内存中短时保存。'
+                  : 'Custom base URLs and headers are not accepted, preventing server-side request forgery (SSRF) and credential leakage. System prompts and tool permissions remain application-versioned and cannot be overridden here, preventing privilege expansion. The API key still lives briefly in server memory for this sign-in only.'}
+              />
+            </AccordionItem>
+          </Accordion>
           <div className="ai-config-actions">
             <Button
               renderIcon={FloppyDisk}

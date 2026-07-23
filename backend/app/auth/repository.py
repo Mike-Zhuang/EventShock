@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import json
 import sqlite3
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -12,15 +13,29 @@ from backend.app.auth.models import (
     ActiveSessionRecord,
     ActivityView,
     AdminUserView,
+    AssistancePreference,
     AuthContext,
     AuthLocale,
     ChallengePurpose,
     ChallengeRecord,
+    ExperienceLevel,
+    FirstGoal,
+    LegalAcceptanceStatus,
     PublicUser,
+    UserPreferences,
     UserRole,
     UserStatus,
+    WorkspaceMode,
 )
 from backend.app.database import Database, utcNow
+from backend.app.legal import CURRENT_TERMS_VERSION, currentDocumentHashes
+
+CURRENT_ONBOARDING_VERSION = "2026-07-22-v1"
+LEGAL_DOCUMENT_TYPES = (
+    ("TERMS_OF_USE", "AGREED"),
+    ("PRIVACY_NOTICE", "ACKNOWLEDGED"),
+    ("RESEARCH_AI_RISK_NOTICE", "ACKNOWLEDGED"),
+)
 
 
 class DuplicateUserError(RuntimeError):
@@ -94,6 +109,86 @@ class AuthRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_auth_activity_user_created
                 ON auth_activity_events(user_id, created_at DESC);
+                CREATE TABLE IF NOT EXISTS auth_legal_acceptances (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL REFERENCES auth_users(id) ON DELETE RESTRICT,
+                    document_type TEXT NOT NULL CHECK(
+                        document_type IN (
+                            'TERMS_OF_USE',
+                            'PRIVACY_NOTICE',
+                            'RESEARCH_AI_RISK_NOTICE'
+                        )
+                    ),
+                    document_version TEXT NOT NULL,
+                    document_sha256 TEXT NOT NULL CHECK(length(document_sha256)=64),
+                    action TEXT NOT NULL CHECK(action IN ('AGREED', 'ACKNOWLEDGED')),
+                    locale TEXT NOT NULL CHECK(locale IN ('en', 'zh-CN')),
+                    acceptance_method TEXT NOT NULL CHECK(
+                        acceptance_method IN ('REGISTRATION', 'POST_LOGIN_GATE', 'REACCEPTANCE')
+                    ),
+                    auth_session_id TEXT REFERENCES auth_sessions(id) ON DELETE SET NULL,
+                    accepted_at TEXT NOT NULL,
+                    UNIQUE(user_id, document_type, document_version)
+                );
+                CREATE INDEX IF NOT EXISTS idx_auth_legal_user_version
+                ON auth_legal_acceptances(user_id, document_version);
+                CREATE TABLE IF NOT EXISTS auth_legal_acceptance_events (
+                    id TEXT PRIMARY KEY,
+                    acceptance_state_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL REFERENCES auth_users(id) ON DELETE RESTRICT,
+                    document_type TEXT NOT NULL CHECK(
+                        document_type IN (
+                            'TERMS_OF_USE',
+                            'PRIVACY_NOTICE',
+                            'RESEARCH_AI_RISK_NOTICE'
+                        )
+                    ),
+                    document_version TEXT NOT NULL,
+                    document_sha256 TEXT NOT NULL CHECK(length(document_sha256)=64),
+                    action TEXT NOT NULL CHECK(action IN ('AGREED', 'ACKNOWLEDGED')),
+                    locale TEXT NOT NULL CHECK(locale IN ('en', 'zh-CN')),
+                    acceptance_method TEXT NOT NULL CHECK(
+                        acceptance_method IN ('REGISTRATION', 'POST_LOGIN_GATE', 'REACCEPTANCE')
+                    ),
+                    auth_session_id TEXT REFERENCES auth_sessions(id) ON DELETE SET NULL,
+                    accepted_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_auth_legal_event_user_time
+                ON auth_legal_acceptance_events(user_id, accepted_at DESC);
+                CREATE TABLE IF NOT EXISTS auth_user_preferences (
+                    user_id TEXT PRIMARY KEY REFERENCES auth_users(id) ON DELETE CASCADE,
+                    experience_level TEXT NOT NULL CHECK(
+                        experience_level IN ('NEW', 'INTERMEDIATE', 'ADVANCED')
+                    ),
+                    workspace_mode TEXT NOT NULL CHECK(workspace_mode IN ('GUIDED', 'EXPERT')),
+                    assistance_preference TEXT NOT NULL CHECK(
+                        assistance_preference IN (
+                            'STEP_BY_STEP',
+                            'PROPOSE_AND_ADJUST',
+                            'DIRECT_CONTROL'
+                        )
+                    ),
+                    first_goal TEXT NOT NULL CHECK(
+                        first_goal IN (
+                            'TRY_DEMO',
+                            'RESEARCH_NEW_EVENT',
+                            'DESIGN_FULL_EXPERIMENT'
+                        )
+                    ),
+                    onboarding_version TEXT NOT NULL,
+                    onboarding_completed_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT OR IGNORE INTO auth_legal_acceptance_events(
+                    id, acceptance_state_id, user_id, document_type, document_version,
+                    document_sha256, action, locale, acceptance_method,
+                    auth_session_id, accepted_at
+                )
+                SELECT
+                    'legacy-' || id, id, user_id, document_type, document_version,
+                    document_sha256, action, locale, acceptance_method,
+                    auth_session_id, accepted_at
+                FROM auth_legal_acceptances;
                 """
             )
         self.purgeExpired()
@@ -124,6 +219,287 @@ class AuthRepository:
         if user is None:
             raise RuntimeError("user could not be persisted")
         return user
+
+    def consumeRegistrationChallengeAndCreateUser(
+        self,
+        *,
+        challengeId: str,
+        codeHash: str,
+        userId: str,
+        passwordHash: str,
+        legalVersion: str,
+        legalDocumentHash: str,
+        legalLocale: AuthLocale,
+        now: datetime,
+    ) -> PublicUser:
+        """原子完成验证码消费、账户创建和初始 clickwrap 记录。
+
+        任何持久化步骤失败都会回滚，避免出现验证码已消费但账号或法律记录缺失。
+        错误验证码的失败次数仍需单独提交，因此在事务退出后再抛出统一异常。
+        """
+
+        codeMatched = False
+        try:
+            with self.database.writeLock, self.database.connection() as connection:
+                row = connection.execute(
+                    "SELECT * FROM auth_challenges WHERE id=?",
+                    (challengeId,),
+                ).fetchone()
+                if row is None or row["purpose"] != ChallengePurpose.REGISTER.value:
+                    raise ChallengeVerificationError("verification code is invalid or expired")
+                challenge = _challenge(row)
+                if (
+                    challenge.consumedAt is not None
+                    or challenge.expiresAt <= now
+                    or challenge.attemptCount >= challenge.maximumAttempts
+                ):
+                    raise ChallengeVerificationError("verification code is invalid or expired")
+                if not hmac.compare_digest(challenge.codeHash, codeHash):
+                    connection.execute(
+                        "UPDATE auth_challenges SET attempt_count=attempt_count+1 WHERE id=?",
+                        (challengeId,),
+                    )
+                else:
+                    codeMatched = True
+                    timestamp = now.isoformat()
+                    connection.execute(
+                        """
+                        INSERT INTO auth_users(
+                            id, email_normalized, password_hash, role, status,
+                            email_verified_at, created_at, updated_at, password_changed_at
+                        ) VALUES (?, ?, ?, 'USER', 'ACTIVE', ?, ?, ?, ?)
+                        """,
+                        (
+                            userId,
+                            challenge.email,
+                            passwordHash,
+                            timestamp,
+                            timestamp,
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                    self._insertLegalAcceptances(
+                        connection,
+                        userId=userId,
+                        version=legalVersion,
+                        documentHash=legalDocumentHash,
+                        locale=legalLocale,
+                        method="REGISTRATION",
+                        authSessionId=None,
+                        acceptedAt=now,
+                    )
+                    connection.execute(
+                        """
+                        UPDATE auth_challenges
+                        SET consumed_at=?
+                        WHERE id=? AND consumed_at IS NULL
+                        """,
+                        (timestamp, challengeId),
+                    )
+        except sqlite3.IntegrityError as error:
+            if "auth_users.email_normalized" in str(error):
+                raise DuplicateUserError("an account already exists for this email") from error
+            raise
+        if not codeMatched:
+            raise ChallengeVerificationError("verification code is invalid or expired")
+        user = self.getUserById(userId)
+        if user is None:
+            raise RuntimeError("user and legal acceptance could not be persisted")
+        return user
+
+    def acceptLegalDocuments(
+        self,
+        *,
+        userId: str,
+        version: str,
+        documentHash: str,
+        locale: AuthLocale,
+        authSessionId: str,
+    ) -> LegalAcceptanceStatus:
+        now = datetime.now(UTC)
+        method = "REACCEPTANCE" if self.hasAnyLegalAcceptance(userId) else "POST_LOGIN_GATE"
+        with self.database.writeLock, self.database.connection() as connection:
+            self._insertLegalAcceptances(
+                connection,
+                userId=userId,
+                version=version,
+                documentHash=documentHash,
+                locale=locale,
+                method=method,
+                authSessionId=authSessionId,
+                acceptedAt=now,
+            )
+        return self.getLegalAcceptanceStatus(userId)
+
+    def hasAnyLegalAcceptance(self, userId: str) -> bool:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM auth_legal_acceptances WHERE user_id=? LIMIT 1",
+                (userId,),
+            ).fetchone()
+        return row is not None
+
+    def hasCurrentLegalAcceptance(self, userId: str) -> bool:
+        return not self.getLegalAcceptanceStatus(userId).required
+
+    def getLegalAcceptanceStatus(self, userId: str) -> LegalAcceptanceStatus:
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT document_type, accepted_at, locale, document_sha256
+                FROM auth_legal_acceptances
+                WHERE user_id=? AND document_version=?
+                """,
+                (userId, CURRENT_TERMS_VERSION),
+            ).fetchall()
+        currentHashes = currentDocumentHashes()
+        validRows = [
+            row
+            for row in rows
+            if row["locale"] in currentHashes
+            and hmac.compare_digest(
+                str(row["document_sha256"]),
+                currentHashes[row["locale"]],
+            )
+        ]
+        acceptedTypes = {str(row["document_type"]) for row in validRows}
+        requiredTypes = {item[0] for item in LEGAL_DOCUMENT_TYPES}
+        latest = max((_datetime(row["accepted_at"]) for row in validRows), default=None)
+        return LegalAcceptanceStatus(
+            required=acceptedTypes != requiredTypes,
+            version=CURRENT_TERMS_VERSION,
+            acceptedAt=latest if acceptedTypes == requiredTypes else None,
+        )
+
+    def getUserPreferences(self, userId: str) -> UserPreferences:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM auth_user_preferences WHERE user_id=?",
+                (userId,),
+            ).fetchone()
+        if row is None or row["onboarding_version"] != CURRENT_ONBOARDING_VERSION:
+            return UserPreferences(onboardingRequired=True)
+        return UserPreferences(
+            onboardingRequired=False,
+            experienceLevel=ExperienceLevel(row["experience_level"]),
+            workspaceMode=WorkspaceMode(row["workspace_mode"]),
+            assistancePreference=AssistancePreference(row["assistance_preference"]),
+            firstGoal=FirstGoal(row["first_goal"]),
+            onboardingVersion=row["onboarding_version"],
+            onboardingCompletedAt=_datetime(row["onboarding_completed_at"]),
+            updatedAt=_datetime(row["updated_at"]),
+        )
+
+    def saveUserPreferences(
+        self,
+        *,
+        userId: str,
+        experienceLevel: ExperienceLevel,
+        workspaceMode: WorkspaceMode,
+        assistancePreference: AssistancePreference,
+        firstGoal: FirstGoal,
+    ) -> UserPreferences:
+        now = utcNow()
+        with self.database.writeLock, self.database.connection() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO auth_user_preferences(
+                    user_id, experience_level, workspace_mode, assistance_preference,
+                    first_goal, onboarding_version, onboarding_completed_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    experience_level=excluded.experience_level,
+                    workspace_mode=excluded.workspace_mode,
+                    assistance_preference=excluded.assistance_preference,
+                    first_goal=excluded.first_goal,
+                    onboarding_version=excluded.onboarding_version,
+                    onboarding_completed_at=excluded.onboarding_completed_at,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    userId,
+                    experienceLevel.value,
+                    workspaceMode.value,
+                    assistancePreference.value,
+                    firstGoal.value,
+                    CURRENT_ONBOARDING_VERSION,
+                    now,
+                    now,
+                ),
+            )
+            if cursor.rowcount < 1:
+                raise RuntimeError("user preferences were not persisted")
+        return self.getUserPreferences(userId)
+
+    @staticmethod
+    def _insertLegalAcceptances(
+        connection: sqlite3.Connection,
+        *,
+        userId: str,
+        version: str,
+        documentHash: str,
+        locale: AuthLocale,
+        method: str,
+        authSessionId: str | None,
+        acceptedAt: datetime,
+    ) -> None:
+        for documentType, action in LEGAL_DOCUMENT_TYPES:
+            acceptanceStateId = f"legal-{documentType.lower()}-{userId}-{version}"
+            # 当前状态表用于快速门禁；事件表永久追加每次明示同意，确保同版本
+            # 文档摘要修复或重新接受不会销毁先前的电子签署证据。
+            connection.execute(
+                """
+                INSERT INTO auth_legal_acceptance_events(
+                    id, acceptance_state_id, user_id, document_type, document_version,
+                    document_sha256, action, locale, acceptance_method,
+                    auth_session_id, accepted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"legal-event-{uuid.uuid4().hex}",
+                    acceptanceStateId,
+                    userId,
+                    documentType,
+                    version,
+                    documentHash,
+                    action,
+                    locale,
+                    method,
+                    authSessionId,
+                    acceptedAt.isoformat(),
+                ),
+            )
+            # 版本号原则上必须随正文变化而递增；这里仍允许用户对同版本的新摘要重新
+            # 明示同意，避免一次错误发布把账号永久锁在法律门禁之外。每次重新同意还会
+            # 由 AuthService 追加独立活动事件，因此该恢复路径不会静默发生。
+            connection.execute(
+                """
+                INSERT INTO auth_legal_acceptances(
+                    id, user_id, document_type, document_version, document_sha256,
+                    action, locale, acceptance_method, auth_session_id, accepted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, document_type, document_version) DO UPDATE SET
+                    document_sha256=excluded.document_sha256,
+                    action=excluded.action,
+                    locale=excluded.locale,
+                    acceptance_method=excluded.acceptance_method,
+                    auth_session_id=excluded.auth_session_id,
+                    accepted_at=excluded.accepted_at
+                """,
+                (
+                    acceptanceStateId,
+                    userId,
+                    documentType,
+                    version,
+                    documentHash,
+                    action,
+                    locale,
+                    method,
+                    authSessionId,
+                    acceptedAt.isoformat(),
+                ),
+            )
 
     def getUserByEmail(self, email: str) -> dict[str, Any] | None:
         with self.database.connection() as connection:

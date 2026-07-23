@@ -24,6 +24,59 @@ EventShock Lab 支持用户自带 API Key（BYOK）的外部模型调用。默�
 - 其他供应商已经通过自动化协议、结构化输出和错误映射测试，但维护者尚未使用真实付费账号完成项目级端到端验证；界面会明确标记为“社区预览”。供应商接口仍可能变化，请先用小额预算测试。
 - 遇到兼容性问题可使用仓库的 [供应商兼容性 Issue 模板](https://github.com/Mike-Zhuang/EventShock/issues/new?template=llm-provider-feedback.yml)。Issue 只能提交供应商、模型、时间、页面、脱敏错误码和 Request ID；不得粘贴 API Key、完整提示词、结果正文、账号信息或其他个人数据。
 
+## Event Pack Factory 的 Search 与 Reader
+
+Event Pack Factory 只通过智谱官方固定端点调用联网工具；它不会采用聊天模型名称猜测工具能力，也不允许用户填写任意工具地址：
+
+| 能力 | 固定端点 | 当前实现中的计费状态 |
+| --- | --- | --- |
+| Web Search | `https://open.bigmodel.cn/api/paas/v4/web_search` | 按所选引擎的官方单次公开价格在调用前展示估算 |
+| Reader | `https://open.bigmodel.cn/api/paas/v4/reader` | **未知**；当前官方公开材料未给出本项目可核验的 Reader 单价，界面不得显示为免费或零成本 |
+
+截至 **2026-07-22**，Factory 使用并展示以下智谱 Web Search 刊例价：
+
+| 搜索引擎 | 单次公开价格 |
+| --- | --- |
+| `search_std` | ¥0.01 |
+| `search_pro` | ¥0.03 |
+| `search_pro_sogou` | ¥0.05 |
+| `search_pro_quark` | ¥0.05 |
+
+价格可能调整。每次正式调用前都应查看[智谱价格页](https://bigmodel.cn/pricing)和账号控制台；Reader 价格在无法核验时必须明确标记未知，不能把缺少价格信息解释成免费。
+
+Search 返回的标题、URL 和摘要只用于**来源发现**，不能直接支撑候选主张或 Event Pack 冻结。用户必须先批准某条发现记录，服务器才会用 Reader 读取该条已规范化的公开 HTTPS URL；Reader 取得的完整正文经过安全扫描后形成新的待审核证据来源，还要再次由人批准。只有已批准的 `PASTE` 或 Reader 证据会进入 Event Pack 物化。完整存储与删除语义见 [Event Pack Factory 与 AI 引导说明](event-pack-factory.md)。
+
+Search 和 Reader 复用当前会话内的智谱 API Key，浏览器不会把 Key 写入 Factory 构建。Search 查询与结果元数据可以按账号保存；API Key 不进入 SQLite、日志、审计详情或导出。Reader 原文的内部保留规则不改变 API Key 仅存于服务端内存的边界。
+
+## 高级参数白名单
+
+用户可以调整模型参数，但不能借此扩展模型权限。服务端总白名单和取值范围如下；具体供应商只开放其明确支持的子集，填写不支持的字段会在保存配置时失败关闭：
+
+| 参数 | 服务端范围 |
+| --- | --- |
+| `temperature` | 0–2 |
+| `topP` | 大于 0 且不超过 1 |
+| `presencePenalty` | -2–2 |
+| `frequencyPenalty` | -2–2 |
+| `seed` | 0–2,147,483,647 的整数 |
+| `timeoutSeconds` | 1–300 秒 |
+
+智谱当前只开放 `temperature`、`topP` 与 `timeoutSeconds`；其他供应商按后端能力矩阵开放不同子集。系统不提供自定义 Base URL、请求头、工具、系统提示词或任意 JSON 扩展字段，以免把 API Key 发送给未经授权的主机或绕过证据与动作边界。
+
+## 开源提示词与运行时抗注入边界
+
+本仓库采用源码可用许可证，系统提示词正文可以在源码中被审阅；`/api/v1/prompts` 与普通前端只返回提示词元数据和哈希，不把正文当作运行时数据接口，但这不构成、也不应被描述成保密措施。
+
+实际防线建立在可验证的运行时约束上：
+
+- 来源正文、搜索摘要、历史对话和模型上一轮输出都放在明确分隔的“不可信数据”区，不能动态拼入 system prompt。
+- 外部内容先经过确定性内容扫描；高风险输入在持久化或供应商调用前阻断，需要复核的输入必须由人确认。
+- 模型结果必须满足严格 Schema、证据 ID、时间边界与有限动作集合；只允许一次有界修复，仍不合格就回退到明确标记的规则结果或失败关闭。
+- 输出会检查不可见控制字符、提示词控制语言、凭据模式、原始 HTML、危险 URL、系统提示词长片段/稀有 n-gram，以及当前受保护密钥的明文和常见编码变体。
+- 传给浏览器和审计的错误使用稳定代码，不回显原始供应商响应、系统提示词、API Key 或未验证草稿。
+
+这些措施能显著缩小提示词注入和提示词泄漏面，但任何基于大语言模型的防护都不能保证绝对免疫。用户仍应把所有 AI 内容视为候选草稿，通过来源审核、主张审核、冻结确认和确定性运行门禁后再使用。
+
 ## 结果解释助手
 
 完成实验后，结果页提供一个可选的 AI 解释层。它不会自动产生付费调用；只有用户点击“生成结果解读”或发送追问时，后端才使用当前登录会话内已经配置的临时 API Key。
@@ -56,7 +109,7 @@ EventShock Lab 支持用户自带 API Key（BYOK）的外部模型调用。默�
 
 ## 官方资料
 
-- 智谱：[模型概览](https://docs.bigmodel.cn/cn/guide/start/model-overview)、[结构化输出](https://docs.bigmodel.cn/cn/guide/capabilities/struct-output)、[价格](https://bigmodel.cn/pricing)
+- 智谱：[模型概览](https://docs.bigmodel.cn/cn/guide/start/model-overview)、[结构化输出](https://docs.bigmodel.cn/cn/guide/capabilities/struct-output)、[Web Search API](https://docs.bigmodel.cn/api-reference/工具-api/网络搜索)、[Web Search 指南](https://docs.bigmodel.cn/cn/guide/tools/web-search)、[Reader API](https://docs.bigmodel.cn/api-reference/工具-api/网页阅读)、[价格](https://bigmodel.cn/pricing)
 - OpenAI：[模型](https://developers.openai.com/api/docs/models)、[结构化输出](https://developers.openai.com/api/docs/guides/structured-outputs)、[价格](https://openai.com/api/pricing/)
 - Anthropic：[模型](https://platform.claude.com/docs/en/about-claude/models/overview)、[结构化输出](https://platform.claude.com/docs/en/build-with-claude/structured-outputs)、[价格](https://platform.claude.com/docs/en/about-claude/pricing)
 - Google Gemini：[API](https://ai.google.dev/api)、[结构化输出](https://ai.google.dev/gemini-api/docs/structured-output)、[价格](https://ai.google.dev/gemini-api/docs/pricing)

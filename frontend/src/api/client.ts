@@ -9,10 +9,21 @@ import {
   normalizeEventPack,
   normalizeExperiment,
   normalizeExperiments,
+  normalizeFactoryBuild,
+  normalizeFactoryBuilds,
+  normalizeFactoryMutation,
+  normalizeFactorySearchEngines,
+  normalizeFactorySnapshot,
+  normalizeFactorySourceRawText,
   normalizeGovernanceInventory,
+  normalizeGuidedWorkflow,
+  normalizeGuidedWorkflows,
   normalizeLlmCatalog,
   normalizeLlmConfig,
   normalizeLlmConnectionTest,
+  normalizeLegalAcceptance,
+  normalizeLegalDocument,
+  normalizePreferences,
   normalizePromptRegistry,
   normalizeResults,
   normalizeRedTeamRegistry,
@@ -44,6 +55,13 @@ import type {
   ClaimReviewInput,
   EventPack,
   EventPackCreateInput,
+  EventPackFactoryBuild,
+  EventPackFactoryMaterializeInput,
+  EventPackFactoryMutation,
+  EventPackFactoryPasteSourceInput,
+  EventPackFactorySearchInput,
+  EventPackFactorySnapshot,
+  EventPackFactorySourceRawText,
   EventSourceUpload,
   Experiment,
   ExperimentResults,
@@ -51,13 +69,20 @@ import type {
   CognitionEvaluationRun,
   CognitionTelemetry,
   GovernanceInventory,
+  GuidedTurnInput,
+  GuidedWorkflow,
   HealthStatus,
   InvalidationReasonCode,
   LlmCatalog,
   LlmConfigInput,
   LlmConfigView,
   LlmConnectionTest,
+  LegalAcceptanceStatus,
+  LegalConsentInput,
+  LegalDocument,
   PromptRegistryItem,
+  FactorySearchEngineDescriptor,
+  FactorySourceReviewStatus,
   RedTeamRegistry,
   ReleaseGateView,
   ResultInterpretationChatInput,
@@ -81,6 +106,8 @@ import type {
   ValidationLadderView,
   VerificationCodeReceipt,
   VerificationPurpose,
+  UserPreferences,
+  UserPreferencesInput,
 } from './types';
 
 const API_BASE = '/api';
@@ -389,12 +416,36 @@ export const api = {
     email: string;
     password: string;
     verificationCode: string;
-    language: 'en' | 'zh-CN';
-  }): Promise<AuthSession> {
+  } & LegalConsentInput): Promise<AuthSession> {
     return normalizeAuthSession(await requestJson('/v1/auth/register', {
       method: 'POST',
       body: JSON.stringify(input),
       broadcastUnauthorized: false,
+    }));
+  },
+
+  async getLegalDocument(language: 'en' | 'zh-CN'): Promise<LegalDocument> {
+    const query = new URLSearchParams({ language });
+    return normalizeLegalDocument(await requestJson(`/v1/legal/terms?${query.toString()}`, {
+      broadcastUnauthorized: false,
+    }));
+  },
+
+  async acceptLegalDocuments(input: LegalConsentInput): Promise<LegalAcceptanceStatus> {
+    return normalizeLegalAcceptance(await requestJson('/v1/auth/legal-acceptance', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }));
+  },
+
+  async getUserPreferences(): Promise<UserPreferences> {
+    return normalizePreferences(await requestJson('/v1/auth/preferences'));
+  },
+
+  async saveUserPreferences(input: UserPreferencesInput): Promise<UserPreferences> {
+    return normalizePreferences(await requestJson('/v1/auth/preferences', {
+      method: 'PUT',
+      body: JSON.stringify(input),
     }));
   },
 
@@ -420,6 +471,222 @@ export const api = {
     const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
     if (userId) query.set('userId', userId);
     return normalizeAdminActivityPage(await requestJson(`/v1/admin/activity?${query.toString()}`));
+  },
+
+  async getFactorySearchEngines(): Promise<FactorySearchEngineDescriptor[]> {
+    return normalizeFactorySearchEngines(
+      await requestJson('/v1/event-pack-factory/search-engines'),
+    );
+  },
+
+  async getFactoryBuilds(): Promise<EventPackFactoryBuild[]> {
+    return normalizeFactoryBuilds(await requestJson('/v1/event-pack-factory/builds'));
+  },
+
+  async createFactoryBuild(title: string): Promise<EventPackFactoryBuild> {
+    return normalizeFactoryBuild(await requestJson('/v1/event-pack-factory/builds', {
+      method: 'POST',
+      body: JSON.stringify({ title }),
+    }));
+  },
+
+  async getFactoryBuild(buildId: string): Promise<EventPackFactorySnapshot> {
+    return normalizeFactorySnapshot(await requestJson(
+      `/v1/event-pack-factory/builds/${encodeURIComponent(buildId)}`,
+    ));
+  },
+
+  async deleteFactoryBuild(buildId: string, expectedRevision: number): Promise<void> {
+    await requestJson(`/v1/event-pack-factory/builds/${encodeURIComponent(buildId)}`, {
+      method: 'DELETE',
+      body: JSON.stringify({ expectedRevision }),
+    });
+  },
+
+  async addFactoryPasteSource(
+    buildId: string,
+    expectedRevision: number,
+    source: EventPackFactoryPasteSourceInput,
+  ): Promise<EventPackFactoryMutation> {
+    return normalizeFactoryMutation(await requestJson(
+      `/v1/event-pack-factory/builds/${encodeURIComponent(buildId)}/paste`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ expectedRevision, source }),
+        timeoutMs: 30_000,
+      },
+    ));
+  },
+
+  async searchFactorySources(
+    buildId: string,
+    expectedRevision: number,
+    request: EventPackFactorySearchInput,
+    clientRequestId: string,
+  ): Promise<EventPackFactoryMutation> {
+    return normalizeFactoryMutation(await requestJson(
+      `/v1/event-pack-factory/builds/${encodeURIComponent(buildId)}/search`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ clientRequestId, expectedRevision, request }),
+        timeoutMs: 90_000,
+      },
+    ));
+  },
+
+  async addFactoryReaderSource(
+    buildId: string,
+    expectedRevision: number,
+    searchResultSourceId: string,
+    knownAt: string,
+    clientRequestId: string,
+  ): Promise<EventPackFactoryMutation> {
+    return normalizeFactoryMutation(await requestJson(
+      `/v1/event-pack-factory/builds/${encodeURIComponent(buildId)}/reader`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          clientRequestId,
+          expectedRevision,
+          searchResultSourceId,
+          knownAt,
+        }),
+        timeoutMs: 90_000,
+      },
+    ));
+  },
+
+  async reviewFactorySource(
+    buildId: string,
+    sourceId: string,
+    expectedRevision: number,
+    status: Exclude<FactorySourceReviewStatus, 'PENDING'>,
+  ): Promise<EventPackFactoryMutation> {
+    return normalizeFactoryMutation(await requestJson(
+      `/v1/event-pack-factory/builds/${encodeURIComponent(buildId)}/sources/${encodeURIComponent(sourceId)}/review`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ expectedRevision, status }),
+      },
+    ));
+  },
+
+  async materializeFactoryBuild(
+    buildId: string,
+    expectedRevision: number,
+    input: EventPackFactoryMaterializeInput,
+    clientRequestId: string,
+  ): Promise<EventPack> {
+    return normalizeEventPack(await requestJson(
+      `/v1/event-pack-factory/builds/${encodeURIComponent(buildId)}/materialize`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ clientRequestId, expectedRevision, ...input }),
+        timeoutMs: 120_000,
+      },
+    ));
+  },
+
+  async getFactorySourceRawText(
+    buildId: string,
+    sourceId: string,
+  ): Promise<EventPackFactorySourceRawText> {
+    return normalizeFactorySourceRawText(await requestJson(
+      `/v1/event-pack-factory/builds/${encodeURIComponent(buildId)}/sources/${encodeURIComponent(sourceId)}/raw-text`,
+      { cache: 'no-store' },
+    ));
+  },
+
+  async updateFactorySourceRawText(
+    buildId: string,
+    sourceId: string,
+    expectedRevision: number,
+    rawText: string,
+  ): Promise<EventPackFactoryMutation> {
+    return normalizeFactoryMutation(await requestJson(
+      `/v1/event-pack-factory/builds/${encodeURIComponent(buildId)}/sources/${encodeURIComponent(sourceId)}/raw-text`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ expectedRevision, rawText }),
+        cache: 'no-store',
+      },
+    ));
+  },
+
+  async getGuidedWorkflows(): Promise<GuidedWorkflow[]> {
+    return normalizeGuidedWorkflows(await requestJson('/v1/guided-workflows'));
+  },
+
+  async createGuidedWorkflow(language: 'en' | 'zh-CN'): Promise<GuidedWorkflow> {
+    return normalizeGuidedWorkflow(await requestJson('/v1/guided-workflows', {
+      method: 'POST',
+      body: JSON.stringify({ language }),
+    }));
+  },
+
+  async getGuidedWorkflow(workflowId: string): Promise<GuidedWorkflow> {
+    return normalizeGuidedWorkflow(await requestJson(
+      `/v1/guided-workflows/${encodeURIComponent(workflowId)}`,
+    ));
+  },
+
+  async sendGuidedTurn(
+    workflowId: string,
+    input: GuidedTurnInput,
+  ): Promise<GuidedWorkflow> {
+    return normalizeGuidedWorkflow(await requestJson(
+      `/v1/guided-workflows/${encodeURIComponent(workflowId)}/turn`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+        timeoutMs: 120_000,
+      },
+    ));
+  },
+
+  async applyGuidedProposal(
+    workflowId: string,
+    proposalId: string,
+    expectedVersion: number,
+  ): Promise<GuidedWorkflow> {
+    return normalizeGuidedWorkflow(await requestJson(
+      `/v1/guided-workflows/${encodeURIComponent(workflowId)}/apply`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ proposalId, expectedVersion }),
+      },
+    ));
+  },
+
+  async advanceGuidedWorkflow(
+    workflowId: string,
+    expectedVersion: number,
+  ): Promise<GuidedWorkflow> {
+    return normalizeGuidedWorkflow(await requestJson(
+      `/v1/guided-workflows/${encodeURIComponent(workflowId)}/advance`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ expectedVersion, acknowledgedHumanReview: true }),
+      },
+    ));
+  },
+
+  async linkGuidedWorkflowArtifacts(
+    workflowId: string,
+    input: {
+      expectedVersion: number;
+      eventPackBuildId?: string;
+      eventPackId?: string;
+      scenarioId?: string;
+    },
+  ): Promise<GuidedWorkflow> {
+    return normalizeGuidedWorkflow(await requestJson(
+      `/v1/guided-workflows/${encodeURIComponent(workflowId)}/links`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(input),
+      },
+    ));
   },
 
   async getCases(): Promise<CaseSummary[]> {

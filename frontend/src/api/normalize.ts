@@ -4,11 +4,17 @@ import type {
   AdminUserPage,
   AdminUserStatistics,
   AdminUserSummary,
+  AdvancedModelParameterName,
+  AdvancedModelParameters,
   AgentFlowPoint,
   AgentPnlPoint,
   AnalysisDiagnostics,
   AuthSession,
   AuthUser,
+  LegalAcceptanceStatus,
+  LegalDocument,
+  LegalSection,
+  UserPreferences,
   CaseSummary,
   CognitionDecisionSummary,
   CognitionEvalSummary,
@@ -19,6 +25,12 @@ import type {
   EventClaim,
   EventPack,
   EventPackContentSecurity,
+  EventPackFactoryBuild,
+  EventPackFactoryMutation,
+  EventPackFactorySearchRun,
+  EventPackFactorySnapshot,
+  EventPackFactorySource,
+  EventPackFactorySourceRawText,
   EventSource,
   Experiment,
   ExperimentLogEntry,
@@ -26,6 +38,13 @@ import type {
   ExperimentStatus,
   GovernanceComponent,
   GovernanceInventory,
+  GuidedEventMetadata,
+  GuidedIntervention,
+  GuidedStage,
+  GuidedWorkflow,
+  GuidedWorkflowDraft,
+  GuidedWorkflowMessage,
+  GuidedWorkflowProposal,
   InterventionDefinition,
   InterventionParameter,
   LlmCatalog,
@@ -38,6 +57,8 @@ import type {
   MetricDisplayUnit,
   MetricResult,
   NetworkTopology,
+  FactorySearchEngineDescriptor,
+  FactorySearchEngineId,
   PairedSeedPoint,
   PromptRegistryItem,
   RedTeamDefinition,
@@ -222,12 +243,502 @@ function normalizeAuthUser(value: unknown): AuthUser {
   };
 }
 
+function normalizeLegalAcceptanceStatus(value: unknown): LegalAcceptanceStatus {
+  if (!isRecord(value)) throw new TypeError('Legal acceptance status is not an object.');
+  return {
+    required: asBoolean(read(value, 'required')) ?? true,
+    version: asString(read(value, 'version')),
+    acceptedAt: asOptionalString(read(value, 'acceptedAt', 'accepted_at')),
+  };
+}
+
+function normalizeUserPreferences(value: unknown): UserPreferences {
+  if (!isRecord(value)) throw new TypeError('User preferences are not an object.');
+  const experienceLevel = asOptionalString(read(value, 'experienceLevel', 'experience_level'));
+  const workspaceMode = asOptionalString(read(value, 'workspaceMode', 'workspace_mode'));
+  const assistancePreference = asOptionalString(
+    read(value, 'assistancePreference', 'assistance_preference'),
+  );
+  const firstGoal = asOptionalString(read(value, 'firstGoal', 'first_goal'));
+  if (experienceLevel && !['NEW', 'INTERMEDIATE', 'ADVANCED'].includes(experienceLevel)) {
+    throw new TypeError('User preferences contain an unsupported experience level.');
+  }
+  if (workspaceMode && !['GUIDED', 'EXPERT'].includes(workspaceMode)) {
+    throw new TypeError('User preferences contain an unsupported workspace mode.');
+  }
+  if (
+    assistancePreference
+    && !['STEP_BY_STEP', 'PROPOSE_AND_ADJUST', 'DIRECT_CONTROL'].includes(assistancePreference)
+  ) {
+    throw new TypeError('User preferences contain an unsupported assistance preference.');
+  }
+  if (
+    firstGoal
+    && !['TRY_DEMO', 'RESEARCH_NEW_EVENT', 'DESIGN_FULL_EXPERIMENT'].includes(firstGoal)
+  ) {
+    throw new TypeError('User preferences contain an unsupported first goal.');
+  }
+  return {
+    onboardingRequired: asBoolean(
+      read(value, 'onboardingRequired', 'onboarding_required'),
+    ) ?? true,
+    experienceLevel: experienceLevel as UserPreferences['experienceLevel'],
+    workspaceMode: workspaceMode as UserPreferences['workspaceMode'],
+    assistancePreference: assistancePreference as UserPreferences['assistancePreference'],
+    firstGoal: firstGoal as UserPreferences['firstGoal'],
+    onboardingVersion: asOptionalString(read(value, 'onboardingVersion', 'onboarding_version')),
+    onboardingCompletedAt: asOptionalString(
+      read(value, 'onboardingCompletedAt', 'onboarding_completed_at'),
+    ),
+    updatedAt: asOptionalString(read(value, 'updatedAt', 'updated_at')),
+  };
+}
+
+function normalizeLegalSection(value: unknown): LegalSection {
+  if (!isRecord(value)) throw new TypeError('Legal document section is not an object.');
+  return {
+    id: asString(read(value, 'id')),
+    title: asString(read(value, 'title')),
+    body: asStringArray(read(value, 'body')),
+  };
+}
+
+export function normalizeLegalDocument(value: unknown): LegalDocument {
+  if (!isRecord(value)) throw new TypeError('Legal document response is not an object.');
+  const locale = asString(read(value, 'locale'));
+  if (!['en', 'zh-CN'].includes(locale)) {
+    throw new TypeError('Legal document contains an unsupported locale.');
+  }
+  return {
+    schemaVersion: asString(read(value, 'schemaVersion', 'schema_version')),
+    version: asString(read(value, 'version')),
+    effectiveDate: asString(read(value, 'effectiveDate', 'effective_date')),
+    locale: locale as LegalDocument['locale'],
+    title: asString(read(value, 'title')),
+    summary: asString(read(value, 'summary')),
+    operatorLabel: asString(read(value, 'operatorLabel', 'operator_label')),
+    minimumAge: asNumber(read(value, 'minimumAge', 'minimum_age')) ?? 18,
+    sections: unwrapItems(read(value, 'sections')).map(normalizeLegalSection),
+    acceptanceStatements: asStringArray(
+      read(value, 'acceptanceStatements', 'acceptance_statements'),
+    ),
+    legalReviewNotice: asString(read(value, 'legalReviewNotice', 'legal_review_notice')),
+    documentHash: asString(read(value, 'documentHash', 'document_hash')),
+  };
+}
+
+export function normalizeLegalAcceptance(value: unknown): LegalAcceptanceStatus {
+  return normalizeLegalAcceptanceStatus(value);
+}
+
+export function normalizePreferences(value: unknown): UserPreferences {
+  return normalizeUserPreferences(value);
+}
+
+const FACTORY_BUILD_STATUSES = ['DRAFT', 'REVIEW_READY'] as const;
+const FACTORY_SOURCE_KINDS = ['PASTE', 'SEARCH_RESULT', 'READER'] as const;
+const FACTORY_EVIDENCE_ROLES = ['EVIDENCE', 'DISCOVERY_ONLY'] as const;
+const FACTORY_REVIEW_STATUSES = ['PENDING', 'APPROVED', 'REJECTED'] as const;
+const FACTORY_SECURITY_DECISIONS = ['ALLOW', 'REVIEW'] as const;
+const FACTORY_SEARCH_ENGINES: FactorySearchEngineId[] = [
+  'search_std',
+  'search_pro',
+  'search_pro_sogou',
+  'search_pro_quark',
+];
+const GUIDED_STAGES: GuidedStage[] = [
+  'EVENT_GOAL',
+  'SOURCE_METHOD',
+  'SOURCE_REVIEW',
+  'CLAIM_REVIEW',
+  'PACK_METADATA_REVIEW',
+  'PACK_FREEZE_REVIEW',
+  'SCENARIO_INTERVENTION',
+  'SCENARIO_REVIEW',
+  'PREFLIGHT',
+  'READY_TO_SUBMIT',
+  'COMPLETED',
+];
+
+function requiredString(value: unknown, field: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new TypeError(`${field} must be a non-empty string.`);
+  }
+  return value;
+}
+
+function requiredNumber(value: unknown, field: string, integer = false): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || (integer && !Number.isInteger(value))) {
+    throw new TypeError(`${field} must be a finite${integer ? ' integer' : ''} number.`);
+  }
+  return value;
+}
+
+function enumValue<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  field: string,
+): T {
+  if (typeof value !== 'string' || !allowed.includes(value as T)) {
+    throw new TypeError(`${field} contains an unsupported value.`);
+  }
+  return value as T;
+}
+
+function normalizeFactorySearchEngine(value: unknown): FactorySearchEngineDescriptor {
+  if (!isRecord(value)) throw new TypeError('Factory search-engine item is not an object.');
+  const supportedCountsRaw = read(value, 'supportedCounts', 'supported_counts');
+  const supportedCounts = supportedCountsRaw === undefined || supportedCountsRaw === null
+    ? undefined
+    : Array.isArray(supportedCountsRaw)
+      ? supportedCountsRaw.map((item) => requiredNumber(item, 'supportedCounts item', true))
+      : (() => { throw new TypeError('supportedCounts must be an array.'); })();
+  return {
+    engine: enumValue(
+      read(value, 'engine'),
+      FACTORY_SEARCH_ENGINES,
+      'engine',
+    ),
+    displayName: requiredString(read(value, 'displayName', 'display_name'), 'displayName'),
+    priceCnyPerCall: requiredNumber(
+      read(value, 'priceCnyPerCall', 'price_cny_per_call'),
+      'priceCnyPerCall',
+    ),
+    supportsCount: asBoolean(read(value, 'supportsCount', 'supports_count')) ?? false,
+    supportedCounts,
+    supportsDomainFilter: asBoolean(
+      read(value, 'supportsDomainFilter', 'supports_domain_filter'),
+    ) ?? false,
+    supportsRecencyFilter: asBoolean(
+      read(value, 'supportsRecencyFilter', 'supports_recency_filter'),
+    ) ?? false,
+    supportsContentSize: asBoolean(
+      read(value, 'supportsContentSize', 'supports_content_size'),
+    ) ?? false,
+  };
+}
+
+export function normalizeFactorySearchEngines(value: unknown): FactorySearchEngineDescriptor[] {
+  return unwrapItems(value).map(normalizeFactorySearchEngine);
+}
+
+export function normalizeFactoryBuild(value: unknown): EventPackFactoryBuild {
+  if (!isRecord(value)) throw new TypeError('Factory build is not an object.');
+  return {
+    id: requiredString(read(value, 'id'), 'build.id'),
+    ownerUserId: requiredString(read(value, 'ownerUserId', 'owner_user_id'), 'build.ownerUserId'),
+    title: requiredString(read(value, 'title'), 'build.title'),
+    status: enumValue(read(value, 'status'), FACTORY_BUILD_STATUSES, 'build.status'),
+    revision: requiredNumber(read(value, 'revision'), 'build.revision', true),
+    createdAt: requiredString(read(value, 'createdAt', 'created_at'), 'build.createdAt'),
+    updatedAt: requiredString(read(value, 'updatedAt', 'updated_at'), 'build.updatedAt'),
+    retentionExpiresAt: requiredString(
+      read(value, 'retentionExpiresAt', 'retention_expires_at'),
+      'build.retentionExpiresAt',
+    ),
+  };
+}
+
+export function normalizeFactoryBuilds(value: unknown): EventPackFactoryBuild[] {
+  return unwrapItems(value).map(normalizeFactoryBuild);
+}
+
+function normalizeFactorySource(value: unknown): EventPackFactorySource {
+  if (!isRecord(value)) throw new TypeError('Factory source is not an object.');
+  const quotes = read(value, 'verifiedEvidenceQuotes', 'verified_evidence_quotes');
+  if (quotes !== undefined && !Array.isArray(quotes)) {
+    throw new TypeError('verifiedEvidenceQuotes must be an array.');
+  }
+  return {
+    id: requiredString(read(value, 'id'), 'source.id'),
+    buildId: requiredString(read(value, 'buildId', 'build_id'), 'source.buildId'),
+    kind: enumValue(read(value, 'kind'), FACTORY_SOURCE_KINDS, 'source.kind'),
+    evidenceRole: enumValue(
+      read(value, 'evidenceRole', 'evidence_role'),
+      FACTORY_EVIDENCE_ROLES,
+      'source.evidenceRole',
+    ),
+    reviewStatus: enumValue(
+      read(value, 'reviewStatus', 'review_status'),
+      FACTORY_REVIEW_STATUSES,
+      'source.reviewStatus',
+    ),
+    securityDecision: enumValue(
+      read(value, 'securityDecision', 'security_decision'),
+      FACTORY_SECURITY_DECISIONS,
+      'source.securityDecision',
+    ),
+    title: requiredString(read(value, 'title'), 'source.title'),
+    publisher: requiredString(read(value, 'publisher'), 'source.publisher'),
+    url: asOptionalString(read(value, 'url')),
+    publishedAt: asOptionalString(read(value, 'publishedAt', 'published_at')),
+    knownAt: requiredString(read(value, 'knownAt', 'known_at'), 'source.knownAt'),
+    contentHash: requiredString(read(value, 'contentHash', 'content_hash'), 'source.contentHash'),
+    contentLength: requiredNumber(
+      read(value, 'contentLength', 'content_length'),
+      'source.contentLength',
+      true,
+    ),
+    reviewSummary: requiredString(
+      read(value, 'reviewSummary', 'review_summary'),
+      'source.reviewSummary',
+    ),
+    verifiedEvidenceQuotes: asStringArray(quotes),
+    searchRunId: asOptionalString(read(value, 'searchRunId', 'search_run_id')),
+    parentSourceId: asOptionalString(read(value, 'parentSourceId', 'parent_source_id')),
+    createdAt: requiredString(read(value, 'createdAt', 'created_at'), 'source.createdAt'),
+    updatedAt: requiredString(read(value, 'updatedAt', 'updated_at'), 'source.updatedAt'),
+  };
+}
+
+function normalizeFactorySearchRun(value: unknown): EventPackFactorySearchRun {
+  if (!isRecord(value)) throw new TypeError('Factory search run is not an object.');
+  const rawParameters = read(value, 'requestParameters', 'request_parameters');
+  if (!isRecord(rawParameters)) throw new TypeError('requestParameters must be an object.');
+  const requestParameters: Record<string, string | number | boolean | null> = {};
+  Object.entries(rawParameters).forEach(([key, item]) => {
+    if (
+      typeof item === 'string'
+      || typeof item === 'number'
+      || typeof item === 'boolean'
+      || item === null
+    ) requestParameters[key] = item;
+  });
+  return {
+    id: requiredString(read(value, 'id'), 'searchRun.id'),
+    buildId: requiredString(read(value, 'buildId', 'build_id'), 'searchRun.buildId'),
+    engine: enumValue(read(value, 'engine'), FACTORY_SEARCH_ENGINES, 'searchRun.engine'),
+    query: requiredString(read(value, 'query'), 'searchRun.query'),
+    queryHash: requiredString(read(value, 'queryHash', 'query_hash'), 'searchRun.queryHash'),
+    requestParameters,
+    providerRequestId: requiredString(
+      read(value, 'providerRequestId', 'provider_request_id'),
+      'searchRun.providerRequestId',
+    ),
+    estimatedCostCny: requiredNumber(
+      read(value, 'estimatedCostCny', 'estimated_cost_cny'),
+      'searchRun.estimatedCostCny',
+    ),
+    resultCount: requiredNumber(read(value, 'resultCount', 'result_count'), 'resultCount', true),
+    droppedResultCount: requiredNumber(
+      read(value, 'droppedResultCount', 'dropped_result_count'),
+      'droppedResultCount',
+      true,
+    ),
+    createdAt: requiredString(read(value, 'createdAt', 'created_at'), 'searchRun.createdAt'),
+  };
+}
+
+export function normalizeFactorySnapshot(value: unknown): EventPackFactorySnapshot {
+  if (!isRecord(value)) throw new TypeError('Factory snapshot is not an object.');
+  const sources = read(value, 'sources');
+  const searchRuns = read(value, 'searchRuns', 'search_runs');
+  if (!Array.isArray(sources) || !Array.isArray(searchRuns)) {
+    throw new TypeError('Factory snapshot collections are invalid.');
+  }
+  return {
+    build: normalizeFactoryBuild(read(value, 'build')),
+    sources: sources.map(normalizeFactorySource),
+    searchRuns: searchRuns.map(normalizeFactorySearchRun),
+  };
+}
+
+export function normalizeFactoryMutation(value: unknown): EventPackFactoryMutation {
+  if (!isRecord(value)) throw new TypeError('Factory mutation response is not an object.');
+  const sources = read(value, 'sources');
+  if (!Array.isArray(sources)) throw new TypeError('Factory mutation sources are invalid.');
+  const searchRun = read(value, 'searchRun', 'search_run');
+  return {
+    build: normalizeFactoryBuild(read(value, 'build')),
+    sources: sources.map(normalizeFactorySource),
+    searchRun: searchRun === undefined || searchRun === null
+      ? undefined
+      : normalizeFactorySearchRun(searchRun),
+    idempotencyReplayed: asBoolean(
+      read(value, 'idempotencyReplayed', 'idempotency_replayed'),
+    ) ?? false,
+  };
+}
+
+export function normalizeFactorySourceRawText(value: unknown): EventPackFactorySourceRawText {
+  if (!isRecord(value)) throw new TypeError('Factory source raw text is not an object.');
+  return {
+    buildId: requiredString(read(value, 'buildId', 'build_id'), 'rawText.buildId'),
+    sourceId: requiredString(read(value, 'sourceId', 'source_id'), 'rawText.sourceId'),
+    revision: requiredNumber(read(value, 'revision'), 'rawText.revision', true),
+    rawText: requiredString(read(value, 'rawText', 'raw_text'), 'rawText.rawText'),
+    contentHash: requiredString(read(value, 'contentHash', 'content_hash'), 'rawText.contentHash'),
+    contentLength: requiredNumber(
+      read(value, 'contentLength', 'content_length'),
+      'rawText.contentLength',
+      true,
+    ),
+    retentionExpiresAt: requiredString(
+      read(value, 'retentionExpiresAt', 'retention_expires_at'),
+      'rawText.retentionExpiresAt',
+    ),
+  };
+}
+
+function normalizeGuidedEventMetadata(value: unknown): GuidedEventMetadata {
+  if (!isRecord(value)) throw new TypeError('Guided event metadata is not an object.');
+  return {
+    title: requiredString(read(value, 'title'), 'eventMetadata.title'),
+    titleZh: asOptionalString(read(value, 'titleZh', 'title_zh')),
+    summary: requiredString(read(value, 'summary'), 'eventMetadata.summary'),
+    summaryZh: asOptionalString(read(value, 'summaryZh', 'summary_zh')),
+    instrument: requiredString(read(value, 'instrument'), 'eventMetadata.instrument'),
+    asOf: requiredString(read(value, 'asOf', 'as_of'), 'eventMetadata.asOf'),
+    researchQuestion: requiredString(
+      read(value, 'researchQuestion', 'research_question'),
+      'eventMetadata.researchQuestion',
+    ),
+  };
+}
+
+function normalizeGuidedIntervention(value: unknown): GuidedIntervention {
+  if (!isRecord(value)) throw new TypeError('Guided intervention is not an object.');
+  const parameter = asString(read(value, 'parameter'));
+  if (!PARAMETER_VALUES.includes(parameter as InterventionParameter)) {
+    throw new TypeError('Guided intervention contains an unsupported parameter.');
+  }
+  return {
+    parameter: parameter as InterventionParameter,
+    baselineValue: requiredNumber(read(value, 'baselineValue', 'baseline_value'), 'baselineValue'),
+    interventionValue: requiredNumber(
+      read(value, 'interventionValue', 'intervention_value'),
+      'interventionValue',
+    ),
+    explanation: requiredString(read(value, 'explanation'), 'intervention.explanation'),
+  };
+}
+
+function normalizeGuidedProposal(value: unknown): GuidedWorkflowProposal {
+  if (!isRecord(value)) throw new TypeError('Guided proposal is not an object.');
+  const schemaVersion = requiredString(
+    read(value, 'schemaVersion', 'schema_version'),
+    'proposal.schemaVersion',
+  );
+  if (schemaVersion !== 'guided_proposal_v1.0.0') {
+    throw new TypeError('Guided proposal schema version is unsupported.');
+  }
+  const sourceMethod = asOptionalString(
+    read(value, 'proposedSourceMethod', 'proposed_source_method'),
+  );
+  if (sourceMethod && !['PASTE', 'WEB_SEARCH', 'COMBINED', 'MANUAL'].includes(sourceMethod)) {
+    throw new TypeError('Guided proposal source method is unsupported.');
+  }
+  return {
+    schemaVersion,
+    stage: enumValue(read(value, 'stage'), GUIDED_STAGES, 'proposal.stage'),
+    assistantMessage: requiredString(
+      read(value, 'assistantMessage', 'assistant_message'),
+      'proposal.assistantMessage',
+    ),
+    clarificationRequired: asBoolean(
+      read(value, 'clarificationRequired', 'clarification_required'),
+    ) ?? false,
+    proposedEventMetadata: read(value, 'proposedEventMetadata', 'proposed_event_metadata')
+      ? normalizeGuidedEventMetadata(
+        read(value, 'proposedEventMetadata', 'proposed_event_metadata'),
+      )
+      : undefined,
+    proposedSourceMethod: sourceMethod as GuidedWorkflowProposal['proposedSourceMethod'],
+    proposedSearchQueries: asStringArray(
+      read(value, 'proposedSearchQueries', 'proposed_search_queries'),
+    ),
+    proposedIntervention: read(value, 'proposedIntervention', 'proposed_intervention')
+      ? normalizeGuidedIntervention(read(value, 'proposedIntervention', 'proposed_intervention'))
+      : undefined,
+    nextQuestionOptions: asStringArray(read(value, 'nextQuestionOptions', 'next_question_options')),
+    readyForHumanReview: asBoolean(
+      read(value, 'readyForHumanReview', 'ready_for_human_review'),
+    ) ?? false,
+    blockedReasons: asStringArray(read(value, 'blockedReasons', 'blocked_reasons')),
+  };
+}
+
+function normalizeGuidedDraft(value: unknown): GuidedWorkflowDraft {
+  if (!isRecord(value)) throw new TypeError('Guided draft is not an object.');
+  const sourceMethod = asOptionalString(read(value, 'sourceMethod', 'source_method'));
+  if (sourceMethod && !['PASTE', 'WEB_SEARCH', 'COMBINED', 'MANUAL'].includes(sourceMethod)) {
+    throw new TypeError('Guided draft source method is unsupported.');
+  }
+  return {
+    eventMetadata: read(value, 'eventMetadata', 'event_metadata')
+      ? normalizeGuidedEventMetadata(read(value, 'eventMetadata', 'event_metadata'))
+      : undefined,
+    sourceMethod: sourceMethod as GuidedWorkflowDraft['sourceMethod'],
+    searchQueries: asStringArray(read(value, 'searchQueries', 'search_queries')),
+    intervention: read(value, 'intervention')
+      ? normalizeGuidedIntervention(read(value, 'intervention'))
+      : undefined,
+    eventPackBuildId: asOptionalString(read(value, 'eventPackBuildId', 'event_pack_build_id')),
+    eventPackId: asOptionalString(read(value, 'eventPackId', 'event_pack_id')),
+    scenarioId: asOptionalString(read(value, 'scenarioId', 'scenario_id')),
+  };
+}
+
+function normalizeGuidedMessage(value: unknown): GuidedWorkflowMessage {
+  if (!isRecord(value)) throw new TypeError('Guided message is not an object.');
+  const role = enumValue(read(value, 'role'), ['user', 'assistant'] as const, 'message.role');
+  return {
+    id: requiredString(read(value, 'id'), 'message.id'),
+    role,
+    stage: enumValue(read(value, 'stage'), GUIDED_STAGES, 'message.stage'),
+    content: requiredString(read(value, 'content'), 'message.content'),
+    proposalId: asOptionalString(read(value, 'proposalId', 'proposal_id')),
+    createdAt: requiredString(read(value, 'createdAt', 'created_at'), 'message.createdAt'),
+  };
+}
+
+export function normalizeGuidedWorkflow(value: unknown): GuidedWorkflow {
+  if (!isRecord(value)) throw new TypeError('Guided workflow is not an object.');
+  const schemaVersion = requiredString(
+    read(value, 'schemaVersion', 'schema_version'),
+    'workflow.schemaVersion',
+  );
+  if (schemaVersion !== '1.0.0') throw new TypeError('Guided workflow schema is unsupported.');
+  const language = enumValue(read(value, 'language'), ['en', 'zh-CN'] as const, 'language');
+  const messages = read(value, 'messages');
+  if (!Array.isArray(messages)) throw new TypeError('Guided workflow messages are invalid.');
+  const pendingProposal = read(value, 'pendingProposal', 'pending_proposal');
+  return {
+    schemaVersion,
+    id: requiredString(read(value, 'id'), 'workflow.id'),
+    stage: enumValue(read(value, 'stage'), GUIDED_STAGES, 'workflow.stage'),
+    status: enumValue(
+      read(value, 'status'),
+      ['ACTIVE', 'COMPLETED', 'CANCELLED'] as const,
+      'workflow.status',
+    ),
+    version: requiredNumber(read(value, 'version'), 'workflow.version', true),
+    language,
+    draft: normalizeGuidedDraft(read(value, 'draft')),
+    pendingProposal: pendingProposal === undefined || pendingProposal === null
+      ? undefined
+      : normalizeGuidedProposal(pendingProposal),
+    pendingProposalId: asOptionalString(
+      read(value, 'pendingProposalId', 'pending_proposal_id'),
+    ),
+    messages: messages.map(normalizeGuidedMessage),
+    createdAt: requiredString(read(value, 'createdAt', 'created_at'), 'workflow.createdAt'),
+    updatedAt: requiredString(read(value, 'updatedAt', 'updated_at'), 'workflow.updatedAt'),
+  };
+}
+
+export function normalizeGuidedWorkflows(value: unknown): GuidedWorkflow[] {
+  return unwrapItems(value).map(normalizeGuidedWorkflow);
+}
+
 export function normalizeAuthSession(value: unknown): AuthSession {
   if (!isRecord(value)) throw new TypeError('Authentication session response is not an object.');
   const authenticated = asBoolean(read(value, 'authenticated')) ?? false;
   const userValue = read(value, 'user');
   const user = userValue === undefined || userValue === null ? undefined : normalizeAuthUser(userValue);
   if (authenticated && !user) throw new TypeError('Authenticated session is missing its user.');
+  const legalValue = read(value, 'legalAcceptance', 'legal_acceptance');
+  const preferencesValue = read(value, 'preferences', 'userPreferences', 'user_preferences');
   return {
     authenticationRequired: asBoolean(
       read(value, 'authenticationRequired', 'authentication_required'),
@@ -235,6 +746,12 @@ export function normalizeAuthSession(value: unknown): AuthSession {
     authenticated,
     user,
     csrfToken: asOptionalString(read(value, 'csrfToken', 'csrf_token')),
+    legalAcceptance: legalValue === undefined || legalValue === null
+      ? undefined
+      : normalizeLegalAcceptanceStatus(legalValue),
+    preferences: preferencesValue === undefined || preferencesValue === null
+      ? undefined
+      : normalizeUserPreferences(preferencesValue),
   };
 }
 
@@ -1699,6 +2216,27 @@ export function normalizeValidation(value: unknown): ScenarioValidation {
 export function normalizeLlmCatalog(value: unknown): LlmCatalog {
   if (!isRecord(value)) throw new TypeError('Model catalog response is not an object.');
 
+  const advancedParameterNames = new Set<AdvancedModelParameterName>([
+    'temperature',
+    'topP',
+    'presencePenalty',
+    'frequencyPenalty',
+    'seed',
+    'timeoutSeconds',
+  ]);
+
+  const normalizeAdvancedParameterNames = (
+    parameterValue: unknown,
+  ): AdvancedModelParameterName[] | undefined => {
+    if (parameterValue === undefined || parameterValue === null) return undefined;
+    return unwrapItems(parameterValue).flatMap((item) => {
+      const name = asOptionalString(item);
+      return name && advancedParameterNames.has(name as AdvancedModelParameterName)
+        ? [name as AdvancedModelParameterName]
+        : [];
+    });
+  };
+
   const normalizeModels = (modelValue: unknown, fallbackProvider: LlmProviderId): LlmModelDescriptor[] => (
     unwrapItems(modelValue).flatMap((item) => {
     if (!isRecord(item)) return [];
@@ -1798,6 +2336,9 @@ export function normalizeLlmCatalog(value: unknown): LlmCatalog {
         read(item, 'feedbackIssueUrl', 'feedback_issue_url'),
         'https://github.com/Mike-Zhuang/EventShock/issues/new?template=llm-provider-feedback.yml',
       ),
+      supportedAdvancedParameters: normalizeAdvancedParameterNames(
+        read(item, 'supportedAdvancedParameters', 'supported_advanced_parameters'),
+      ),
       models: normalizeModels(read(item, 'models'), id),
     }];
   });
@@ -1824,6 +2365,9 @@ export function normalizeLlmCatalog(value: unknown): LlmCatalog {
       feedbackIssueUrl: asString(
         read(value, 'feedbackIssueUrl', 'feedback_issue_url'),
         'https://github.com/Mike-Zhuang/EventShock/issues/new?template=llm-provider-feedback.yml',
+      ),
+      supportedAdvancedParameters: normalizeAdvancedParameterNames(
+        read(value, 'supportedAdvancedParameters', 'supported_advanced_parameters'),
       ),
       models: normalizeModels(read(value, 'models'), legacyProvider),
     });
@@ -1865,12 +2409,23 @@ export function normalizePromptRegistry(value: unknown): PromptRegistryItem[] {
 
 export function normalizeLlmConfig(value: unknown): LlmConfigView {
   if (!isRecord(value)) throw new TypeError('Model configuration response is not an object.');
+  const advancedValue = read(value, 'advancedParameters', 'advanced_parameters');
+  const advancedRecord = isRecord(advancedValue) ? advancedValue : {};
+  const advancedParameters: AdvancedModelParameters = {
+    temperature: asNumber(read(advancedRecord, 'temperature')),
+    topP: asNumber(read(advancedRecord, 'topP', 'top_p')),
+    presencePenalty: asNumber(read(advancedRecord, 'presencePenalty', 'presence_penalty')),
+    frequencyPenalty: asNumber(read(advancedRecord, 'frequencyPenalty', 'frequency_penalty')),
+    seed: asNumber(read(advancedRecord, 'seed')),
+    timeoutSeconds: asNumber(read(advancedRecord, 'timeoutSeconds', 'timeout_seconds')),
+  };
   return {
     configured: asBoolean(read(value, 'configured')) ?? false,
     provider: asLlmProviderId(read(value, 'provider')),
     model: asOptionalString(read(value, 'model')),
     thinkingEnabled: asBoolean(read(value, 'thinkingEnabled', 'thinking_enabled')),
     maxTokens: asNumber(read(value, 'maxTokens', 'max_tokens')),
+    advancedParameters,
     credentialHint: asOptionalString(read(value, 'credentialHint', 'credential_hint')),
     expiresAt: asOptionalString(read(value, 'expiresAt', 'expires_at')),
   };

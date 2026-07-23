@@ -27,10 +27,35 @@ from backend.app.auth.bootstrap_admin import bootstrapAdmin
 from backend.app.auth.mailer import _message
 from backend.app.auth.models import AuthLocale
 from backend.app.database import Database
+from backend.app.legal import (
+    CURRENT_TERMS_VERSION,
+    currentDocumentHashes,
+    legalDocument,
+    validateCurrentAcceptance,
+)
 
 AUTH_SECRET = "test-auth-secret-with-at-least-thirty-two-bytes"
 USER_PASSWORD = "Correct horse battery staple!"
 NEW_PASSWORD = "A different long password!"
+EXPECTED_LEGAL_DOCUMENT_HASHES = {
+    "2026-07-22-v1": {
+        "en": "cd08923873839602425d9343553decb727a7b616e2b6507e64c216cf4326a192",
+        "zh-CN": "1558c4bec885da6ad1c3a44b7bde504f883b760004112f7fcc30c317678d467a",
+    }
+}
+
+
+def _legalArguments(locale: AuthLocale = "en") -> dict[str, object]:
+    document = legalDocument(locale)
+    return {
+        "legalVersion": document.version,
+        "legalDocumentHash": document.documentHash,
+        "legalLocale": locale,
+        "acceptedTerms": True,
+        "acknowledgedPrivacy": True,
+        "confirmedMinimumAge": True,
+        "acknowledgedAiBoundary": True,
+    }
 
 
 @dataclass
@@ -84,9 +109,40 @@ def _register(service: AuthService, mailer: FakeMailer, email: str) -> str:
             challengeId=dispatch.challengeId,
             code=mailer.messages[-1].code,
             password=USER_PASSWORD,
+            **_legalArguments(),
         )
     )
     return user.id
+
+
+def test_legal_document_content_change_requires_intentional_version_snapshot() -> None:
+    """正文变更不能在不更新版本快照的情况下悄然进入生产。"""
+
+    assert CURRENT_TERMS_VERSION in EXPECTED_LEGAL_DOCUMENT_HASHES
+    assert currentDocumentHashes() == EXPECTED_LEGAL_DOCUMENT_HASHES[CURRENT_TERMS_VERSION]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    ["acceptedTerms", "confirmedMinimumAge", "acknowledgedAiBoundary"],
+)
+def test_legal_consent_validation_rejects_false_statements(statement: str) -> None:
+    """任一必需声明显式为 false 时都不构成有效同意，必须整体拒绝。"""
+
+    document = legalDocument("en")
+    statements = {
+        "acceptedTerms": True,
+        "confirmedMinimumAge": True,
+        "acknowledgedAiBoundary": True,
+        statement: False,
+    }
+    with pytest.raises(ValueError, match="must be affirmed"):
+        validateCurrentAcceptance(
+            version=document.version,
+            documentHash=document.documentHash,
+            locale="en",
+            **statements,
+        )
 
 
 def test_scrypt_password_hash_is_versioned_salted_and_non_reversible() -> None:
@@ -120,6 +176,7 @@ def test_registration_login_csrf_logout_and_password_reset_are_isolated(
                 challengeId=dispatch.challengeId,
                 code="000000",
                 password=USER_PASSWORD,
+                **_legalArguments(),
             )
         )
 
@@ -184,6 +241,91 @@ def test_registration_login_csrf_logout_and_password_reset_are_isolated(
     assert repository.getUserByEmail(normalizeEmail(email)) is not None
 
 
+def test_reaccepting_same_version_repairs_stale_document_hash(tmp_path: Path) -> None:
+    database, repository, service, mailer, _now = _authFixture(tmp_path)
+    userId = _register(service, mailer, "reaccept@example.com")
+    issued = service.login(email="reaccept@example.com", password=USER_PASSWORD)
+    currentDocument = legalDocument("en")
+
+    with database.writeLock, database.connection() as connection:
+        initialEventRows = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT *
+                FROM auth_legal_acceptance_events
+                WHERE user_id=? AND document_version=?
+                ORDER BY id
+                """,
+                (userId, currentDocument.version),
+            ).fetchall()
+        ]
+        assert len(initialEventRows) == 3
+        assert {row["acceptance_method"] for row in initialEventRows} == {"REGISTRATION"}
+        connection.execute(
+            """
+            UPDATE auth_legal_acceptances
+            SET document_sha256=?
+            WHERE user_id=? AND document_version=?
+            """,
+            ("0" * 64, userId, currentDocument.version),
+        )
+
+    assert repository.getLegalAcceptanceStatus(userId).required is True
+    accepted = service.acceptCurrentLegalDocuments(
+        service.authenticate(
+            token=issued.token,
+            csrfToken=issued.csrfToken,
+            requireCsrf=True,
+        ),
+        version=currentDocument.version,
+        documentHash=currentDocument.documentHash,
+        locale="en",
+        acceptedTerms=True,
+        acknowledgedPrivacy=True,
+        confirmedMinimumAge=True,
+        acknowledgedAiBoundary=True,
+    )
+
+    assert accepted.required is False
+    with database.connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT document_sha256, acceptance_method
+            FROM auth_legal_acceptances
+            WHERE user_id=? AND document_version=?
+            """,
+            (userId, currentDocument.version),
+        ).fetchall()
+        eventRows = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT *
+                FROM auth_legal_acceptance_events
+                WHERE user_id=? AND document_version=?
+                ORDER BY id
+                """,
+                (userId, currentDocument.version),
+            ).fetchall()
+        ]
+    assert {row["document_sha256"] for row in rows} == {currentDocument.documentHash}
+    assert {row["acceptance_method"] for row in rows} == {"REACCEPTANCE"}
+    assert len(eventRows) == 6
+
+    # 当前状态可以修复，但已产生的电子同意证据必须逐条原样保留。
+    initialEventIds = {row["id"] for row in initialEventRows}
+    preservedInitialEvents = [row for row in eventRows if row["id"] in initialEventIds]
+    assert preservedInitialEvents == initialEventRows
+    reacceptanceEvents = [row for row in eventRows if row["id"] not in initialEventIds]
+    assert len(reacceptanceEvents) == 3
+    assert {row["acceptance_method"] for row in reacceptanceEvents} == {"REACCEPTANCE"}
+    assert {row["document_sha256"] for row in reacceptanceEvents} == {currentDocument.documentHash}
+    assert {row["acceptance_state_id"] for row in reacceptanceEvents} == {
+        row["acceptance_state_id"] for row in initialEventRows
+    }
+
+
 def test_challenge_is_one_time_bounded_and_expires(tmp_path: Path) -> None:
     _database, _repository, service, mailer, now = _authFixture(tmp_path)
     dispatch = asyncio.run(
@@ -198,6 +340,7 @@ def test_challenge_is_one_time_bounded_and_expires(tmp_path: Path) -> None:
                     challengeId=dispatch.challengeId,
                     code="999999" if code != "999999" else "888888",
                     password=USER_PASSWORD,
+                    **_legalArguments(),
                 )
             )
     with pytest.raises(ChallengeVerificationError):
@@ -206,6 +349,7 @@ def test_challenge_is_one_time_bounded_and_expires(tmp_path: Path) -> None:
                 challengeId=dispatch.challengeId,
                 code=code,
                 password=USER_PASSWORD,
+                **_legalArguments(),
             )
         )
 
@@ -221,6 +365,7 @@ def test_challenge_is_one_time_bounded_and_expires(tmp_path: Path) -> None:
                 challengeId=expiring.challengeId,
                 code=expiringCode,
                 password=USER_PASSWORD,
+                **_legalArguments(),
             )
         )
 

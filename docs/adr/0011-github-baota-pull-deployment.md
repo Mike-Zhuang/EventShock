@@ -10,7 +10,7 @@ EventShock 部署在一台资源有限的自有服务器上，并要求更新任
 
 ## 决策
 
-正常发布采用 GitHub 拉取式链路：开发者在个人功能分支完成测试和构建，将源码与受 Git 跟踪的 `frontend/dist` 一起 commit、push；服务器当前只轮询 `codex/self-hosted-mvp`。目标提交的 `Backend / Python 3.12.13`、`Frontend / Node 22` 与 `Production container` 三项 GitHub Check Run 全部成功后，服务器才允许部署。功能通过 Pull Request 合入稳定分支后，可以在人工核对快进关系和稳定分支 CI 后修改服务器配置，不直接向 `main` 推送。
+正常发布采用 GitHub 拉取式链路：开发者在个人功能分支完成测试和构建，将源码与受 Git 跟踪的 `frontend/dist` 一起 commit、push，并通过 Pull Request 合入稳定分支 `main`；服务器只轮询 `main`。目标提交的 `Backend / Python 3.12.13`、`Frontend / Node 22` 与 `Production container` 三项 GitHub Check Run 全部成功后，服务器才允许部署。开发者不直接向 `main` 推送，也不得绕过 CI、健康检查或回滚门禁。
 
 宝塔通过自身 `crontab().AddCrontab` 注册名为 `EventShock GitHub 自动同步部署` 的原生 Shell 任务，每 10 分钟调用 `/opt/eventshock/bin/baota-eventshock-task.sh`。包装器把相同输出同时交给宝塔原生任务日志和 `/opt/eventshock/shared/logs/github-sync.log`，并保留同步脚本的真实退出码。任务不直接写 `/etc/crontab`，避免面板不可见的重复调度。
 

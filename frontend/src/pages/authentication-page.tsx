@@ -16,8 +16,9 @@ import {
   UsersThree,
 } from '@phosphor-icons/react';
 import { useEffect, useState, type FormEvent } from 'react';
-import { ApiError } from '../api/client';
-import type { VerificationPurpose } from '../api/types';
+import { api, ApiError } from '../api/client';
+import type { LegalDocument, VerificationPurpose } from '../api/types';
+import { LegalDocumentContent } from '../components/legal-document-content';
 import {
   GITHUB_ISSUE_CHOOSER_URL,
   GITHUB_REPOSITORY_URL,
@@ -59,6 +60,35 @@ export function AuthenticationPage({
   const [notice, setNotice] = useState<string>();
   const [cooldown, setCooldown] = useState(0);
   const [expiresInSeconds, setExpiresInSeconds] = useState(0);
+  const [legalDocument, setLegalDocument] = useState<LegalDocument>();
+  const [legalLoading, setLegalLoading] = useState(false);
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
+  const [acknowledgedPrivacy, setAcknowledgedPrivacy] = useState(false);
+  const [acknowledgedAgeAndAi, setAcknowledgedAgeAndAi] = useState(false);
+  const [legalReloadKey, setLegalReloadKey] = useState(0);
+
+  useEffect(() => {
+    if (mode !== 'register') return;
+    let active = true;
+    setLegalLoading(true);
+    setLegalDocument(undefined);
+    setAcceptedTerms(false);
+    setAcknowledgedPrivacy(false);
+    setAcknowledgedAgeAndAi(false);
+    void api.getLegalDocument(language)
+      .then((document) => {
+        if (active) setLegalDocument(document);
+      })
+      .catch(() => {
+        if (active) setFormError(t('legal.loadFailed'));
+      })
+      .finally(() => {
+        if (active) setLegalLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [language, legalReloadKey, mode, t]);
 
   useEffect(() => {
     if (cooldown <= 0) return;
@@ -80,10 +110,20 @@ export function AuthenticationPage({
     setExpiresInSeconds(0);
   };
 
+  const changeLanguage = (nextLanguage: 'en' | 'zh-CN') => {
+    if (nextLanguage !== language && mode === 'register' && stage === 'code') {
+      // 条款摘要与界面语言绑定；切换语言后必须回到明示同意步骤，不能沿用旧勾选状态。
+      setStage('details');
+      setNotice(undefined);
+    }
+    setLanguage(nextLanguage);
+  };
+
   const safeErrorMessage = (error: unknown): string => {
     if (!(error instanceof ApiError)) return t('auth.errorGeneric');
     if (error.status === 401 || error.code === 'INVALID_CREDENTIALS') return t('auth.errorCredentials');
     if (error.status === 429 || error.code === 'RATE_LIMITED') return t('auth.errorRateLimit');
+    if (error.code === 'LEGAL_DOCUMENT_VERSION_STALE') return t('legal.stale');
     if (error.status === 409 || error.code === 'EMAIL_ALREADY_REGISTERED') return t('auth.errorAccountExists');
     if (error.code?.includes('VERIFICATION') || error.code?.includes('CODE')) return t('auth.errorCode');
     return t('auth.errorGeneric');
@@ -110,6 +150,13 @@ export function AuthenticationPage({
   const requestCode = async (purpose: VerificationPurpose) => {
     if (!validateEmail()) return;
     if (purpose === 'REGISTER' && !validatePassword()) return;
+    if (
+      purpose === 'REGISTER'
+      && (!legalDocument || !acceptedTerms || !acknowledgedPrivacy || !acknowledgedAgeAndAi)
+    ) {
+      setFormError(t('legal.acceptAll'));
+      return;
+    }
     setBusy(true);
     setFormError(undefined);
     setNotice(undefined);
@@ -145,6 +192,10 @@ export function AuthenticationPage({
 
   const submitRegistration = async (event: FormEvent) => {
     event.preventDefault();
+    if (!legalDocument || !acceptedTerms || !acknowledgedPrivacy || !acknowledgedAgeAndAi) {
+      setFormError(t('legal.acceptAll'));
+      return;
+    }
     if (!/^\d{6}$/.test(verificationCode)) {
       setFormError(t('auth.errorCode'));
       return;
@@ -152,9 +203,21 @@ export function AuthenticationPage({
     setBusy(true);
     setFormError(undefined);
     try {
-      await register(email.trim(), password, verificationCode, language);
+      await register(email.trim(), password, verificationCode, {
+        language,
+        version: legalDocument.version,
+        documentHash: legalDocument.documentHash,
+        acceptedTerms,
+        acknowledgedPrivacy,
+        confirmedMinimumAge: acknowledgedAgeAndAi,
+        acknowledgedAiBoundary: acknowledgedAgeAndAi,
+      });
     } catch (error) {
       setFormError(safeErrorMessage(error));
+      if (error instanceof ApiError && error.code === 'LEGAL_DOCUMENT_VERSION_STALE') {
+        setStage('details');
+        setLegalReloadKey((current) => current + 1);
+      }
     } finally {
       setBusy(false);
     }
@@ -236,8 +299,8 @@ export function AuthenticationPage({
         </div>
         <div className="topbar__controls">
           <div className="language-toggle" role="group" aria-label={t('app.language')}>
-            <button type="button" className={language === 'en' ? 'is-active' : ''} onClick={() => setLanguage('en')}>EN</button>
-            <button type="button" className={language === 'zh-CN' ? 'is-active' : ''} onClick={() => setLanguage('zh-CN')}>中文</button>
+            <button type="button" className={language === 'en' ? 'is-active' : ''} onClick={() => changeLanguage('en')}>EN</button>
+            <button type="button" className={language === 'zh-CN' ? 'is-active' : ''} onClick={() => changeLanguage('zh-CN')}>中文</button>
           </div>
           <button type="button" className="auth-theme-button" aria-label={isDark ? t('app.themeLight') : t('app.themeDark')} onClick={onToggleTheme}>
             {isDark ? <Sun size={19} /> : <Moon size={19} />}
@@ -300,7 +363,71 @@ export function AuthenticationPage({
             <form className="auth-form" onSubmit={(event) => { event.preventDefault(); void requestCode('REGISTER'); }}>
               <TextInput id="register-email" type="email" labelText={t('auth.email')} value={email} autoComplete="email" required onChange={(event) => setEmail(event.target.value)} />
               {renderPasswordFields()}
-              <Button type="submit" renderIcon={EnvelopeSimple} disabled={busy}>{busy ? t('auth.sendingCode') : t('auth.sendCode')}</Button>
+              <section className="registration-consent" aria-labelledby="registration-consent-title">
+                <div className="registration-consent__heading">
+                  <h3 id="registration-consent-title">{t('legal.registrationTitle')}</h3>
+                  {legalDocument ? (
+                    <span>{t('legal.version', { value: legalDocument.version })}</span>
+                  ) : null}
+                </div>
+                {legalLoading ? <p className="registration-consent__status">{t('legal.loading')}</p> : null}
+                {!legalLoading && !legalDocument ? (
+                  <Button
+                    type="button"
+                    kind="ghost"
+                    size="sm"
+                    onClick={() => setLegalReloadKey((current) => current + 1)}
+                  >
+                    {t('common.retry')}
+                  </Button>
+                ) : null}
+                {legalDocument ? (
+                  <>
+                    <details className="registration-consent__document">
+                      <summary>{t('legal.readDocument')}</summary>
+                      <LegalDocumentContent document={legalDocument} compact />
+                    </details>
+                    <label className="consent-control">
+                      <input
+                        type="checkbox"
+                        checked={acceptedTerms}
+                        onChange={(event) => setAcceptedTerms(event.target.checked)}
+                      />
+                      <span>{legalDocument.acceptanceStatements[0] ?? t('legal.acceptTerms')}</span>
+                    </label>
+                    <label className="consent-control">
+                      <input
+                        type="checkbox"
+                        checked={acknowledgedPrivacy}
+                        onChange={(event) => setAcknowledgedPrivacy(event.target.checked)}
+                      />
+                      <span>{t('legal.acceptPrivacy')}</span>
+                    </label>
+                    <label className="consent-control">
+                      <input
+                        type="checkbox"
+                        checked={acknowledgedAgeAndAi}
+                        onChange={(event) => setAcknowledgedAgeAndAi(event.target.checked)}
+                      />
+                      <span>{t('legal.acceptAgeAndAi', { value: legalDocument.minimumAge })}</span>
+                    </label>
+                  </>
+                ) : null}
+              </section>
+              <Button
+                type="submit"
+                renderIcon={EnvelopeSimple}
+                disabled={
+                  busy
+                  || legalLoading
+                  || !legalDocument
+                  || !acceptedTerms
+                  || !acknowledgedPrivacy
+                  || !acknowledgedAgeAndAi
+                }
+              >
+                {busy ? t('auth.sendingCode') : t('auth.sendCode')}
+              </Button>
               <button type="button" className="auth-back-link" onClick={() => switchMode('login')}><ArrowLeft size={16} />{t('auth.backToLogin')}</button>
             </form>
           ) : null}

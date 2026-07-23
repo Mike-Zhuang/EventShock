@@ -34,7 +34,9 @@ EventShock Lab 是一个可复现的事件驱动市场反事实实验室。它�
 - 邮箱注册、双语验证码、登录、退出与密码重置；研究数据按已验证账号永久归属，管理员可在独立面板查看用户状态、实验数量及经过隐私最小化的操作记录。
 - SpaceX 2026 IPO 与 Nasdaq-100 快速纳入旗舰包：真实事件事实、官方来源链接和 PIT 时间边界，与合成行情及机制假设严格分层。
 - CrowdStrike 2024 故障与 GameStop 2021 社交级联历史案例包：均可审核、冻结和运行，但状态明确为“案例可用、真实历史研究待执行”，不能冒充已校准验证。
-- Event Pack 文本/文件导入、确定性或外部模型结构化候选主张抽取、人工审核、双语编辑、拒绝和冻结；所有上传正文与来源元数据在抽取或调用外部模型前先经过确定性内容安全扫描，高风险内容直接阻断，可复核内容必须人工确认并脱敏，安全摘要不包含命中原文且上传正文不持久化。
+- 按账号隔离的 Event Pack Factory：支持批量粘贴多份来源，也支持用智谱 Web Search 发现候选网页、经服务端 Reader 读取完整正文、逐份人工审核，再物化为待审核 Event Pack。搜索摘要只用于发现，不能支撑主张或冻结。
+- 专家模式保留完整手动参数；AI 引导模式把事件目标、来源、主张、事件包、单一干预和运行前检查拆成有界阶段并按账号保存。注册后的推荐只依据用户自报的经验和协助偏好，不考试、不评级，用户仍可自行选择模式。
+- Event Pack 文本/文件导入、确定性或外部模型结构化候选主张抽取、人工审核、双语编辑、拒绝和冻结；所有上传正文与来源元数据在抽取或调用外部模型前先经过确定性内容安全扫描，高风险内容直接阻断，可复核内容必须人工确认并脱敏，安全摘要不包含命中原文。
 - 七类单变量干预：做市商容量、社交放大、止损敏感度、澄清延迟、流动性深度、被动资金流和信息延迟。
 - Scenario 创建、保存、克隆、冻结与 diff；市场、人口、网络、LLM、结果指标和停止规则均有类型化配置与启动前检查。
 - 后台实验队列、SSE 状态更新、真实进度、取消、历史记录，以及按完整 matched pair 持久化的校验断点；服务重启后可从 `FAILED_RETRYABLE` 重新启动并复用已验证的完整配对与冻结认知序列，不复用半完成配对。
@@ -54,7 +56,9 @@ EventShock Lab 是一个可复现的事件驱动市场反事实实验室。它�
 
 默认运行仍是无需密钥、可确定性重放的 `RULE_ONLY`。用户可在当前登录会话中临时选择供应商、填写对应 API Key 并启用 `HYBRID_LLM`；默认选择仍为智谱 `glm-5.2`。Key 按登录会话隔离，只保存在服务器进程内存中，退出、过期、切换供应商或服务重启后必须重新填写，且不写入账号、SQLite、浏览器持久存储、日志或导出。LLM 只能提出候选事实或有限的信念与行动偏好，不能设置价格、绕过风险控制或直接提交订单，最终订单必须经过固定策略、账本风控与确定性撮合层。若部分结构化输出失败并按用户策略安全回退，结果会明确标记为 `HYBRID_LLM_PARTIAL_RULE_FALLBACK`，逐条保留修复、回退与失败原因；关闭 `fallbackToRules` 后任何规则回退都会使实验失败关闭。
 
-混合模式按 `decisionIntervalSteps` 和 `callBudget` 生成时点安全的认知决策序列，并将同一冻结序列复用于基准/干预及 matched seeds。模型能看到届时已知的证据、受限社交摘要和自身上轮记忆；确定性策略会响应当前模拟订单簿，但模型不会在每个随机种子中重新观察内生价格。AI 页面同时提供不计费的 code-grader 自检和显式触发的已配置真实模型 golden/攻击集，两者在结果中严格区分。除智谱外的供应商当前标记为仅通过自动化契约测试的社区预览；供应商能力、价格口径、真实接入验证状态、结果解释助手、固定端点与隐私边界见 [AI 供应商接入说明](usage_documents/ai-providers.md)。
+混合模式按 `decisionIntervalSteps` 和 `callBudget` 生成时点安全的认知决策序列，并将同一冻结序列复用于基准/干预及 matched seeds。模型能看到届时已知的证据、受限社交摘要和自身上轮记忆；确定性策略会响应当前模拟订单簿，但模型不会在每个随机种子中重新观察内生价格。高级配置只开放供应商明确支持的 `temperature`、`topP`、`presencePenalty`、`frequencyPenalty`、`seed` 与 `timeoutSeconds` 子集，并执行服务端范围校验；不允许自定义 Base URL、请求头、工具、系统提示词或任意 JSON 请求体。
+
+系统提示词在本源码可用仓库中可见，因此安全设计不依赖“藏住提示词”。外部来源和历史对话只会进入明确分隔的不可信数据区；模型结果还要经过确定性泄漏/注入检测、严格 Schema、证据 ID、时间和动作白名单校验，失败时只有限修复并默认关闭。该组合只能降低、不能消除提示词注入风险，人工审核仍是必要门禁。AI 页面同时提供不计费的 code-grader 自检和显式触发的已配置真实模型 golden/攻击集，两者在结果中严格区分。除智谱外的供应商当前标记为仅通过自动化契约测试的社区预览；供应商能力、价格口径、真实接入验证状态、结果解释助手、固定端点与隐私边界见 [AI 供应商接入说明](usage_documents/ai-providers.md)。Factory 的存储、删除和人工审核流程见 [Event Pack Factory 与 AI 引导说明](usage_documents/event-pack-factory.md)。
 
 ## 架构
 
@@ -63,7 +67,7 @@ Browser
   -> Caddy (HTTPS, security headers, compression)
   -> BaoTa Nginx (private :18080 reverse proxy and real traffic accounting)
   -> EventShock app (FastAPI API + built React/TypeScript/Carbon assets)
-       -> SQLite account ownership, scenario, audit, experiment, validated AI chat and Study state
+       -> SQLite account ownership, Factory, guided workflow, scenario, audit, experiment, validated AI chat and Study state
        -> SMTP SSL bilingual verification mail (registration and password reset only)
        -> allowlisted multi-provider structured cognition gateways (optional, BYOK)
        -> deterministic event queue, information network, ledger and order-book core
@@ -187,7 +191,7 @@ Caddyfile                      自动 HTTPS 与反向代理
 requirements*.lock             已验证的生产与开发 Python 依赖锁
 ```
 
-完整产品、科学、验证、安全和课程交付蓝图见 [EventShock_Lab_End_to_End_Blueprint_ENGIN170E_CN.md](EventShock_Lab_End_to_End_Blueprint_ENGIN170E_CN.md)。
+完整产品、科学、验证、安全和课程交付蓝图见 [EventShock_Lab_End_to_End_Blueprint_ENGIN170E_CN.md](EventShock_Lab_End_to_End_Blueprint_ENGIN170E_CN.md)。多来源事件包构建、智谱 Search/Reader、原文保留/删除和引导模式见 [Event Pack Factory 与 AI 引导说明](usage_documents/event-pack-factory.md)。
 
 ## 协作规范
 
@@ -204,7 +208,8 @@ requirements*.lock             已验证的生产与开发 Python 依赖锁
 - 当前模型是单标的简化现货订单簿，包含受限借券、保证金和强平代理，但不包含完整期权市场、跨场所路由、清算会员制度或完整交易所规则。
 - 配对差异只描述所选模型假设下的内部机制，不构成现实世界因果效应。
 - 10 个 seeds 仅适合课程 Demo；界面会显示区间、有效样本数和限制，不能把单条路径当作统计结论。
-- 生产环境只收集账号访问所必需的邮箱地址，不收集姓名、身份证件、支付信息、券商凭据、IP 行为画像或与功能无关的私人通信；管理员才能查看邮箱与最小化活动摘要。用户主动提交给结果解释助手且通过安全校验的最终问答会保存到当前账号，供跨浏览器恢复和删除，因此不得在问题中输入秘密或个人身份信息；删除会移除问答正文，仅保留不含正文的会话标识哈希以阻止旧请求复活。密码采用带随机盐的 scrypt 摘要，验证码和会话令牌只保存不可逆摘要，任何供应商 API Key 都不进入账号数据库。上传来源的完整原文不持久化，但用于人工审核的候选主张片段会保存到当前账号。确定性扫描器不是反病毒沙箱、完整附件解析器或完整隐私合规系统，用户仍不得上传不可信二进制、受监管个人数据或无权发送给第三方模型的材料。
+- 生产环境只收集账号访问所必需的邮箱地址，不收集姓名、身份证件、支付信息、券商凭据、IP 行为画像或与功能无关的私人通信；管理员才能查看邮箱与最小化活动摘要。用户主动提交给结果解释助手且通过安全校验的最终问答会保存到当前账号，供跨浏览器恢复和删除，因此不得在问题中输入秘密或个人身份信息；删除会移除问答正文，仅保留不含正文的会话标识哈希以阻止旧请求复活。密码采用带随机盐的 scrypt 摘要，验证码和会话令牌只保存不可逆摘要，任何供应商 API Key 都不进入账号数据库。
+- Event Pack Factory 会把 `PASTE` 与 Reader 来源正文保存到按账号隔离的内部 SQLite payload 表，并从最近一次实质修改起暂存 7 天；普通来源/快照接口、日志、审计详情和导出不返回原文，owner 只能通过 no-store 专用接口按需展开。修订正文会创建新 revision、重新安全扫描并把审核重置为 `PENDING`。拒绝来源或删除/到期清理构建会删除对应 Factory 数据并尝试截断 SQLite WAL，但不会删除已经物化出的 Event Pack。Search、Reader 和物化使用持久化的 `clientRequestId + payload hash` 幂等边界，成功请求可恢复且不会重复调度。搜索摘要仍只保存为发现元数据，必须先批准候选记录、由 Reader 获取完整 HTTPS 正文，再单独审核所得证据来源。用户只能提交自己有权保存并发送给所选供应商的内容。确定性扫描器不是反病毒沙箱、完整附件解析器或完整隐私合规系统。
 
 ## 许可证
 

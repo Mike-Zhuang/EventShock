@@ -10,7 +10,11 @@ import {
   normalizeEventPack,
   normalizeExperiment,
   normalizeGovernanceInventory,
+  normalizeLegalAcceptance,
+  normalizeLegalDocument,
   normalizeLlmCatalog,
+  normalizeLlmConfig,
+  normalizePreferences,
   normalizeRedTeamRegistry,
   normalizeReleaseGate,
   normalizeResults,
@@ -62,6 +66,7 @@ describe('API normalizers', () => {
         structuredOutputNote: 'Strict JSON Schema.',
         integrationValidationStatus: 'CONTRACT_TESTED_COMMUNITY_PREVIEW',
         feedbackIssueUrl: 'https://github.com/Mike-Zhuang/EventShock/issues/new?template=llm-provider-feedback.yml',
+        supportedAdvancedParameters: ['temperature', 'timeoutSeconds', 'unknownParameter'],
         models: [{
           provider: 'openai', id: 'gpt-5.2', name: 'GPT-5.2', contextTokens: 400_000,
           maxOutputTokens: 128_000, supportsThinking: true, supportsFunctionCalling: true,
@@ -93,6 +98,35 @@ describe('API normalizers', () => {
     });
     expect(catalog.providers[1].integrationValidationStatus)
       .toBe('CONTRACT_TESTED_COMMUNITY_PREVIEW');
+    expect(catalog.providers[1].supportedAdvancedParameters)
+      .toEqual(['temperature', 'timeoutSeconds']);
+  });
+
+  it('归一化会话级高级参数，兼容 snake_case 后端字段', () => {
+    expect(normalizeLlmConfig({
+      configured: true,
+      provider: 'zhipu',
+      model: 'glm-5.2',
+      thinking_enabled: true,
+      max_tokens: 4096,
+      advanced_parameters: {
+        temperature: 0.2,
+        top_p: 0.9,
+        timeout_seconds: 60,
+      },
+      credential_hint: '••••test',
+    })).toMatchObject({
+      configured: true,
+      provider: 'zhipu',
+      model: 'glm-5.2',
+      thinkingEnabled: true,
+      maxTokens: 4096,
+      advancedParameters: {
+        temperature: 0.2,
+        topP: 0.9,
+        timeoutSeconds: 60,
+      },
+    });
   });
 
   it('把旧版智谱单供应商目录提升为新的 providers 结构', () => {
@@ -158,7 +192,28 @@ describe('API normalizers', () => {
         email_verified_at: '2026-07-20T00:00:00Z',
         created_at: '2026-07-20T00:00:00Z',
       },
-    })).toMatchObject({ authenticated: true, csrfToken: 'csrf-test', user: { role: 'ADMIN', emailVerified: true } });
+      legal_acceptance: {
+        required: true,
+        version: '2026-07-22-v1',
+      },
+      preferences: {
+        onboarding_required: false,
+        experience_level: 'ADVANCED',
+        workspace_mode: 'EXPERT',
+        assistance_preference: 'DIRECT_CONTROL',
+        first_goal: 'DESIGN_FULL_EXPERIMENT',
+      },
+    })).toMatchObject({
+      authenticated: true,
+      csrfToken: 'csrf-test',
+      user: { role: 'ADMIN', emailVerified: true },
+      legalAcceptance: { required: true, version: '2026-07-22-v1' },
+      preferences: {
+        onboardingRequired: false,
+        experienceLevel: 'ADVANCED',
+        workspaceMode: 'EXPERT',
+      },
+    });
     expect(normalizeVerificationCodeReceipt({ retry_after_seconds: 45, expires_in_seconds: 600 }))
       .toEqual({ accepted: true, retryAfterSeconds: 45, expiresInSeconds: 600 });
     expect(normalizeAdminUserPage({
@@ -181,6 +236,52 @@ describe('API normalizers', () => {
         created_at: '2026-07-20T01:00:00Z',
       }],
     })).toMatchObject({ total: 1, items: [{ entityId: 'exp-1', outcome: 'FAILED' }] });
+  });
+
+  it('normalizes versioned legal documents and onboarding responses without discarding audit fields', () => {
+    expect(normalizeLegalDocument({
+      schema_version: '1.0.0',
+      version: '2026-07-22-v1',
+      effective_date: '2026-07-22',
+      locale: 'zh-CN',
+      title: '使用条款与隐私告知',
+      summary: '完整阅读后继续。',
+      operator_label: 'EventShock Lab 项目运营方',
+      minimum_age: 18,
+      sections: [{ id: 'scope', title: '1. 范围', body: ['正文。'] }],
+      acceptance_statements: ['同意条款。', '确认年龄。', '理解 AI 边界。'],
+      legal_review_notice: '实际运营前应由律师审阅。',
+      document_hash: 'b'.repeat(64),
+    })).toMatchObject({
+      locale: 'zh-CN',
+      version: '2026-07-22-v1',
+      minimumAge: 18,
+      sections: [{ id: 'scope', body: ['正文。'] }],
+      documentHash: 'b'.repeat(64),
+    });
+    expect(normalizeLegalAcceptance({
+      required: false,
+      version: '2026-07-22-v1',
+      accepted_at: '2026-07-22T10:00:00Z',
+    })).toEqual({
+      required: false,
+      version: '2026-07-22-v1',
+      acceptedAt: '2026-07-22T10:00:00Z',
+    });
+    expect(normalizePreferences({
+      onboarding_required: false,
+      experience_level: 'NEW',
+      workspace_mode: 'GUIDED',
+      assistance_preference: 'STEP_BY_STEP',
+      first_goal: 'RESEARCH_NEW_EVENT',
+      onboarding_version: '2026-07-22-v1',
+    })).toMatchObject({
+      onboardingRequired: false,
+      experienceLevel: 'NEW',
+      workspaceMode: 'GUIDED',
+      assistancePreference: 'STEP_BY_STEP',
+      firstGoal: 'RESEARCH_NEW_EVENT',
+    });
   });
 
   it('preserves Study validity boundaries, resource limits, and immutable run metadata', () => {

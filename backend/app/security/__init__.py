@@ -12,6 +12,11 @@ from backend.app.security.content import (
     scanEventPackContent,
     scanTextContent,
 )
+from backend.app.security.prompt_leak import (
+    PromptLeakReason,
+    PromptLeakValidator,
+    UnsafeModelOutputError,
+)
 
 __all__ = [
     "DEFAULT_OFFICIAL_HOST_ALLOWLIST",
@@ -19,7 +24,10 @@ __all__ = [
     "ContentPolicyDecision",
     "ContentScanResult",
     "FindingSeverity",
+    "PromptLeakReason",
+    "PromptLeakValidator",
     "SourceReviewLabel",
+    "UnsafeModelOutputError",
     "evaluateContentPolicy",
     "redactReviewableText",
     "scanEventPackContent",

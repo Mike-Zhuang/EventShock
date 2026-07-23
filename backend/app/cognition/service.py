@@ -21,12 +21,14 @@ from backend.app.cognition.catalog import (
     listZhipuModels,
 )
 from backend.app.cognition.config_store import (
+    CredentialNotConfiguredError,
     RuntimeProviderConfig,
     SessionConfigStore,
     SessionProviderConfigView,
 )
 from backend.app.cognition.evaluation import EvalSample, EvalSuiteResult, runEvaluationSuite
 from backend.app.cognition.gateway import (
+    AdvancedModelParameters,
     FailureCode,
     ModelGatewayError,
     ModelPolicy,
@@ -50,13 +52,16 @@ from backend.app.cognition.models import (
 from backend.app.cognition.pricing import ModelCostBudget
 from backend.app.cognition.prompts import (
     EVENT_EXTRACTION_PROMPT,
+    GUIDED_WORKFLOW_PROMPT,
     HYBRID_BELIEF_PROMPT,
+    MODEL_OUTPUT_VALIDATOR,
     PROMPT_REGISTRY,
     RESULT_INTERPRETATION_PROMPT,
     RESULT_TOOL_PLANNER_PROMPT,
     PromptSpec,
     buildBeliefUserMessage,
     buildEvidenceUserMessage,
+    buildGuidedWorkflowUserMessage,
     buildResultInterpretationUserMessage,
     buildResultPlannerUserMessage,
 )
@@ -76,6 +81,11 @@ from backend.app.cognition.streaming import (
     ModelStreamStage,
     emitModelStreamProgress,
 )
+from backend.app.guided_workflow.models import (
+    GuidedWorkflowProposal,
+    GuidedWorkflowView,
+)
+from backend.app.security import UnsafeModelOutputError
 
 SourceType = Literal["OFFICIAL", "REPORTING", "ESTIMATE", "USER_PROVIDED"]
 
@@ -84,14 +94,23 @@ class ExternalEvidenceSource(StrictFrozenModel):
     """来自上传或外部抓取的最小来源；正文始终按不可信数据处理。"""
 
     sourceId: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9._-]+$")
-    rawText: str = Field(min_length=1, max_length=50_000)
+    rawText: str = Field(min_length=1, max_length=100_000)
     sourceType: SourceType
     knownAt: datetime
+    title: str | None = Field(default=None, min_length=1, max_length=300)
+    publisher: str | None = Field(default=None, min_length=1, max_length=200)
+    url: str | None = Field(default=None, max_length=2_000)
+    publishedAt: datetime | None = None
 
     @model_validator(mode="after")
     def validateKnownAt(self) -> ExternalEvidenceSource:
         if self.knownAt.tzinfo is None or self.knownAt.utcoffset() is None:
             raise ValueError("knownAt must include a timezone")
+        if self.publishedAt is not None:
+            if self.publishedAt.tzinfo is None or self.publishedAt.utcoffset() is None:
+                raise ValueError("publishedAt must include a timezone")
+            if self.knownAt < self.publishedAt:
+                raise ValueError("knownAt must not be earlier than publishedAt")
         return self
 
 
@@ -215,6 +234,7 @@ INVALID_OUTPUT_CODES = frozenset(
         FailureCode.CONTENT_FILTERED,
         FailureCode.EVIDENCE_ID_UNKNOWN,
         FailureCode.ACTION_NOT_ALLOWED,
+        FailureCode.PROMPT_DISCLOSURE_BLOCKED,
     }
 )
 
@@ -257,6 +277,7 @@ class CognitionService:
         provider: ProviderId = DEFAULT_PROVIDER,
         thinkingEnabled: bool = False,
         maxTokens: int = 2_048,
+        advancedParameters: AdvancedModelParameters | None = None,
     ) -> SessionProviderConfigView:
         return self._configStore.setConfig(
             sessionId=sessionId,
@@ -265,6 +286,7 @@ class CognitionService:
             provider=provider,
             thinkingEnabled=thinkingEnabled,
             maxTokens=maxTokens,
+            advancedParameters=advancedParameters,
         )
 
     def getConfig(self, sessionId: str) -> SessionProviderConfigView:
@@ -277,6 +299,21 @@ class CognitionService:
         """主动移除所有已过期的内存 API 密钥，供应用生命周期定时调用。"""
 
         return self._configStore.purgeExpired()
+
+    def requireTemporaryApiKey(
+        self,
+        sessionId: str,
+        *,
+        provider: ProviderId,
+    ) -> str:
+        """仅供同进程受信服务复用临时密钥，不通过任何 HTTP 响应回显。"""
+
+        runtime = self._configStore.getRuntimeConfig(sessionId)
+        if runtime.provider != provider:
+            raise CredentialNotConfiguredError(
+                f"a temporary {provider} credential is required for this operation"
+            )
+        return runtime.apiKey
 
     @staticmethod
     def getModelCatalog(*, includeLegacy: bool = True) -> tuple[ZhipuModelDescriptor, ...]:
@@ -356,12 +393,32 @@ class CognitionService:
         sessionId: str,
         sources: tuple[ExternalEvidenceSource, ...],
         maximumClaims: int = 16,
+        requestedImpactChannels: tuple[str, ...] = (
+            "belief",
+            "liquidity",
+            "passiveFlow",
+            "stopLoss",
+        ),
     ) -> EventClaimExtractionRun:
         runtime = self._configStore.getRuntimeConfig(sessionId)
         if not 1 <= len(sources) <= 8:
             raise ValueError("sources must contain between 1 and 8 items")
         if not 1 <= maximumClaims <= 50:
             raise ValueError("maximumClaims must be between 1 and 50")
+        allowedImpactChannels = {
+            "belief",
+            "liquidity",
+            "passiveFlow",
+            "stopLoss",
+            "socialAmplification",
+            "informationLatency",
+        }
+        if (
+            not 1 <= len(requestedImpactChannels) <= 12
+            or len(requestedImpactChannels) != len(set(requestedImpactChannels))
+            or any(channel not in allowedImpactChannels for channel in requestedImpactChannels)
+        ):
+            raise ValueError("requestedImpactChannels contains an unsupported or duplicate value")
         sourceIds = [source.sourceId for source in sources]
         if len(sourceIds) != len(set(sourceIds)):
             raise ValueError("sources contain duplicate sourceId values")
@@ -370,6 +427,7 @@ class CognitionService:
         payload = {
             "source_fragments": sourcePayloads,
             "maximum_claims": maximumClaims,
+            "requested_impact_channels": requestedImpactChannels,
         }
         request = self._buildRequest(
             runtime=runtime,
@@ -387,6 +445,7 @@ class CognitionService:
                 {
                     "workflow": EVENT_EXTRACTION_PROMPT.version,
                     "maximumClaims": maximumClaims,
+                    "requestedImpactChannels": requestedImpactChannels,
                 }
             ),
             observationHash=canonicalHash(payload),
@@ -415,6 +474,16 @@ class CognitionService:
                         FailureCode.MODEL_RESPONSE_INVALID,
                         "extracted claim known_at does not match its latest cited source",
                     )
+                normalizedClaim = " ".join(claim.claim.split())
+                if not any(
+                    normalizedClaim in " ".join(sourceById[sourceId].rawText.split())
+                    for sourceId in claim.source_evidence_ids
+                ):
+                    raise ModelGatewayError(
+                        FailureCode.MODEL_RESPONSE_INVALID,
+                        "every extracted claim must be an exact source quotation after "
+                        "whitespace normalization",
+                    )
 
         result = await self._execute(
             request=request,
@@ -422,7 +491,11 @@ class CognitionService:
             policy=self._modelPolicy,
             resultValidator=validateExtraction,
         )
-        claims = self._toEventPackClaims(result.data, sourceById)
+        claims = self._toEventPackClaims(
+            result.data,
+            sourceById,
+            requestedImpactChannels=requestedImpactChannels,
+        )
         return EventClaimExtractionRun(
             extraction=result.data,
             event_pack_claims=claims,
@@ -435,6 +508,80 @@ class CognitionService:
             latency_ms=result.latencyMs,
             total_tokens=result.usage.totalTokens,
         )
+
+    async def proposeGuidedWorkflow(
+        self,
+        *,
+        sessionId: str,
+        workflow: GuidedWorkflowView,
+        latestUserMessage: str,
+        language: Literal["en", "zh-CN"],
+    ) -> GuidedWorkflowProposal:
+        """生成单阶段、待人工应用的工作流候选，不授予任何写入权限。"""
+
+        runtime = self._configStore.getRuntimeConfig(sessionId)
+        if workflow.status.value != "ACTIVE":
+            raise ValueError("guided workflow must be active")
+        if workflow.language != language:
+            # 语言变更可以从本次请求开始生效，但旧消息保持原样以保留审计历史。
+            requestedLanguage = language
+        else:
+            requestedLanguage = workflow.language
+        recentMessages = [
+            {
+                "role": message.role,
+                "stage": message.stage.value,
+                "content": message.content,
+            }
+            for message in workflow.messages[-6:]
+        ]
+        payload = {
+            "current_stage": workflow.stage.value,
+            "requested_language": requestedLanguage,
+            "current_draft": workflow.draft.model_dump(mode="json"),
+            "recent_messages": recentMessages,
+            "latest_user_message": latestUserMessage,
+        }
+        request = self._buildRequest(
+            runtime=runtime,
+            sessionId=sessionId,
+            requestId=self._newRequestId("guided"),
+            prompt=GUIDED_WORKFLOW_PROMPT,
+            userContent=buildGuidedWorkflowUserMessage(payload),
+            agentConfigHash=canonicalHash(
+                {
+                    "workflow": GUIDED_WORKFLOW_PROMPT.version,
+                    "stage": workflow.stage.value,
+                    "language": requestedLanguage,
+                }
+            ),
+            observationHash=canonicalHash(payload),
+            allowedEvidenceIds=frozenset(),
+            maxTokens=2_048,
+            streamResponse=False,
+        )
+
+        def validateProposal(modelResult: ModelResult[Any]) -> None:
+            proposal = modelResult.data
+            if not isinstance(proposal, GuidedWorkflowProposal):
+                raise ModelGatewayError(
+                    FailureCode.SCHEMA_INVALID,
+                    "gateway returned the wrong guided-workflow schema",
+                )
+            if proposal.stage is not workflow.stage:
+                raise ModelGatewayError(
+                    FailureCode.ACTION_NOT_ALLOWED,
+                    "guided proposal attempted to change the deterministic workflow stage",
+                )
+
+        result = await self._execute(
+            request=request,
+            schema=GuidedWorkflowProposal,
+            policy=self._policy(allowRuleFallback=False),
+            resultValidator=validateProposal,
+            useDecisionCache=False,
+        )
+        return result.data
 
     async def generateBeliefDecision(
         self,
@@ -746,10 +893,15 @@ class CognitionService:
         useDecisionCache: bool = True,
     ) -> ModelResult[ModelT]:
         startedAt = self._clock()
+        effectivePolicy = (
+            policy.model_copy(update={"timeout_seconds": request.samplingConfig.timeout_seconds})
+            if request.samplingConfig.timeout_seconds is not None
+            else policy
+        )
         reservation = None
         if costBudget is not None:
             try:
-                reservation = costBudget.reserve(request, policy)
+                reservation = costBudget.reserve(request, effectivePolicy)
             except ModelGatewayError as error:
                 self._recordError(error.code, self._elapsedMilliseconds(startedAt))
                 raise
@@ -759,7 +911,7 @@ class CognitionService:
         gateway = self._gatewayFactory(self._decisionCache if useDecisionCache else None)
         try:
             try:
-                result = await gateway.generateStructured(request, schema, policy)
+                result = await gateway.generateStructured(request, schema, effectivePolicy)
                 if costBudget is not None and reservation is not None:
                     activeReservation = reservation
                     reservation = None
@@ -768,7 +920,7 @@ class CognitionService:
                         result,
                         costUpperBoundUsd=float(settlement.chargedUsdUpperBound),
                     )
-                if result.fallbackUsed and not policy.allow_rule_fallback:
+                if result.fallbackUsed and not effectivePolicy.allow_rule_fallback:
                     failureCode = next(
                         (
                             code
@@ -786,6 +938,16 @@ class CognitionService:
                 # 即使注入的网关实现有缺陷，运行时仍执行最后一道确定性边界检查。
                 validateEvidenceReferences(result.data, request.allowedEvidenceIds)
                 validateAllowedAction(result.data, request.allowedActionValues)
+                try:
+                    MODEL_OUTPUT_VALIDATOR.validateModelOutput(
+                        result.data,
+                        protectedSecrets=(request.apiKey,),
+                    )
+                except UnsafeModelOutputError as error:
+                    raise ModelGatewayError(
+                        FailureCode.PROMPT_DISCLOSURE_BLOCKED,
+                        "model output failed deterministic disclosure safety validation",
+                    ) from error
                 if resultValidator is not None:
                     resultValidator(result)
             except ModelGatewayError as error:
@@ -823,6 +985,17 @@ class CognitionService:
         streamResponse: bool = False,
         streamObserver: ModelStreamObserver | None = None,
     ) -> ModelRequest:
+        advanced = runtime.advancedParameters
+        samplingRequested = any(
+            value is not None
+            for value in (
+                advanced.temperature,
+                advanced.topP,
+                advanced.presencePenalty,
+                advanced.frequencyPenalty,
+                advanced.seed,
+            )
+        )
         return ModelRequest(
             provider=runtime.provider,
             model=runtime.model,
@@ -840,8 +1013,14 @@ class CognitionService:
                 thinking_enabled=(
                     runtime.thinkingEnabled if thinkingEnabled is None else thinkingEnabled
                 ),
-                do_sample=False,
+                do_sample=samplingRequested,
                 max_tokens=min(runtime.maxTokens, maxTokens or runtime.maxTokens),
+                temperature=advanced.temperature,
+                top_p=advanced.topP,
+                presence_penalty=advanced.presencePenalty,
+                frequency_penalty=advanced.frequencyPenalty,
+                seed=advanced.seed,
+                timeout_seconds=advanced.timeoutSeconds,
             ),
             apiKey=runtime.apiKey,
             streamResponse=streamResponse,
@@ -943,6 +1122,8 @@ class CognitionService:
     def _toEventPackClaims(
         extraction: EventExtractionResult,
         sourceById: dict[str, ExternalEvidenceSource],
+        *,
+        requestedImpactChannels: tuple[str, ...],
     ) -> tuple[dict[str, Any], ...]:
         claims: list[dict[str, Any]] = []
         for index, candidate in enumerate(extraction.claims):
@@ -959,7 +1140,7 @@ class CognitionService:
                     "sourceTier": sourceTier,
                     "knownAt": candidate.known_at.isoformat(),
                     "confidence": candidate.confidence,
-                    "impactChannels": ["belief"],
+                    "impactChannels": list(requestedImpactChannels),
                     "reviewStatus": "AI_PROPOSED",
                     "isRequired": index == 0,
                     "evidenceQuote": candidate.claim[:500],
