@@ -843,7 +843,7 @@ describe('结果解释助手', () => {
     expect(finalInput?.messages.every((message) => message.content.length <= 4_000)).toBe(true);
     expect(finalInput?.messages.reduce((total, message) => total + message.content.length, 0))
       .toBeLessThanOrEqual(16_000);
-  });
+  }, 20_000);
 
   it('失败后先提示可能重复计费，再使用新的 clientRequestId 重试且不重复添加对话内容', async () => {
     let failedInput: ResultInterpretationChatInput | undefined;

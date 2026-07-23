@@ -125,5 +125,5 @@ describe('ResultsPage 结果证据导航', () => {
       experimentId: 'exp-overview',
       target: 'trace-timeline-heading',
     });
-  });
+  }, 20_000);
 });

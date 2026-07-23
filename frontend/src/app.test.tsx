@@ -257,7 +257,7 @@ describe('移动主导航', () => {
       await secondResults;
     });
     await waitFor(() => expect(document.getElementById('metrics-heading')).toHaveFocus());
-  });
+  }, 20_000);
 
   it('跨实验深链恢复失败时隐藏旧结果并显示可重试错误', async () => {
     const firstExperimentId = 'exp-restore-visible-first';
@@ -308,7 +308,7 @@ describe('移动主导航', () => {
     expect(screen.queryByRole('heading', { name: 'Primary metrics' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
     expect(window.location.hash).toContain(`experimentId=${missingExperimentId}`);
-  });
+  }, 20_000);
 
   // 该集成用例会懒加载完整 Results 页；GitHub 共享 runner 上首次模块转换可超过 Vitest 默认 5 秒。
   it('从结果页切换历史实验时不会被旧深链重新选回', async () => {
