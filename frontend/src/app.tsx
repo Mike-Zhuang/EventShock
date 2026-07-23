@@ -8,6 +8,7 @@ import {
   Cpu,
   FloppyDiskBack,
   Flask,
+  GithubLogo,
   List,
   Moon,
   PlayCircle,
@@ -35,6 +36,10 @@ import {
   LoadingPanel,
   ServiceStatus,
 } from './components/common';
+import {
+  GITHUB_ISSUE_CHOOSER_URL,
+  GITHUB_REPOSITORY_URL,
+} from './external-links';
 import { I18nProvider, useI18n } from './i18n';
 import { AuthenticationPage } from './pages/authentication-page';
 import { CaseLibraryPage } from './pages/case-library-page';
@@ -98,6 +103,29 @@ interface NavigationItem {
   id: ViewId;
   label: string;
   icon: ComponentType<{ size?: number; weight?: 'regular' | 'fill' }>;
+}
+
+function SidebarFooter({
+  disclaimer,
+  issueLabel,
+}: {
+  disclaimer: string;
+  issueLabel: string;
+}) {
+  return (
+    <footer className="sidebar__footer">
+      <p>{disclaimer}</p>
+      <a
+        className="sidebar__issue-link"
+        href={GITHUB_ISSUE_CHOOSER_URL}
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        <GithubLogo size={16} weight="duotone" aria-hidden="true" />
+        <span>{issueLabel}</span>
+      </a>
+    </footer>
+  );
 }
 
 export function parseAppRoute(hash: string): { view: ViewId; experimentId?: string; target?: RouteTargetId } {
@@ -512,9 +540,7 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
           <nav>
             <NavigationItems sections={navigation} view={view} onNavigate={navigate} />
           </nav>
-          <footer className="sidebar__footer">
-            <p>{t('footer.disclaimer')}</p>
-          </footer>
+          <SidebarFooter disclaimer={t('footer.disclaimer')} issueLabel={t('footer.issue')} />
         </aside>
 
         {mobileNavOpen ? (
@@ -538,9 +564,7 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
           <nav aria-label={t('app.primaryNavigation')}>
             <NavigationItems sections={navigation} view={view} onNavigate={navigate} />
           </nav>
-          <footer className="sidebar__footer">
-            <p>{t('footer.disclaimer')}</p>
-          </footer>
+          <SidebarFooter disclaimer={t('footer.disclaimer')} issueLabel={t('footer.issue')} />
         </aside>
 
         <main id="main-content" className="main-content" tabIndex={-1}>
@@ -561,8 +585,11 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
             <p>{t('footer.copyright')}</p>
             <p>
               {t('footer.license')}{' '}
-              <a href="https://github.com/Mike-Zhuang/EventShock" target="_blank" rel="noreferrer">
+              <a href={GITHUB_REPOSITORY_URL} target="_blank" rel="noopener noreferrer">
                 {t('footer.github')}
+              </a>{' · '}
+              <a href={GITHUB_ISSUE_CHOOSER_URL} target="_blank" rel="noopener noreferrer">
+                {t('footer.issue')}
               </a>
             </p>
             <p>{t('footer.disclaimer')}</p>

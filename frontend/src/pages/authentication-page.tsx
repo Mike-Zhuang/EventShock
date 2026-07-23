@@ -18,6 +18,10 @@ import {
 import { useEffect, useState, type FormEvent } from 'react';
 import { ApiError } from '../api/client';
 import type { VerificationPurpose } from '../api/types';
+import {
+  GITHUB_ISSUE_CHOOSER_URL,
+  GITHUB_REPOSITORY_URL,
+} from '../external-links';
 import { useI18n } from '../i18n';
 import { useAuth } from '../state/auth-context';
 
@@ -339,8 +343,11 @@ export function AuthenticationPage({
         <p>{t('footer.copyright')}</p>
         <p>
           {t('footer.license')}{' '}
-          <a href="https://github.com/Mike-Zhuang/EventShock" target="_blank" rel="noreferrer">
+          <a href={GITHUB_REPOSITORY_URL} target="_blank" rel="noopener noreferrer">
             {t('footer.github')}
+          </a>{' · '}
+          <a href={GITHUB_ISSUE_CHOOSER_URL} target="_blank" rel="noopener noreferrer">
+            {t('footer.issue')}
           </a>
         </p>
         <p>{t('footer.disclaimer')}</p>

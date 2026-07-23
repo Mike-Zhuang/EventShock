@@ -425,6 +425,10 @@ describe('移动主导航', () => {
     await waitFor(() => {
       expect(within(drawer).getByRole('button', { name: 'Case Library' })).toHaveFocus();
     });
+    expect(within(drawer).getByRole('link', { name: 'Report an issue' })).toHaveAttribute(
+      'href',
+      'https://github.com/Mike-Zhuang/EventShock/issues/new/choose',
+    );
 
     await user.click(within(drawer).getByRole('button', { name: 'Event Pack Review' }));
 
@@ -497,6 +501,14 @@ describe('移动主导航', () => {
       'href',
       'https://github.com/Mike-Zhuang/EventShock',
     );
+    screen.getAllByRole('link', { name: 'Report an issue' }).forEach((link) => {
+      expect(link).toHaveAttribute(
+        'href',
+        'https://github.com/Mike-Zhuang/EventShock/issues/new/choose',
+      );
+      expect(link).toHaveAttribute('target', '_blank');
+      expect(link).toHaveAttribute('rel', expect.stringContaining('noopener'));
+    });
   });
 
   it('简体中文首屏明确展示主要目标用户及其工作场景', async () => {
@@ -508,6 +520,7 @@ describe('移动主导航', () => {
     expect(screen.getByText('主要用户')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '市场事件风险分析人员' })).toBeInTheDocument();
     expect(screen.getByText(/资管机构、银行与交易所/)).toBeInTheDocument();
+    expect(screen.getAllByRole('link', { name: '提交问题反馈' }).length).toBeGreaterThan(0);
   });
 
   it('未登录时只渲染认证页面，不加载任何用户工作流数据', async () => {
@@ -523,6 +536,10 @@ describe('移动主导航', () => {
     expect(screen.getByRole('link', { name: 'GitHub repository' })).toHaveAttribute(
       'href',
       'https://github.com/Mike-Zhuang/EventShock',
+    );
+    expect(screen.getByRole('link', { name: 'Report an issue' })).toHaveAttribute(
+      'href',
+      'https://github.com/Mike-Zhuang/EventShock/issues/new/choose',
     );
     expect(api.getCases).not.toHaveBeenCalled();
     expect(api.getExperiments).not.toHaveBeenCalled();

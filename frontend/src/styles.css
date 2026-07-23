@@ -348,7 +348,9 @@ code {
 }
 
 .sidebar__footer {
+  display: grid;
   flex: 0 0 auto;
+  gap: 10px;
   padding: 16px 22px 22px;
   border-top: 1px solid var(--border);
 }
@@ -358,6 +360,29 @@ code {
   color: var(--text-tertiary);
   font-size: 12px;
   line-height: 1.45;
+}
+
+.sidebar__issue-link {
+  display: inline-flex;
+  width: fit-content;
+  min-height: 44px;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0;
+  color: var(--accent);
+  font-size: 12px;
+  line-height: 1.35;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.sidebar__issue-link:hover {
+  color: var(--accent-hover);
+}
+
+.sidebar__issue-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
 }
 
 .mobile-navigation,
