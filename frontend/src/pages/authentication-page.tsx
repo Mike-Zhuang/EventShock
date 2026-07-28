@@ -14,6 +14,7 @@ import {
   ShieldCheck,
   Sun,
   UsersThree,
+  WarningCircle,
 } from '@phosphor-icons/react';
 import { useEffect, useState, type FormEvent } from 'react';
 import { api, ApiError } from '../api/client';
@@ -322,6 +323,7 @@ export function AuthenticationPage({
           <div className="auth-guardrails">
             <div><ShieldCheck size={21} weight="duotone" /><span>{t('home.disclaimerForecast')}</span></div>
             <div><Flask size={21} weight="duotone" /><span>{t('home.disclaimerSynthetic')}</span></div>
+            <div><WarningCircle size={21} weight="duotone" /><span>{t('home.notAudienceTitle')}</span></div>
           </div>
         </section>
 

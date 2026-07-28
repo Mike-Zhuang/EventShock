@@ -149,6 +149,12 @@ export interface AdminActivityPage {
   total: number;
 }
 
+export interface CaseValidationStatus {
+  level?: string;
+  empiricalCalibration?: string;
+  claim?: string;
+}
+
 export interface CaseSummary {
   id: string;
   name: string;
@@ -163,7 +169,7 @@ export interface CaseSummary {
   updatedAt?: string;
   featured?: boolean;
   caseRole?: string;
-  validationStatus?: string;
+  validationStatus?: CaseValidationStatus;
 }
 
 export interface EventSource {

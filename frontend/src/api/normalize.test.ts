@@ -402,7 +402,7 @@ describe('API normalizers', () => {
     expect(normalizeStudyRuns({ items: [{ ...run, result: undefined }] })).toHaveLength(1);
   });
 
-  it('preserves bilingual case and Event Pack fields from the backend schema', () => {
+  it('preserves bilingual case, structured validation, and Event Pack fields from the backend schema', () => {
     const cases = normalizeCases([{
       id: 'synthetic-case',
       eventPackId: 'synthetic-pack-v1',
@@ -411,12 +411,22 @@ describe('API normalizers', () => {
       summary: 'Research fixture',
       summaryZh: '研究测试数据',
       synthetic: true,
+      validationStatus: {
+        level: 'L5_CASE_AVAILABLE',
+        empiricalCalibration: 'PENDING_HUMAN_STUDY',
+        claim: 'Runnable mechanism comparison; external validation remains pending.',
+      },
     }]);
     expect(cases[0]).toMatchObject({
       id: 'synthetic-case',
       name: 'Synthetic Case',
       nameZh: '合成案例',
       isSynthetic: true,
+      validationStatus: {
+        level: 'L5_CASE_AVAILABLE',
+        empiricalCalibration: 'PENDING_HUMAN_STUDY',
+        claim: 'Runnable mechanism comparison; external validation remains pending.',
+      },
     });
 
     const pack = normalizeEventPack({

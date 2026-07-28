@@ -215,7 +215,7 @@ describe('移动主导航', () => {
     window.history.replaceState(null, '', '#/guided');
 
     render(<App />);
-    await user.click(await screen.findByRole('button', { name: 'Expert workspace' }));
+    await user.click(await screen.findByRole('button', { name: 'Research workspace' }));
 
     await waitFor(() => expect(api.saveUserPreferences).toHaveBeenCalledWith({
       experienceLevel: 'NEW',
@@ -223,7 +223,7 @@ describe('移动主导航', () => {
       firstGoal: 'RESEARCH_NEW_EVENT',
       workspaceMode: 'EXPERT',
     }));
-    await waitFor(() => expect(window.location.hash).toBe('#/cases'));
+    await waitFor(() => expect(window.location.hash).toBe('#/study'));
   });
 
   it('用户要求减少动态效果时以无动画方式定位目标', async () => {
@@ -554,7 +554,7 @@ describe('移动主导航', () => {
       'https://github.com/Mike-Zhuang/EventShock/issues/new/choose',
     );
 
-    await user.click(within(drawer).getByRole('button', { name: 'Event Pack Review' }));
+    await user.click(within(drawer).getByRole('button', { name: 'Review Evidence' }));
 
     expect(drawer).not.toBeVisible();
     expect(menuButton).toHaveAttribute('aria-expanded', 'false');
@@ -613,14 +613,28 @@ describe('移动主导航', () => {
         expect(item.parentElement).toHaveClass('navigation-section');
       });
     });
+
+    const researchSections = Array.from(document.querySelectorAll<HTMLElement>('.navigation-section'))
+      .filter((section) => section.getAttribute('aria-label') === 'Research tools');
+    expect(researchSections).toHaveLength(2);
+    researchSections.forEach((section) => {
+      expect(within(section).getByRole('button', { name: 'Study Workbench', hidden: true })).toBeInTheDocument();
+      expect(within(section).getByRole('button', { name: 'Mechanism Trace', hidden: true })).toBeInTheDocument();
+      expect(within(section).getByRole('button', { name: 'Validation & Governance', hidden: true })).toBeInTheDocument();
+      expect(within(section).queryByRole('button', { name: 'AI Configuration', hidden: true })).not.toBeInTheDocument();
+    });
   });
 
   it('默认英文首屏明确展示主要目标用户及其工作场景', async () => {
     render(<App />);
 
+    expect(await screen.findByRole('heading', { name: 'Change one condition. See whether the same shock gets worse.' })).toBeInTheDocument();
     expect(await screen.findByText('Built for')).toBeInTheDocument();
     expect(await screen.findByRole('heading', { name: 'Market event-risk analysts' })).toBeInTheDocument();
-    expect(screen.getByText(/asset managers, banks, and exchanges/i)).toBeInTheDocument();
+    expect(screen.getByText(/asset managers, banks, exchanges/i)).toBeInTheDocument();
+    expect(screen.getByText('Not for')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Personal investment decisions' })).toBeInTheDocument();
+    expect(screen.getByText('whether to buy or sell')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'GitHub repository' })).toHaveAttribute(
       'href',
       'https://github.com/Mike-Zhuang/EventShock',
@@ -641,9 +655,13 @@ describe('移动主导航', () => {
 
     await user.click(await screen.findByRole('button', { name: '中文' }));
 
+    expect(screen.getByRole('heading', { name: '改一个条件，看同一场冲击会不会更糟。' })).toBeInTheDocument();
     expect(screen.getByText('主要用户')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '市场事件风险分析人员' })).toBeInTheDocument();
-    expect(screen.getByText(/资管机构、银行与交易所/)).toBeInTheDocument();
+    expect(screen.getByText(/资管机构、银行、交易所/)).toBeInTheDocument();
+    expect(screen.getByText('不服务于')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '个人投资决策' })).toBeInTheDocument();
+    expect(screen.getByText('应该买入还是卖出')).toBeInTheDocument();
     expect(screen.getAllByRole('link', { name: '提交问题反馈' }).length).toBeGreaterThan(0);
   });
 
@@ -791,7 +809,7 @@ describe('移动主导航', () => {
     await user.click(screen.getByRole('radio', { name: /Guide me step by step/ }));
     await user.click(screen.getByRole('radio', { name: /Research a new event/ }));
     expect(screen.getByText('Recommended starting mode')).toBeInTheDocument();
-    await user.click(screen.getByRole('radio', { name: /Guided mode/ }));
+    await user.click(screen.getByRole('radio', { name: /Guided workspace/ }));
     await user.click(continueButton);
 
     await waitFor(() => expect(api.saveUserPreferences).toHaveBeenCalledWith({
@@ -804,7 +822,7 @@ describe('移动主导航', () => {
     await waitFor(() => expect(api.getCases).toHaveBeenCalled());
   });
 
-  it('onboarding 选择专家模式后以案例库作为默认首页', async () => {
+  it('onboarding 选择研究工作区后以研究工作台作为默认首页', async () => {
     const user = userEvent.setup();
     vi.mocked(api.getAuthSession).mockResolvedValueOnce({
       authenticationRequired: true,
@@ -831,7 +849,7 @@ describe('移动主导航', () => {
     await user.click(screen.getByRole('radio', { name: /Experienced researcher/ }));
     await user.click(screen.getByRole('radio', { name: /Give me direct control/ }));
     await user.click(screen.getByRole('radio', { name: /Design a complete experiment/ }));
-    await user.click(screen.getByRole('radio', { name: /Expert mode/ }));
+    await user.click(screen.getByRole('radio', { name: /Research workspace/ }));
     await user.click(screen.getByRole('button', { name: 'Save and open workspace' }));
 
     await waitFor(() => expect(api.saveUserPreferences).toHaveBeenCalledWith({
@@ -840,7 +858,7 @@ describe('移动主导航', () => {
       assistancePreference: 'DIRECT_CONTROL',
       firstGoal: 'DESIGN_FULL_EXPERIMENT',
     }));
-    await waitFor(() => expect(window.location.hash).toBe('#/cases'));
+    await waitFor(() => expect(window.location.hash).toBe('#/study'));
   });
 
   it('收到全局 401 会话失效事件后卸载工作流并返回登录页', async () => {

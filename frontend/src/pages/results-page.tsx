@@ -20,6 +20,7 @@ import { buildHistogram } from '../api/normalize';
 import { EmptyState, ExplainedLabel, LoadingPanel, Notice, PageHeader, StatusBadge } from '../components/common';
 import { ExperimentHistoryDisclosure, experimentHistoryLabel } from '../components/experiment-history';
 import { ResultInterpretationAssistant } from '../components/result-interpretation-assistant';
+import { SimulatedChart } from '../components/simulated-chart';
 import { translateAgentType, translateParameter, translateStatus, useI18n } from '../i18n';
 import { getPageGuide } from '../page-guidance';
 import { getParameterHelp } from '../parameter-help';
@@ -312,6 +313,33 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
         )}
       />
       {historySelector}
+      <section className="result-reading-guide" aria-labelledby="result-reading-guide-heading">
+        <h2 id="result-reading-guide-heading">{t('results.readingGuideTitle')}</h2>
+        <div className="result-reading-guide__grid">
+          <article>
+            <span>01</span>
+            <h3>{t('results.whatIsTitle')}</h3>
+            <p>{t('results.whatIsBody')}</p>
+          </article>
+          <article className="result-reading-guide__warning">
+            <span>02</span>
+            <h3>{t('results.whatIsNotTitle')}</h3>
+            <p>{t('results.whatIsNotBody')}</p>
+            <strong>{t('results.notProvidedTitle')}</strong>
+            <ul>
+              <li>{t('results.notProvidedDirection')}</li>
+              <li>{t('results.notProvidedTiming')}</li>
+              <li>{t('results.notProvidedTarget')}</li>
+              <li>{t('results.notProvidedGeneralization')}</li>
+            </ul>
+          </article>
+          <article>
+            <span>03</span>
+            <h3>{t('results.whatCanDoTitle')}</h3>
+            <p>{t('results.whatCanDoBody')}</p>
+          </article>
+        </div>
+      </section>
       <Notice>{t('results.disclaimer')}</Notice>
       <Modal
         open={invalidationOpen}
@@ -465,38 +493,42 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
             </Select>
           </div>
           {pairedSeries.length === 0 ? <ChartEmpty /> : (
-            <div className="chart-canvas" role="img" aria-label={`${t('results.paired')}: ${selectedMetric ? resultMetricLabel(selectedMetric, language, t) : analysisMetricId}`}>
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={pairedSeries} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
-                  <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
-                  <XAxis dataKey="seed" name={t('chart.seed')} tick={{ fill: 'var(--text-secondary)', fontSize: 12 }} />
-                  <YAxis tick={{ fill: 'var(--text-secondary)', fontSize: 12 }} width={52} />
-                  <Tooltip contentStyle={{ background: 'var(--surface-raised)', borderColor: 'var(--border-strong)', color: 'var(--text-primary)' }} />
-                  <Legend />
-                  <Line type="monotone" dataKey="baseline" name={t('chart.baseline')} stroke="var(--chart-baseline)" strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} />
-                  <Line type="monotone" dataKey="intervention" name={t('chart.intervention')} stroke="var(--accent)" strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
+            <SimulatedChart label={t('results.simulatedLabel')}>
+              <div className="chart-canvas" role="img" aria-label={`${t('results.simulatedLabel')}: ${t('results.paired')}: ${selectedMetric ? resultMetricLabel(selectedMetric, language, t) : analysisMetricId}`}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={pairedSeries} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
+                    <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
+                    <XAxis dataKey="seed" name={t('chart.seed')} tick={{ fill: 'var(--text-secondary)', fontSize: 12 }} />
+                    <YAxis tick={{ fill: 'var(--text-secondary)', fontSize: 12 }} width={52} />
+                    <Tooltip contentStyle={{ background: 'var(--surface-raised)', borderColor: 'var(--border-strong)', color: 'var(--text-primary)' }} />
+                    <Legend />
+                    <Line type="monotone" dataKey="baseline" name={t('chart.baseline')} stroke="var(--chart-baseline)" strokeWidth={2} strokeDasharray="7 5" dot={{ r: 3 }} isAnimationActive={false} />
+                    <Line type="monotone" dataKey="intervention" name={t('chart.intervention')} stroke="var(--accent)" strokeWidth={2} strokeDasharray="2 4" dot={{ r: 3 }} isAnimationActive={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </SimulatedChart>
           )}
         </section>
 
         <section className="chart-panel" aria-labelledby="distribution-heading">
           <div className="section-heading"><h2 id="distribution-heading">{t('results.distribution')}</h2><p>{selectedMetric ? resultMetricLabel(selectedMetric, language, t) : analysisMetricId}</p></div>
           {distribution.length === 0 ? <ChartEmpty /> : (
-            <div className="chart-canvas" role="img" aria-label={t('results.distribution')}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={distribution} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
-                  <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
-                  <XAxis dataKey="bin" tick={{ fill: 'var(--text-secondary)', fontSize: 12 }} />
-                  <YAxis tick={{ fill: 'var(--text-secondary)', fontSize: 12 }} width={52} />
-                  <Tooltip contentStyle={{ background: 'var(--surface-raised)', borderColor: 'var(--border-strong)', color: 'var(--text-primary)' }} />
-                  <Legend />
-                  <Bar dataKey="baseline" name={t('chart.baseline')} fill="var(--chart-baseline)" radius={[2, 2, 0, 0]} isAnimationActive={false} />
-                  <Bar dataKey="intervention" name={t('chart.intervention')} fill="var(--accent)" radius={[2, 2, 0, 0]} isAnimationActive={false} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
+            <SimulatedChart label={t('results.simulatedLabel')}>
+              <div className="chart-canvas" role="img" aria-label={`${t('results.simulatedLabel')}: ${t('results.distribution')}`}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={distribution} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
+                    <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
+                    <XAxis dataKey="bin" tick={{ fill: 'var(--text-secondary)', fontSize: 12 }} />
+                    <YAxis tick={{ fill: 'var(--text-secondary)', fontSize: 12 }} width={52} />
+                    <Tooltip contentStyle={{ background: 'var(--surface-raised)', borderColor: 'var(--border-strong)', color: 'var(--text-primary)' }} />
+                    <Legend />
+                    <Bar dataKey="baseline" name={t('chart.baseline')} fill="var(--chart-baseline)" radius={[2, 2, 0, 0]} isAnimationActive={false} />
+                    <Bar dataKey="intervention" name={t('chart.intervention')} fill="var(--accent)" radius={[2, 2, 0, 0]} isAnimationActive={false} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </SimulatedChart>
           )}
         </section>
       </div>
@@ -520,19 +552,21 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
           </div>
         </div>
         {results.marketPaths.length === 0 ? <ChartEmpty /> : (
-          <div className="chart-canvas chart-canvas--wide" role="img" aria-label={`${t('results.paths')}: ${selectedFields.label}`}>
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={results.marketPaths} margin={{ top: 8, right: 20, left: 0, bottom: 8 }}>
-                <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
-                <XAxis dataKey="step" name={t('chart.step')} tick={{ fill: 'var(--text-secondary)', fontSize: 12 }} />
-                <YAxis tick={{ fill: 'var(--text-secondary)', fontSize: 12 }} width={62} />
-                <Tooltip contentStyle={{ background: 'var(--surface-raised)', borderColor: 'var(--border-strong)', color: 'var(--text-primary)' }} />
-                <Legend />
-                <Line type="monotone" dataKey={selectedFields.baseline} name={`${t('chart.baseline')} ${selectedFields.label}`} stroke="var(--chart-baseline)" strokeWidth={2} dot={false} isAnimationActive={false} />
-                <Line type="monotone" dataKey={selectedFields.intervention} name={`${t('chart.intervention')} ${selectedFields.label}`} stroke="var(--accent)" strokeWidth={2} dot={false} isAnimationActive={false} />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
+          <SimulatedChart label={t('results.simulatedLabel')}>
+            <div className="chart-canvas chart-canvas--wide" role="img" aria-label={`${t('results.simulatedLabel')}: ${t('results.paths')}: ${selectedFields.label}`}>
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={results.marketPaths} margin={{ top: 8, right: 20, left: 0, bottom: 8 }}>
+                  <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
+                  <XAxis dataKey="step" name={t('chart.step')} tick={{ fill: 'var(--text-secondary)', fontSize: 12 }} />
+                  <YAxis tick={{ fill: 'var(--text-secondary)', fontSize: 12 }} width={62} />
+                  <Tooltip contentStyle={{ background: 'var(--surface-raised)', borderColor: 'var(--border-strong)', color: 'var(--text-primary)' }} />
+                  <Legend />
+                  <Line type="monotone" dataKey={selectedFields.baseline} name={`${t('chart.baseline')} ${selectedFields.label}`} stroke="var(--chart-baseline)" strokeWidth={2} strokeDasharray="7 5" dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey={selectedFields.intervention} name={`${t('chart.intervention')} ${selectedFields.label}`} stroke="var(--accent)" strokeWidth={2} strokeDasharray="2 4" dot={false} isAnimationActive={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </SimulatedChart>
         )}
       </section>
 
@@ -540,18 +574,20 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
         <section className="chart-panel" aria-labelledby="agent-flow-heading">
           <div className="section-heading"><h2 id="agent-flow-heading">{t('results.agentFlow')}</h2></div>
           {results.agentFlows.length === 0 ? <ChartEmpty /> : (
-            <div className="chart-canvas" role="img" aria-label={t('results.agentFlow')}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={results.agentFlows} layout="vertical" margin={{ top: 8, right: 16, left: 18, bottom: 8 }}>
-                  <CartesianGrid stroke="var(--chart-grid)" horizontal={false} />
-                  <XAxis type="number" tick={{ fill: 'var(--text-secondary)', fontSize: 12 }} />
-                  <YAxis type="category" dataKey="agentType" tickFormatter={(value: string) => translateAgentType(value, t)} tick={{ fill: 'var(--text-secondary)', fontSize: 12 }} width={110} />
-                  <Tooltip contentStyle={{ background: 'var(--surface-raised)', borderColor: 'var(--border-strong)', color: 'var(--text-primary)' }} />
-                  <ReferenceLine x={0} stroke="var(--border-strong)" />
-                  <Bar dataKey="delta" name={t('chart.delta')} fill="var(--accent)" radius={[0, 2, 2, 0]} isAnimationActive={false} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
+            <SimulatedChart label={t('results.simulatedLabel')}>
+              <div className="chart-canvas" role="img" aria-label={`${t('results.simulatedLabel')}: ${t('results.agentFlow')}`}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={results.agentFlows} layout="vertical" margin={{ top: 8, right: 16, left: 18, bottom: 8 }}>
+                    <CartesianGrid stroke="var(--chart-grid)" horizontal={false} />
+                    <XAxis type="number" tick={{ fill: 'var(--text-secondary)', fontSize: 12 }} />
+                    <YAxis type="category" dataKey="agentType" tickFormatter={(value: string) => translateAgentType(value, t)} tick={{ fill: 'var(--text-secondary)', fontSize: 12 }} width={110} />
+                    <Tooltip contentStyle={{ background: 'var(--surface-raised)', borderColor: 'var(--border-strong)', color: 'var(--text-primary)' }} />
+                    <ReferenceLine x={0} stroke="var(--border-strong)" />
+                    <Bar dataKey="delta" name={t('chart.delta')} fill="var(--accent)" radius={[0, 2, 2, 0]} isAnimationActive={false} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </SimulatedChart>
           )}
         </section>
 

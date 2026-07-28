@@ -123,7 +123,7 @@ export function OnboardingPage({
         assistancePreference,
         firstGoal,
       });
-      window.history.replaceState(null, '', workspaceMode === 'GUIDED' ? '#/guided' : '#/cases');
+      window.history.replaceState(null, '', workspaceMode === 'GUIDED' ? '#/guided' : '#/study');
     } catch {
       setError(t('onboarding.saveFailed'));
     } finally {
@@ -170,6 +170,7 @@ export function OnboardingPage({
           <span className="eyebrow"><UserFocus size={18} weight="duotone" />{t('onboarding.eyebrow')}</span>
           <h1>{t('onboarding.title')}</h1>
           <p>{t('onboarding.body')}</p>
+          <p className="onboarding-heading__boundary">{t('onboarding.useBoundary')}</p>
         </header>
 
         {error ? (

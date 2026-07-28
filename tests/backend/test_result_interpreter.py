@@ -494,7 +494,7 @@ def test_requested_reviewable_summary_has_safe_deterministic_fallback() -> None:
     assert run.interpretation.analysis_summary == (
         "未返回可核验的分析摘要；正文仍仅依据所列实验结果证据切片。"
     )
-    assert run.interpretation.answer.endswith(
+    assert run.interpretation.answer.startswith(
         "这是以合成假设为条件的情景分析，不是预测，也不构成投资建议。"
     )
 

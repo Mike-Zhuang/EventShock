@@ -23,7 +23,7 @@
 | R-010 | Cost exhaustion | Provider Calls、Token 或账单异常增加 | High | High | Max Attempts、One Repair、Max Tokens、Cache、Rate limit | 关闭 Live LLM、Provider Budget、Rule-only | LLM/Platform | 全局美元预算 `CONTROL_GAP` |
 | R-011 | Source tier promotion | Social/Synthetic 内容成为 T1 FACT | Medium | Critical | Typed SourceTier、T4/T5 FACT Reject、Human Review | Quarantine Claim、修正来源、Invalidate | Data Lead | 元数据伪造仍需人工核实 |
 | R-012 | 数据许可违规 | 原文或行情进入公开仓库/ZIP | Medium | Critical | Link-only、Synthetic Market、Third-party register | 移除公开访问、调查 Fork/Artifact、法律复核 | Data Lead | 许可审查 `PENDING_HUMAN_EVIDENCE` |
-| R-013 | 结果被当作预测 | 用户说“AI 建议买入”或引用目标价 | High | Critical | Synthetic Badge、非建议文案、区间和 Limitations | 停止公开结果、重做 UX 和说明 | Product Lead | 用户理解 `PENDING_HUMAN_EVIDENCE` |
+| R-013 | 结果被当作预测或个人投资建议 | 用户询问买卖方向、交易时点或目标价；把模型内部差异解释为现实因果或收益保证 | High | Critical | Synthetic Badge、非建议文案、区间、Limitations，以及结果与来源事实分层 | 停止公开结果、冻结相关演示、重做关键页面边界与外行可读范围，并重新执行用户理解测试 | Product Lead | Checkpoint 1 同伴反馈中仅 4/12 认为项目完全清晰，且已出现“跟踪股票并向个人投资者提供建议”的误读；`PENDING_HUMAN_EVIDENCE` |
 | R-014 | 单路径 Cherry-pick | Demo 只展示戏剧性 Seed | High | High | Matched Ensemble、Distribution、Seed registry、Representative rule、模型内部 Study 预注册 | 展示全分布、标记探索性 | Data/Product | 无独立时间戳的历史研究预注册与外部复算 |
 | R-015 | 多重比较与 p-hacking | 指标不断扩展直到出现方向 | Medium | High | 固定 METRIC_KEYS、Single Intervention、2–4 个 Study 主指标、family-level Holm | Exploratory Label、Preregister、Reduce claims | Data Lead | 真实历史研究的独立预注册仍为 `PENDING_HUMAN_EVIDENCE` |
 | R-016 | Calibration 过拟合 | 对单一 SpaceX 路径拟合过好 | Medium | High | Synthetic Label、No causal claim、Excluded observed calibration | 降级为 Mechanism Demo | Data Lead | 历史 Holdout `NOT_RUN` |

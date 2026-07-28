@@ -336,9 +336,18 @@ describe('结果解释助手', () => {
     });
     expect(input.clientRequestId).toEqual(expect.any(String));
 
-    expect(await screen.findByText(/Literal/)).toBeInTheDocument();
+    const unsafeAnswerNode = await screen.findByText(/Literal/);
+    expect(unsafeAnswerNode).toBeInTheDocument();
     expect(container.querySelector('script')).toBeNull();
     expect(container.querySelector('img')).toBeNull();
+    const assistantCard = unsafeAnswerNode.closest('.result-assistant__message--assistant');
+    expect(assistantCard).not.toBeNull();
+    expect(within(assistantCard as HTMLElement).getByText(
+      'This is scenario analysis conditional on synthetic assumptions, not a prediction and not investment advice.',
+    )).toBeInTheDocument();
+    expect(within(assistantCard as HTMLElement).getByText(
+      'This explanation cannot establish real-world outcomes, recommend a trade, or generalize beyond the tested assumptions.',
+    )).toBeInTheDocument();
 
     const reasoningSummary = screen.getByText('Analysis summary (not chain-of-thought)');
     const reasoningDetails = reasoningSummary.closest('details');
@@ -352,6 +361,30 @@ describe('结果解释助手', () => {
     await user.click(suggestion);
     expect(screen.getByLabelText('Ask about this experiment')).toHaveValue('How stable is this difference?');
     expect(api.streamChatAboutResults).toHaveBeenCalledTimes(1);
+  });
+
+  it('服务端回答已包含前置边界时仍使用醒目边界卡片且不重复正文', async () => {
+    const boundary = 'This is scenario analysis conditional on synthetic assumptions, not a prediction and not investment advice.';
+    vi.mocked(api.streamChatAboutResults).mockImplementation(async (_experimentId, input) => (
+      createStreamResult(input, {
+        answer: `${boundary}\n\nThe matched result remains model-dependent.`,
+        analysisSummary: undefined,
+      })
+    ));
+    const { container } = render(
+      <I18nProvider>
+        <ResultInterpretationAssistant experimentId={EXPERIMENT_ID} navigate={vi.fn()} />
+      </I18nProvider>,
+    );
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: 'Generate explanation' }));
+
+    const boundaryCards = container.querySelectorAll('.result-assistant__fixed-boundary');
+    expect(boundaryCards).toHaveLength(1);
+    expect(boundaryCards.item(0)).toHaveTextContent(boundary);
+    expect(screen.getByText('The matched result remains model-dependent.')).toBeInTheDocument();
+    expect(screen.getAllByText(boundary)).toHaveLength(1);
   });
 
   it('在助手消息中渲染 GFM，复用首次引用编号并隐藏内部证据 ID', async () => {
@@ -584,6 +617,8 @@ describe('结果解释助手', () => {
     expect(literalMessage?.querySelector('a')).toBeNull();
     expect(userCard).toHaveClass('result-assistant__message', 'result-assistant__message--user');
     expect(within(userCard).getByText('You')).toBeInTheDocument();
+    expect(within(userCard).queryByText(/scenario analysis conditional on synthetic assumptions/))
+      .not.toBeInTheDocument();
   });
 
   it('最终回答未能持久化时保留可见回答并明确警告用户', async () => {

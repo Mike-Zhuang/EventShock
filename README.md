@@ -7,7 +7,7 @@
 # EventShock Lab
 
 <p align="center">
-  <strong>Trace how a market shock propagates—without presenting a synthetic scenario as a forecast.</strong>
+  <strong>Change one condition. See whether the same shock gets worse—inside a simulation, not as a forecast.</strong>
 </p>
 
 <p align="center">
@@ -24,14 +24,16 @@
   · <a href="https://github.com/Mike-Zhuang/EventShock/issues/new/choose">Report an issue</a>
 </p>
 
-**Built for market event-risk analysts and research teams at asset managers, banks, and exchanges.** EventShock Lab turns a source-traceable Event Pack into matched baseline and intervention experiments, then connects distributional changes back to beliefs, orders, trades, and liquidity mechanisms.
+**Change one condition. See whether the same shock gets worse.** EventShock Lab lets market event-risk analysts, institutional research teams, and educators compare two simulated versions of the same event: a baseline and one controlled change. Its primary purpose is institutional event-risk research and teaching—not individual investment decision-making.
 
 > [!IMPORTANT]
-> EventShock Lab is a research and stress-testing system—not a price-prediction product and not investment advice. Real-world facts in the flagship SpaceX case are separated from explicitly synthetic prices, order books, flows, agent behavior, and counterfactual effects.
+> EventShock Lab does not tell anyone whether to buy or sell, when to trade, what target price to expect, what will happen in the real world, or whether an investment will earn a return. Real-world facts in the flagship SpaceX case are separated from explicitly synthetic prices, order books, flows, agent behavior, and counterfactual effects.
+
+Current evidence status is deliberately limited: the historical cases are runnable mechanism studies, not independently calibrated or externally validated forecasting models. Target-user interviews and independent domain review remain planned human evidence; this repository does not claim that they have already been completed.
 
 ## What it does
 
-EventShock is designed around one controlled question: **if exactly one declared market condition changed, how would the model-internal propagation path differ under the same random seeds?**
+EventShock is designed around one controlled question: **if exactly one declared condition changed, would the same simulated shock become better, worse, or materially different?** The system answers that question only inside its stated model and assumptions.
 
 ```text
 Select a traceable or fully synthetic Event Pack

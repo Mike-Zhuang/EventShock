@@ -1080,8 +1080,11 @@ class CognitionService:
             else "这是以合成假设为条件的情景分析，不是预测，也不构成投资建议。"
         )
         normalizedAnswer = answer.answer.strip()
-        if boundary not in normalizedAnswer:
-            normalizedAnswer = f"{normalizedAnswer}\n\n{boundary}"
+        if not normalizedAnswer.startswith(boundary):
+            # 固定边界必须先于模型叙事出现；只移除完全相同的尾注，避免重复，
+            # 不改写模型正文或证据引用。
+            answerBody = normalizedAnswer.removesuffix(boundary).rstrip()
+            normalizedAnswer = f"{boundary}\n\n{answerBody}" if answerBody else boundary
         analysisSummary = answer.analysis_summary if includeAnalysisSummary else None
         if includeAnalysisSummary and analysisSummary is None:
             analysisSummary = (

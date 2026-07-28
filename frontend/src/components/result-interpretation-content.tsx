@@ -50,9 +50,14 @@ export function ResultInterpretationContent({
   message,
   navigate,
 }: ResultInterpretationContentProps) {
-  const { language } = useI18n();
+  const { language, t } = useI18n();
   const isZh = language === 'zh-CN';
   const secondaryLanguage = isZh ? 'en' : 'zh-CN';
+  const boundaryStart = t('results.assistantBoundaryStart');
+  const normalizedAnswer = message.answer.trimStart();
+  const visibleAnswer = normalizedAnswer.startsWith(boundaryStart)
+    ? normalizedAnswer.slice(boundaryStart.length).trimStart()
+    : message.answer;
   const evidenceDetailsRef = useRef<HTMLDetailsElement>(null);
   const evidenceItemRefs = useRef(new Map<string, HTMLLIElement>());
   const audit = useMemo(() => auditResultEvidence(
@@ -120,13 +125,22 @@ export function ResultInterpretationContent({
 
   return (
     <>
-      <SafeMarkdown
-        className="result-assistant__answer"
-        content={message.answer}
-        citationNumbering={audit.numbering}
-        renderCitation={renderCitation}
-        formatCitationLabel={formatCitationLabel}
-      />
+      <div className="result-assistant__fixed-boundary" role="note">
+        <WarningCircle size={18} weight="fill" aria-hidden="true" />
+        <strong>{boundaryStart}</strong>
+      </div>
+      {visibleAnswer ? (
+        <SafeMarkdown
+          className="result-assistant__answer"
+          content={visibleAnswer}
+          citationNumbering={audit.numbering}
+          renderCitation={renderCitation}
+          formatCitationLabel={formatCitationLabel}
+        />
+      ) : null}
+      <p className="result-assistant__fixed-boundary-end">
+        {t('results.assistantBoundaryEnd')}
+      </p>
 
       {message.analysisSummary ? (
         <details className="result-assistant__disclosure">
