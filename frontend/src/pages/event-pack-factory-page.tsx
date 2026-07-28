@@ -24,7 +24,7 @@ import {
 } from '@phosphor-icons/react';
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { Navigate } from '../app';
-import { api } from '../api/client';
+import { api, ApiError } from '../api/client';
 import type {
   EventPack,
   EventPackFactoryBuild,
@@ -36,6 +36,7 @@ import type {
   FactorySearchEngineDescriptor,
   FactorySearchEngineId,
   FactorySearchRecency,
+  GuidedWorkflow,
 } from '../api/types';
 import {
   EmptyState,
@@ -62,6 +63,111 @@ const IMPACT_CHANNELS = [
   'informationLatency',
 ] as const;
 
+type FactoryErrorSection = 'general' | 'paste' | 'search' | 'review' | 'materialize';
+type MaterializeValidationField =
+  | 'sourceReview'
+  | 'title'
+  | 'summary'
+  | 'instrument'
+  | 'asOf'
+  | 'impactChannels'
+  | 'acknowledgedReview';
+
+interface FactoryActionError {
+  action: string;
+  section: FactoryErrorSection;
+  message: string;
+  code?: string;
+}
+
+type MaterializeValidationErrors = Partial<Record<MaterializeValidationField, string>>;
+
+const MATERIALIZE_FIELD_ORDER: MaterializeValidationField[] = [
+  'sourceReview',
+  'title',
+  'summary',
+  'instrument',
+  'asOf',
+  'impactChannels',
+  'acknowledgedReview',
+];
+
+const MATERIALIZE_TARGETS: Record<MaterializeValidationField, string> = {
+  sourceReview: 'factory-review-heading',
+  title: 'factory-pack-title',
+  summary: 'factory-pack-summary',
+  instrument: 'factory-pack-instrument',
+  asOf: 'factory-pack-asof',
+  impactChannels: 'factory-impact-channels',
+  acknowledgedReview: 'factory-acknowledge-review',
+};
+
+function factoryErrorSection(action: string): FactoryErrorSection {
+  if (action === 'paste') return 'paste';
+  if (action === 'search') return 'search';
+  if (
+    action.startsWith('reader-')
+    || action.startsWith('review-')
+    || action.startsWith('raw-')
+  ) return 'review';
+  if (action === 'materialize' || action === 'guided-link-pack') return 'materialize';
+  return 'general';
+}
+
+function factoryErrorMessage(error: unknown, isZh: boolean): string {
+  if (!(error instanceof ApiError)) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  const localizedMessages: Record<string, { en: string; zh: string }> = {
+    ZHIPU_TEMPORARY_CREDENTIAL_REQUIRED: {
+      en: 'Configure a temporary Zhipu API key in AI configuration, then retry this action.',
+      zh: '请先在“AI 配置”中填写本次会话使用的智谱 API Key，然后重试。',
+    },
+    EVENT_PACK_FACTORY_REVISION_CONFLICT: {
+      en: 'This build changed in another action. The latest revision has been reloaded; review it before retrying.',
+      zh: '该构建任务已被其他操作更新。页面已重新载入最新修订，请核对后重试。',
+    },
+    EVENT_PACK_FACTORY_SOURCE_REVIEW_REQUIRED: {
+      en: 'This source still needs an explicit human review decision before the next action.',
+      zh: '该来源仍需明确的人工审核决定，完成批准或拒绝后才能继续。',
+    },
+    EVENT_PACK_FACTORY_READER_SOURCE_NOT_ALLOWED: {
+      en: 'Reader can only open an approved search result from this build. Refresh the source list and review the discovery result first.',
+      zh: 'Reader 只能读取当前任务中已经人工批准的搜索结果。请刷新来源列表并先审核该发现线索。',
+    },
+    EVENT_PACK_FACTORY_BUILD_NOT_READY: {
+      en: 'At least one approved pasted or Reader full-text source is required before claim extraction.',
+      zh: '抽取主张前至少需要一个已批准的粘贴原文或 Reader 全文证据来源。',
+    },
+    REQUEST_VALIDATION_ERROR: {
+      en: 'The submitted values no longer match the server requirements. Recheck every input in this step and retry.',
+      zh: '提交值与服务器要求不一致，请重新核对本步骤的全部输入后重试。',
+    },
+    GUIDED_ARTIFACT_INVALID: {
+      en: 'This guided workflow already links a different artifact. Return to its linked build or start a new guided workflow.',
+      zh: '该 AI 引导已经关联了另一个工件。请返回已关联的构建任务，或新建一个 AI 引导。',
+    },
+  };
+  const localized = error.code ? localizedMessages[error.code] : undefined;
+  return localized ? (isZh ? localized.zh : localized.en) : error.message;
+}
+
+function focusFactoryTarget(targetId: string): void {
+  window.requestAnimationFrame(() => {
+    const target = document.getElementById(targetId);
+    if (!(target instanceof HTMLElement)) return;
+    const reduceMotion = typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (typeof target.scrollIntoView === 'function') {
+      target.scrollIntoView({
+        behavior: reduceMotion ? 'auto' : 'smooth',
+        block: 'center',
+      });
+    }
+    target.focus({ preventScroll: true });
+  });
+}
+
 interface PasteDraft {
   localId: string;
   title: string;
@@ -70,6 +176,66 @@ interface PasteDraft {
   publishedAt: string;
   knownAt: string;
   rawText: string;
+}
+
+type PasteValidationField =
+  | 'title'
+  | 'publisher'
+  | 'url'
+  | 'publishedAt'
+  | 'knownAt'
+  | 'rawText';
+
+type PasteValidationErrors = Partial<Record<PasteValidationField, string>>;
+
+const PASTE_FIELD_ORDER: PasteValidationField[] = [
+  'title',
+  'publisher',
+  'url',
+  'publishedAt',
+  'knownAt',
+  'rawText',
+];
+
+const PASTE_TARGET_SUFFIX: Record<PasteValidationField, string> = {
+  title: 'title',
+  publisher: 'publisher',
+  url: 'url',
+  publishedAt: 'published',
+  knownAt: 'known',
+  rawText: 'raw',
+};
+
+function validatePasteDraft(draft: PasteDraft, isZh: boolean): PasteValidationErrors {
+  const errors: PasteValidationErrors = {};
+  const publishedAt = new Date(draft.publishedAt).getTime();
+  const knownAt = new Date(draft.knownAt).getTime();
+  if (!draft.title.trim()) {
+    errors.title = isZh ? '请填写网页标题。' : 'Enter the page title.';
+  }
+  if (!draft.publisher.trim()) {
+    errors.publisher = isZh ? '请填写发布方。' : 'Enter the publisher.';
+  }
+  if (draft.url.trim() && !draft.url.trim().startsWith('https://')) {
+    errors.url = isZh ? '网页地址必须使用 HTTPS。' : 'The page URL must use HTTPS.';
+  }
+  if (!Number.isFinite(publishedAt)) {
+    errors.publishedAt = isZh ? '请选择有效的发布时间。' : 'Choose a valid publication time.';
+  }
+  if (!Number.isFinite(knownAt)) {
+    errors.knownAt = isZh ? '请选择有效的研究可见时间。' : 'Choose a valid known-at time.';
+  }
+  if (Number.isFinite(publishedAt) && Number.isFinite(knownAt) && publishedAt > knownAt) {
+    errors.knownAt = isZh
+      ? '研究可见时间不能早于发布时间。'
+      : 'Known-at time cannot be earlier than publication time.';
+  }
+  if (draft.rawText.trim().length < 20) {
+    errors.rawText = isZh
+      ? '网页原文至少需要 20 个字符。'
+      : 'Raw webpage text must contain at least 20 characters.';
+  }
+  return errors;
 }
 
 interface IdempotentAttempt<T> {
@@ -179,7 +345,11 @@ function SourceCard({
               ? isZh ? '发现线索，不能直接作证' : 'Discovery only, not evidence'
               : isZh ? '候选证据' : 'Candidate evidence'}
           </Tag>
-          <StatusBadge status={source.reviewStatus} />
+          {discoveryOnly && source.reviewStatus === 'APPROVED' ? (
+            <Tag type="cyan" size="sm">
+              {isZh ? '仅批准读取全文' : 'Approved for full-text retrieval only'}
+            </Tag>
+          ) : <StatusBadge status={source.reviewStatus} />}
           {source.securityDecision === 'REVIEW' ? (
             <Tag type="warm-gray" size="sm">{isZh ? '内容需谨慎复核' : 'Content review required'}</Tag>
           ) : null}
@@ -302,6 +472,11 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
   const [busyAction, setBusyAction] = useState<string>();
   const [error, setError] = useState<string>();
+  const [actionError, setActionError] = useState<FactoryActionError>();
+  const [materializeErrors, setMaterializeErrors] = useState<MaterializeValidationErrors>({});
+  const [buildTitleError, setBuildTitleError] = useState<string>();
+  const [pasteErrors, setPasteErrors] = useState<Record<string, PasteValidationErrors>>({});
+  const [searchQueryError, setSearchQueryError] = useState<string>();
   const [buildTitle, setBuildTitle] = useState(guidedHandoff?.eventMetadata.title ?? '');
   const [pasteDrafts, setPasteDrafts] = useState<PasteDraft[]>([newPasteDraft(0)]);
   const [searchQuery, setSearchQuery] = useState(
@@ -328,6 +503,7 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
   const [impactChannels, setImpactChannels] = useState<string[]>(['belief', 'liquidity']);
   const [acknowledgedReview, setAcknowledgedReview] = useState(false);
   const [guidedLinkState, setGuidedLinkState] = useState<'BUILD' | 'EVENT_PACK'>();
+  const [guidedWorkflow, setGuidedWorkflow] = useState<GuidedWorkflow>();
   const [pendingGuidedPack, setPendingGuidedPack] = useState<EventPack>();
   const idempotentAttempts = useRef(new Map<string, IdempotentAttempt<unknown>>());
 
@@ -338,9 +514,12 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
   ): IdempotentAttempt<T> => {
     const existing = idempotentAttempts.current.get(operation);
     if (existing?.signature === signature) return existing as IdempotentAttempt<T>;
+    const operationKind = operation.split(':', 1)[0];
     const next: IdempotentAttempt<T> = {
       signature,
-      clientRequestId: `factory-${operation}-${crypto.randomUUID()}`,
+      // operation 可含完整 source ID，用它拼请求号会超过后端 80 字符上限。
+      // Map 仍以完整 operation 隔离并发，本次请求号只保留固定操作类型。
+      clientRequestId: `factory-${operationKind}-${crypto.randomUUID()}`,
       payload: createPayload(),
     };
     idempotentAttempts.current.set(operation, next);
@@ -364,19 +543,69 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
     return next;
   };
 
+  const selectBuild = async (buildId: string) => {
+    const changingExistingBuild = Boolean(snapshot && snapshot.build.id !== buildId);
+    if (snapshot?.build.id !== buildId) {
+      setAcknowledgedReview(false);
+      setMaterializeErrors({});
+      setPasteErrors({});
+      setActionError(undefined);
+      setError(undefined);
+      idempotentAttempts.current.clear();
+    }
+    const next = await refreshSnapshot(buildId);
+    if (changingExistingBuild) {
+      setMaterializeTitle(next.build.title);
+      setMaterializeTitleZh('');
+      setSummary('');
+      setSummaryZh('');
+      setInstrument('');
+      setAsOf(localDateTimeNow());
+      setImpactChannels(['belief', 'liquidity']);
+    }
+    return next;
+  };
+
   const load = async () => {
     setState('loading');
     setError(undefined);
     try {
-      const [nextBuilds, nextEngines] = await Promise.all([
+      let guidedLoadError: unknown;
+      const [nextBuilds, nextEngines, nextGuidedWorkflow] = await Promise.all([
         api.getFactoryBuilds(),
         api.getFactorySearchEngines(),
+        guidedHandoff
+          ? api.getGuidedWorkflow(guidedHandoff.workflowId).catch((loadError: unknown) => {
+            guidedLoadError = loadError;
+            return undefined;
+          })
+          : Promise.resolve(undefined),
       ]);
       setBuilds(nextBuilds);
       setEngines(nextEngines);
+      setGuidedWorkflow(nextGuidedWorkflow);
+      setGuidedLinkState(nextGuidedWorkflow?.draft.eventPackId
+        ? 'EVENT_PACK'
+        : nextGuidedWorkflow?.draft.eventPackBuildId
+          ? 'BUILD'
+          : undefined);
       const storedId = window.sessionStorage.getItem(FACTORY_BUILD_STORAGE_KEY);
-      const selected = nextBuilds.find((item) => item.id === storedId) ?? nextBuilds[0];
-      if (selected) await refreshSnapshot(selected.id);
+      // 从 AI 引导进入时优先恢复其已绑定任务，避免误在另一任务继续并触发
+      // 后端的不可变工件保护。
+      const selected = nextBuilds.find(
+        (item) => item.id === nextGuidedWorkflow?.draft.eventPackBuildId,
+      ) ?? nextBuilds.find((item) => item.id === storedId) ?? nextBuilds[0];
+      if (selected) await selectBuild(selected.id);
+      if (guidedLoadError) {
+        const message = factoryErrorMessage(guidedLoadError, isZh);
+        setError(message);
+        setActionError({
+          action: 'guided-load',
+          section: 'general',
+          message,
+          code: guidedLoadError instanceof ApiError ? guidedLoadError.code : undefined,
+        });
+      }
       setState('ready');
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : String(loadError));
@@ -391,10 +620,43 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
   const run = async <T,>(action: string, operation: () => Promise<T>): Promise<T | undefined> => {
     setBusyAction(action);
     setError(undefined);
+    setActionError(undefined);
     try {
       return await operation();
     } catch (operationError) {
-      setError(operationError instanceof Error ? operationError.message : String(operationError));
+      const message = factoryErrorMessage(operationError, isZh);
+      if (
+        operationError instanceof ApiError
+        && operationError.code === 'EVENT_PACK_FACTORY_REVISION_CONFLICT'
+        && snapshot
+      ) {
+        try {
+          await refreshSnapshot(snapshot.build.id);
+        } catch {
+          // 原始冲突仍是主错误；刷新失败时保留它，避免用次要错误覆盖可操作原因。
+        }
+      }
+      setError(message);
+      setActionError({
+        action,
+        section: factoryErrorSection(action),
+        message,
+        code: operationError instanceof ApiError ? operationError.code : undefined,
+      });
+      if (
+        action === 'materialize'
+        && operationError instanceof ApiError
+        && [
+          'EVENT_PACK_FACTORY_BUILD_NOT_READY',
+          'EVENT_PACK_FACTORY_SOURCE_REVIEW_REQUIRED',
+        ].includes(operationError.code ?? '')
+      ) {
+        setMaterializeErrors((current) => ({
+          ...current,
+          sourceReview: message,
+        }));
+        focusFactoryTarget('factory-review-heading');
+      }
       return undefined;
     } finally {
       setBusyAction(undefined);
@@ -407,14 +669,40 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
   }) => {
     if (!guidedHandoff) return;
     const currentWorkflow = await api.getGuidedWorkflow(guidedHandoff.workflowId);
+    setGuidedWorkflow(currentWorkflow);
+    setGuidedLinkState(currentWorkflow.draft.eventPackId
+      ? 'EVENT_PACK'
+      : currentWorkflow.draft.eventPackBuildId
+        ? 'BUILD'
+        : undefined);
     if (
       input.eventPackId
       && currentWorkflow.draft.eventPackId
       && currentWorkflow.draft.eventPackId !== input.eventPackId
     ) {
-      throw new Error(isZh
-        ? '该引导已关联另一个 Event Pack；如需更换，请新建引导工作流。'
-        : 'This guided workflow already links another Event Pack. Start a new workflow to replace it.');
+      throw new ApiError(
+        isZh
+          ? '该引导已关联另一个 Event Pack；如需更换，请新建引导工作流。'
+          : 'This guided workflow already links another Event Pack. Start a new workflow to replace it.',
+        422,
+        undefined,
+        'GUIDED_ARTIFACT_INVALID',
+      );
+    }
+    if (
+      input.eventPackBuildId
+      && currentWorkflow.draft.eventPackBuildId
+      && currentWorkflow.draft.eventPackBuildId !== input.eventPackBuildId
+      && builds.some((build) => build.id === currentWorkflow.draft.eventPackBuildId)
+    ) {
+      throw new ApiError(
+        isZh
+          ? '该 AI 引导已经关联另一个仍然存在的构建任务。页面不会替换它；请打开原任务，或新建一个 AI 引导。'
+          : 'This guided workflow already links another existing build. It will not be replaced; open the linked build or start a new guided workflow.',
+        422,
+        undefined,
+        'GUIDED_ARTIFACT_INVALID',
+      );
     }
     // 服务器会重新验证旧构建是否仍存在：仍存在时不可替换；已删除或到期且尚未
     // 物化 Event Pack 时，允许把当前人工审核的新构建修复性关联回来。
@@ -423,23 +711,55 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
       : input.eventPackBuildId;
     const eventPackId = currentWorkflow.draft.eventPackId ? undefined : input.eventPackId;
     if (!eventPackBuildId && !eventPackId) return;
-    await api.linkGuidedWorkflowArtifacts(currentWorkflow.id, {
+    const linkedWorkflow = await api.linkGuidedWorkflowArtifacts(currentWorkflow.id, {
       expectedVersion: currentWorkflow.version,
       eventPackBuildId,
       eventPackId,
     });
+    setGuidedWorkflow(linkedWorkflow);
+    setGuidedLinkState(linkedWorkflow.draft.eventPackId
+      ? 'EVENT_PACK'
+      : linkedWorkflow.draft.eventPackBuildId
+        ? 'BUILD'
+        : undefined);
   };
 
   const createBuild = async (event: FormEvent) => {
     event.preventDefault();
     const title = buildTitle.trim();
-    if (title.length < 3) return;
+    if (title.length < 3) {
+      setBuildTitleError(isZh
+        ? '内部任务名称至少需要 3 个字符。'
+        : 'Internal build title must contain at least 3 characters.');
+      focusFactoryTarget('factory-build-title');
+      return;
+    }
+    setBuildTitleError(undefined);
+    const linkedBuild = builds.find(
+      (build) => build.id === guidedWorkflow?.draft.eventPackBuildId,
+    );
+    if (guidedHandoff && linkedBuild) {
+      const message = isZh
+        ? '当前 AI 引导已经关联了一个仍然存在的构建任务。页面已打开该任务；如需从头开始，请新建一个 AI 引导。'
+        : 'This guided workflow already links an existing build. That build is now open; start a new guided workflow to begin again.';
+      setError(message);
+      setActionError({
+        action: 'create',
+        section: 'general',
+        message,
+        code: 'GUIDED_ARTIFACT_INVALID',
+      });
+      await selectBuild(linkedBuild.id);
+      focusFactoryTarget('factory-overview-heading');
+      return;
+    }
     await run('create', async () => {
       const build = await api.createFactoryBuild(title);
       setBuilds((current) => [build, ...current]);
       setBuildTitle('');
+      setBuildTitleError(undefined);
       setMaterializeTitle(build.title);
-      await refreshSnapshot(build.id);
+      await selectBuild(build.id);
       if (guidedHandoff) {
         await linkGuidedArtifact({ eventPackBuildId: build.id });
         setGuidedLinkState('BUILD');
@@ -458,34 +778,66 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
       const remaining = builds.filter((item) => item.id !== snapshot.build.id);
       setBuilds(remaining);
       setSnapshot(undefined);
+      setAcknowledgedReview(false);
+      setMaterializeErrors({});
+      idempotentAttempts.current.clear();
       window.sessionStorage.removeItem(FACTORY_BUILD_STORAGE_KEY);
-      if (remaining[0]) await refreshSnapshot(remaining[0].id);
+      if (remaining[0]) await selectBuild(remaining[0].id);
     });
   };
 
   const updatePasteDraft = (localId: string, patch: Partial<PasteDraft>) => {
+    const currentDraft = pasteDrafts.find((draft) => draft.localId === localId);
+    const nextDraft = currentDraft ? { ...currentDraft, ...patch } : undefined;
     setPasteDrafts((current) => current.map((draft) => draft.localId === localId
       ? { ...draft, ...patch }
       : draft));
+    if (nextDraft && pasteErrors[localId]) {
+      setPasteErrors((currentErrors) => ({
+        ...currentErrors,
+        [localId]: validatePasteDraft(nextDraft, isZh),
+      }));
+    }
   };
 
-  const validPasteDraft = (draft: PasteDraft) => draft.title.trim().length > 0
-    && draft.publisher.trim().length > 0
-    && draft.rawText.trim().length >= 20
-    && (!draft.url.trim() || draft.url.trim().startsWith('https://'))
-    && new Date(draft.publishedAt).getTime() <= new Date(draft.knownAt).getTime();
-
   const submitPasteSources = async () => {
-    if (
-      !snapshot
-      || pasteDrafts.length > remainingSourceSlots
-      || !pasteDrafts.every(validPasteDraft)
-    ) {
-      setError(isZh
-        ? `请完整填写每个来源，使用 HTTPS 地址并检查时间；当前最多还能加入 ${remainingSourceSlots} 个有效证据来源。`
-        : `Complete every source, use HTTPS URLs, and check timestamps. This build can accept ${remainingSourceSlots} more active evidence source(s).`);
+    if (!snapshot) return;
+    const nextPasteErrors = Object.fromEntries(
+      pasteDrafts.map((draft) => [draft.localId, validatePasteDraft(draft, isZh)]),
+    );
+    setPasteErrors(nextPasteErrors);
+    const firstInvalidDraft = pasteDrafts.find(
+      (draft) => Object.keys(nextPasteErrors[draft.localId]).length > 0,
+    );
+    if (pasteDrafts.length > remainingSourceSlots || firstInvalidDraft) {
+      const message = pasteDrafts.length > remainingSourceSlots
+        ? isZh
+          ? `当前最多还能加入 ${remainingSourceSlots} 个有效证据来源，请减少本次来源数量。`
+          : `This build can accept only ${remainingSourceSlots} more active evidence source(s). Remove sources from this batch.`
+        : isZh
+          ? '请补全标红字段，并确认 HTTPS 地址和两个时间的先后顺序。'
+          : 'Complete the highlighted fields and verify the HTTPS URL and timestamp order.';
+      setError(undefined);
+      setActionError({
+        action: 'paste-validation',
+        section: 'paste',
+        message,
+      });
+      if (firstInvalidDraft) {
+        const firstField = PASTE_FIELD_ORDER.find(
+          (field) => Boolean(nextPasteErrors[firstInvalidDraft.localId][field]),
+        );
+        if (firstField) {
+          focusFactoryTarget(
+            `${firstInvalidDraft.localId}-${PASTE_TARGET_SUFFIX[firstField]}`,
+          );
+        }
+      } else {
+        focusFactoryTarget('factory-paste-heading');
+      }
       return;
     }
+    setActionError(undefined);
     await run('paste', async () => {
       let revision = snapshot.build.revision;
       try {
@@ -502,6 +854,7 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
           revision = mutation.build.revision;
         }
         setPasteDrafts([newPasteDraft(0)]);
+        setPasteErrors({});
       } finally {
         // 批量请求不是事务：即使中途失败，前端也必须恢复服务器上的最新修订号，
         // 否则用户重试会持续触发 revision conflict。
@@ -512,7 +865,21 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
 
   const search = async (event: FormEvent) => {
     event.preventDefault();
-    if (!snapshot || !searchQuery.trim() || !selectedEngine) return;
+    if (!snapshot || !selectedEngine) return;
+    if (!searchQuery.trim()) {
+      const message = isZh ? '请先填写检索问题。' : 'Enter a search query first.';
+      setSearchQueryError(message);
+      setError(undefined);
+      setActionError({
+        action: 'search-validation',
+        section: 'search',
+        message,
+      });
+      focusFactoryTarget('factory-search-query');
+      return;
+    }
+    setSearchQueryError(undefined);
+    setActionError(undefined);
     const searchInput = {
       query: searchQuery.trim(),
       engine: searchEngine,
@@ -527,7 +894,11 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
     const operation = 'search';
     const attempt = getIdempotentAttempt(
       operation,
-      JSON.stringify({ revision: snapshot.build.revision, searchInput }),
+      JSON.stringify({
+        buildId: snapshot.build.id,
+        revision: snapshot.build.revision,
+        searchInput,
+      }),
       () => searchInput,
     );
     await run('search', async () => {
@@ -562,6 +933,7 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
     if (!snapshot) return;
     const operation = `reader:${source.id}`;
     const signature = JSON.stringify({
+      buildId: snapshot.build.id,
       revision: snapshot.build.revision,
       sourceId: source.id,
     });
@@ -614,21 +986,93 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
     });
   };
 
+  const clearMaterializeError = (field: MaterializeValidationField) => {
+    setMaterializeErrors((current) => {
+      if (!current[field]) return current;
+      const next = { ...current };
+      delete next[field];
+      return next;
+    });
+  };
+
   const materialize = async (event: FormEvent) => {
     event.preventDefault();
-    if (
-      !snapshot
-      || materializeTitle.trim().length < 3
-      || summary.trim().length < 8
-      || !instrument.trim()
-      || !acknowledgedReview
-      || impactChannels.length === 0
-    ) {
-      setError(isZh
-        ? '请填写事件包元数据，选择至少一个影响通道，并确认已人工检查所有批准来源。'
-        : 'Complete Event Pack metadata, choose an impact channel, and confirm human review of every approved source.');
+    if (!snapshot) return;
+    const validationErrors: MaterializeValidationErrors = {};
+    if (approvedEvidence.length === 0) {
+      validationErrors.sourceReview = isZh
+        ? '请先在第 3 步至少批准一个粘贴原文或 Reader 全文来源；搜索摘要只能用于发现，不能作为证据。'
+        : 'Approve at least one pasted or Reader full-text source in step 3. Search snippets are discovery-only and cannot serve as evidence.';
+    } else if (pendingEvidenceSources.length > 0) {
+      validationErrors.sourceReview = isZh
+        ? `还有 ${pendingEvidenceSources.length} 个全文证据来源等待人工批准或拒绝。`
+        : `${pendingEvidenceSources.length} full-text evidence source(s) still need an explicit approve or reject decision.`;
+    }
+    if (materializeTitle.trim().length < 3) {
+      validationErrors.title = isZh
+        ? '英文标题至少需要 3 个字符。'
+        : 'English title must contain at least 3 characters.';
+    }
+    if (summary.trim().length < 8) {
+      validationErrors.summary = isZh
+        ? '英文研究摘要至少需要 8 个字符。'
+        : 'English research summary must contain at least 8 characters.';
+    }
+    if (!instrument.trim()) {
+      validationErrors.instrument = isZh
+        ? '请填写研究对象或证券代码。'
+        : 'Enter the instrument or research object identifier.';
+    }
+    if (!asOf || !Number.isFinite(new Date(asOf).getTime())) {
+      validationErrors.asOf = isZh
+        ? '请选择有效的时点边界。'
+        : 'Choose a valid point-in-time cutoff.';
+    }
+    if (impactChannels.length === 0) {
+      validationErrors.impactChannels = isZh
+        ? '至少选择一个需要抽取的影响通道。'
+        : 'Select at least one impact channel to extract.';
+    }
+    if (!acknowledgedReview) {
+      validationErrors.acknowledgedReview = isZh
+        ? '请确认你已经逐个核对所有批准来源。'
+        : 'Confirm that you reviewed every approved source.';
+    }
+    setMaterializeErrors(validationErrors);
+    const firstInvalidField = MATERIALIZE_FIELD_ORDER.find(
+      (field) => Boolean(validationErrors[field]),
+    );
+    if (firstInvalidField) {
+      const message = isZh
+        ? '尚有必填步骤未完成。页面已标红并定位到第一处问题。'
+        : 'Required steps are incomplete. The first problem is highlighted and focused.';
+      setError(undefined);
+      setActionError({
+        action: 'materialize-validation',
+        section: 'materialize',
+        message,
+      });
+      focusFactoryTarget(MATERIALIZE_TARGETS[firstInvalidField]);
       return;
     }
+    const linkedBuild = builds.find(
+      (build) => build.id === guidedWorkflow?.draft.eventPackBuildId,
+    );
+    if (guidedHandoff && linkedBuild && linkedBuild.id !== snapshot.build.id) {
+      const message = isZh
+        ? `当前 AI 引导仍关联构建任务“${linkedBuild.title}”。请先打开该任务；当前任务不能替换它。`
+        : `This guided workflow remains linked to "${linkedBuild.title}". Open that build first; the current build cannot replace it.`;
+      setError(undefined);
+      setActionError({
+        action: 'materialize',
+        section: 'materialize',
+        message,
+        code: 'GUIDED_ARTIFACT_INVALID',
+      });
+      focusFactoryTarget('factory-overview-heading');
+      return;
+    }
+    setActionError(undefined);
     const materializeInput = {
       title: materializeTitle.trim(),
       titleZh: materializeTitleZh.trim() || undefined,
@@ -643,7 +1087,11 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
     const operation = 'materialize';
     const attempt = getIdempotentAttempt(
       operation,
-      JSON.stringify({ revision: snapshot.build.revision, materializeInput }),
+      JSON.stringify({
+        buildId: snapshot.build.id,
+        revision: snapshot.build.revision,
+        materializeInput,
+      }),
       () => materializeInput,
     );
     await run('materialize', async () => {
@@ -703,12 +1151,81 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
   const approvedEvidence = snapshot?.sources.filter(
     (source) => source.evidenceRole === 'EVIDENCE' && source.reviewStatus === 'APPROVED',
   ) ?? [];
+  const pendingEvidenceSources = snapshot?.sources.filter(
+    (source) => source.evidenceRole === 'EVIDENCE' && source.reviewStatus === 'PENDING',
+  ) ?? [];
   const pendingSources = snapshot?.sources.filter((source) => source.reviewStatus === 'PENDING') ?? [];
   const rejectedSources = snapshot?.sources.filter((source) => source.reviewStatus === 'REJECTED') ?? [];
   const activeEvidenceCount = snapshot?.sources.filter(
     (source) => source.evidenceRole === 'EVIDENCE' && source.reviewStatus !== 'REJECTED',
   ).length ?? 0;
   const remainingSourceSlots = Math.max(0, MAX_PASTE_SOURCES - activeEvidenceCount);
+  const linkedGuidedBuild = builds.find(
+    (build) => build.id === guidedWorkflow?.draft.eventPackBuildId,
+  );
+  const selectedBuildIsGuided = Boolean(
+    snapshot && linkedGuidedBuild?.id === snapshot.build.id,
+  );
+  const evidenceReviewFingerprint = useMemo(
+    () => (snapshot?.sources ?? [])
+      .filter((source) => source.evidenceRole === 'EVIDENCE')
+      .map((source) => `${source.id}:${source.contentHash}:${source.reviewStatus}`)
+      .sort()
+      .join('|'),
+    [snapshot?.sources],
+  );
+
+  useEffect(() => {
+    if (approvedEvidence.length === 0 || pendingEvidenceSources.length > 0) return;
+    setMaterializeErrors((current) => {
+      if (!current.sourceReview) return current;
+      const next = { ...current };
+      delete next.sourceReview;
+      return next;
+    });
+  }, [approvedEvidence.length, pendingEvidenceSources.length]);
+
+  useEffect(() => {
+    // 来源正文、哈希或审核状态变化后，旧的“我已逐个核对”声明不再成立。
+    setAcknowledgedReview(false);
+  }, [evidenceReviewFingerprint]);
+
+  useEffect(() => {
+    if (
+      Object.keys(materializeErrors).length === 0
+      && actionError?.action === 'materialize-validation'
+    ) {
+      setActionError(undefined);
+    }
+  }, [actionError?.action, materializeErrors]);
+
+  useEffect(() => {
+    const hasPasteErrors = Object.values(pasteErrors).some(
+      (errors) => Object.keys(errors).length > 0,
+    );
+    if (!hasPasteErrors && actionError?.action === 'paste-validation') {
+      setActionError(undefined);
+    }
+  }, [actionError?.action, pasteErrors]);
+
+  const renderActionError = (section: FactoryErrorSection) => (
+    actionError?.section === section ? (
+      <div className="factory-action-error">
+        <InlineNotification
+          kind="error"
+          lowContrast
+          hideCloseButton
+          title={isZh ? '此步骤尚未完成' : 'This step was not completed'}
+          subtitle={actionError.message}
+        />
+        {actionError.code === 'ZHIPU_TEMPORARY_CREDENTIAL_REQUIRED' ? (
+          <Button kind="tertiary" size="sm" onClick={() => navigate('ai')}>
+            {isZh ? '前往 AI 配置' : 'Open AI configuration'}
+          </Button>
+        ) : null}
+      </div>
+    ) : null
+  );
 
   if (state === 'loading') {
     return <div className="page"><PageHeader title={isZh ? 'Event Pack 自动构建' : 'Event Pack Factory'} subtitle={isZh ? '正在恢复构建任务与来源目录。' : 'Restoring builds and source records.'} /><LoadingPanel /></div>;
@@ -731,7 +1248,7 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
         )}
       />
 
-      {error ? (
+      {error && (!actionError || actionError.section === 'general') ? (
         <InlineNotification
           kind="error"
           lowContrast
@@ -744,16 +1261,36 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
       {guidedHandoff ? (
         <div className="inline-action-notice">
           <InlineNotification
-            kind={guidedLinkState === 'EVENT_PACK' ? 'success' : 'info'}
+            kind={guidedLinkState === 'EVENT_PACK'
+              ? 'success'
+              : guidedLinkState === 'BUILD' && !linkedGuidedBuild
+                ? 'warning'
+                : 'info'}
             lowContrast
             hideCloseButton
             title={guidedLinkState === 'EVENT_PACK'
               ? isZh ? '真实 Event Pack 已关联回 AI 引导' : 'Real Event Pack linked back to AI guidance'
+              : guidedLinkState === 'BUILD'
+                ? linkedGuidedBuild
+                  ? isZh ? 'AI 引导已有已关联构建任务' : 'The guided workflow already has a linked build'
+                  : isZh ? '原已关联构建任务不可用' : 'The previously linked build is unavailable'
               : isZh ? '已载入 AI 引导中的可编辑事件草稿' : 'Editable guided event draft loaded'}
             subtitle={guidedLinkState === 'EVENT_PACK'
               ? isZh
                 ? '请继续逐条审核主张；关联动作不会批准主张、冻结事件包或推进工作流。'
                 : 'Continue with claim-by-claim review. Linking does not approve claims, freeze the pack, or advance the workflow.'
+              : guidedLinkState === 'BUILD'
+                ? linkedGuidedBuild
+                  ? selectedBuildIsGuided
+                    ? isZh
+                      ? `当前正在编辑已关联任务“${linkedGuidedBuild.title}”。其他任务不能替换它。`
+                      : `You are editing the linked build "${linkedGuidedBuild.title}". Other builds cannot replace it.`
+                    : isZh
+                      ? `本引导仍关联任务“${linkedGuidedBuild.title}”；当前选中的任务不能替换它。`
+                      : `This workflow remains linked to "${linkedGuidedBuild.title}"; the selected build cannot replace it.`
+                  : isZh
+                    ? '服务器记录的原构建任务已不存在或已到期。只有确认这一状态后，才能显式关联当前任务进行修复。'
+                    : 'The server-linked build no longer appears in your build list. Only after confirming that state should you explicitly link the current build as a repair.'
               : isZh
                 ? '标题、摘要、证券、时点边界和检索式已经预填。请人工编辑并审核来源；创建任务后，服务器返回的真实 ID 会自动关联。'
                 : 'Title, summary, instrument, cutoff, and search query are prefilled. Edit and review sources yourself; after creation, the real server-returned ID is linked automatically.'}
@@ -768,10 +1305,31 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
               disabled={Boolean(busyAction)}
               onClick={() => void run('guided-link-build', async () => {
                 await linkGuidedArtifact({ eventPackBuildId: snapshot.build.id });
-                setGuidedLinkState('BUILD');
               })}
             >
               {isZh ? '关联当前构建任务' : 'Link current build'}
+            </Button>
+          ) : null}
+          {guidedLinkState === 'BUILD' && linkedGuidedBuild && !selectedBuildIsGuided ? (
+            <Button
+              kind="tertiary"
+              size="sm"
+              disabled={Boolean(busyAction)}
+              onClick={() => void run('select-build', () => selectBuild(linkedGuidedBuild.id))}
+            >
+              {isZh ? '打开已关联构建任务' : 'Open linked build'}
+            </Button>
+          ) : null}
+          {guidedLinkState === 'BUILD' && !linkedGuidedBuild && snapshot && !pendingGuidedPack ? (
+            <Button
+              kind="danger--tertiary"
+              size="sm"
+              disabled={Boolean(busyAction)}
+              onClick={() => void run('guided-link-build', () => linkGuidedArtifact({
+                eventPackBuildId: snapshot.build.id,
+              }))}
+            >
+              {isZh ? '用当前任务修复关联' : 'Repair link with current build'}
             </Button>
           ) : null}
           {pendingGuidedPack ? (
@@ -806,9 +1364,15 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
               labelText={isZh ? '内部任务名称' : 'Internal build title'}
               value={buildTitle}
               maxLength={200}
-              onChange={(event) => setBuildTitle(event.target.value)}
+              invalid={Boolean(buildTitleError)}
+              invalidText={buildTitleError}
+              onChange={(event) => {
+                const value = event.target.value;
+                setBuildTitle(value);
+                if (value.trim().length >= 3) setBuildTitleError(undefined);
+              }}
             />
-            <Button type="submit" size="sm" renderIcon={Plus} disabled={Boolean(busyAction) || buildTitle.trim().length < 3}>
+            <Button type="submit" size="sm" renderIcon={Plus} disabled={Boolean(busyAction)}>
               {isZh ? '新建任务' : 'Create build'}
             </Button>
           </form>
@@ -819,7 +1383,7 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
                 type="button"
                 className={snapshot?.build.id === build.id ? 'is-active' : ''}
                 aria-current={snapshot?.build.id === build.id ? 'true' : undefined}
-                onClick={() => void run('select-build', () => refreshSnapshot(build.id))}
+                onClick={() => void run('select-build', () => selectBuild(build.id))}
               >
                 <strong>{build.title}</strong>
                 <span>r{build.revision} · {build.status.replaceAll('_', ' ')}</span>
@@ -872,7 +1436,7 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
               <section className="factory-section" aria-labelledby="factory-paste-heading">
                 <header className="section-heading">
                   <div>
-                    <h2 id="factory-paste-heading">{isZh ? '1. 批量粘贴网页原文' : '1. Paste webpage text in batches'}</h2>
+                    <h2 id="factory-paste-heading" tabIndex={-1}>{isZh ? '1. 批量粘贴网页原文' : '1. Paste webpage text in batches'}</h2>
                     <p>{isZh
                       ? '每个区块代表一个独立来源，单个任务最多保留 24 个有效证据来源。完整原文会在服务器中暂存 7 天；每次实质修改会顺延清理时间，查看原文不会顺延。Event Pack 本身只保留来源元数据、哈希和短候选主张。'
                       : 'Each block is one source, with at most 24 active evidence sources per build. Full raw text is staged on the server for seven days; substantive mutations extend expiry, viewing does not. The Event Pack retains only source metadata, hashes, and short candidate claims.'}</p>
@@ -891,16 +1455,21 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
                     {isZh ? '增加来源' : 'Add source'}
                   </Button>
                 </header>
+                {renderActionError('paste')}
                 <div className="factory-paste-list">
                   {pasteDrafts.map((draft, index) => (
-                    <fieldset key={draft.localId} className="factory-paste-source">
+                    <fieldset
+                      key={draft.localId}
+                      className={`factory-paste-source${Object.keys(pasteErrors[draft.localId] ?? {}).length > 0 ? ' is-invalid' : ''}`}
+                      aria-invalid={Object.keys(pasteErrors[draft.localId] ?? {}).length > 0}
+                    >
                       <legend>{isZh ? `来源 ${index + 1}` : `Source ${index + 1}`}</legend>
                       <div className="factory-form-grid">
-                        <TextInput id={`${draft.localId}-title`} labelText={isZh ? '网页标题' : 'Page title'} value={draft.title} onChange={(event) => updatePasteDraft(draft.localId, { title: event.target.value })} />
-                        <TextInput id={`${draft.localId}-publisher`} labelText={isZh ? '发布方' : 'Publisher'} value={draft.publisher} onChange={(event) => updatePasteDraft(draft.localId, { publisher: event.target.value })} />
-                        <TextInput id={`${draft.localId}-url`} type="url" labelText={isZh ? 'HTTPS 网页地址（可选）' : 'HTTPS page URL (optional)'} value={draft.url} onChange={(event) => updatePasteDraft(draft.localId, { url: event.target.value })} />
-                        <TextInput id={`${draft.localId}-published`} type="datetime-local" labelText={isZh ? '发布时间' : 'Published at'} value={draft.publishedAt} onChange={(event) => updatePasteDraft(draft.localId, { publishedAt: event.target.value })} />
-                        <TextInput id={`${draft.localId}-known`} type="datetime-local" labelText={isZh ? '研究中可见时间' : 'Known at'} value={draft.knownAt} onChange={(event) => updatePasteDraft(draft.localId, { knownAt: event.target.value })} />
+                        <TextInput id={`${draft.localId}-title`} labelText={isZh ? '网页标题' : 'Page title'} value={draft.title} invalid={Boolean(pasteErrors[draft.localId]?.title)} invalidText={pasteErrors[draft.localId]?.title} onChange={(event) => updatePasteDraft(draft.localId, { title: event.target.value })} />
+                        <TextInput id={`${draft.localId}-publisher`} labelText={isZh ? '发布方' : 'Publisher'} value={draft.publisher} invalid={Boolean(pasteErrors[draft.localId]?.publisher)} invalidText={pasteErrors[draft.localId]?.publisher} onChange={(event) => updatePasteDraft(draft.localId, { publisher: event.target.value })} />
+                        <TextInput id={`${draft.localId}-url`} type="url" labelText={isZh ? 'HTTPS 网页地址（可选）' : 'HTTPS page URL (optional)'} value={draft.url} invalid={Boolean(pasteErrors[draft.localId]?.url)} invalidText={pasteErrors[draft.localId]?.url} onChange={(event) => updatePasteDraft(draft.localId, { url: event.target.value })} />
+                        <TextInput id={`${draft.localId}-published`} type="datetime-local" labelText={isZh ? '发布时间' : 'Published at'} value={draft.publishedAt} invalid={Boolean(pasteErrors[draft.localId]?.publishedAt)} invalidText={pasteErrors[draft.localId]?.publishedAt} onChange={(event) => updatePasteDraft(draft.localId, { publishedAt: event.target.value })} />
+                        <TextInput id={`${draft.localId}-known`} type="datetime-local" labelText={isZh ? '研究中可见时间' : 'Known at'} value={draft.knownAt} invalid={Boolean(pasteErrors[draft.localId]?.knownAt)} invalidText={pasteErrors[draft.localId]?.knownAt} onChange={(event) => updatePasteDraft(draft.localId, { knownAt: event.target.value })} />
                       </div>
                       <TextArea
                         id={`${draft.localId}-raw`}
@@ -909,10 +1478,19 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
                         maxCount={100_000}
                         enableCounter
                         rows={8}
+                        invalid={Boolean(pasteErrors[draft.localId]?.rawText)}
+                        invalidText={pasteErrors[draft.localId]?.rawText}
                         onChange={(event) => updatePasteDraft(draft.localId, { rawText: event.target.value })}
                       />
                       {pasteDrafts.length > 1 ? (
-                        <Button kind="danger--ghost" size="sm" renderIcon={Trash} onClick={() => setPasteDrafts((current) => current.filter((item) => item.localId !== draft.localId))}>
+                        <Button kind="danger--ghost" size="sm" renderIcon={Trash} onClick={() => {
+                          setPasteDrafts((current) => current.filter((item) => item.localId !== draft.localId));
+                          setPasteErrors((current) => {
+                            const next = { ...current };
+                            delete next[draft.localId];
+                            return next;
+                          });
+                        }}>
                           {isZh ? '删除这个来源' : 'Remove source'}
                         </Button>
                       ) : null}
@@ -923,8 +1501,6 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
                   renderIcon={FileText}
                   disabled={
                     Boolean(busyAction)
-                    || pasteDrafts.length > remainingSourceSlots
-                    || !pasteDrafts.every(validPasteDraft)
                   }
                   onClick={() => void submitPasteSources()}
                 >
@@ -944,8 +1520,26 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
                   </div>
                   <Button kind="ghost" size="sm" onClick={() => navigate('ai')}>{isZh ? '检查临时 API 配置' : 'Check temporary API setup'}</Button>
                 </header>
+                {renderActionError('search')}
                 <form className="factory-search-form" onSubmit={(event) => void search(event)}>
-                  <TextInput id="factory-search-query" labelText={isZh ? '检索问题' : 'Search query'} value={searchQuery} maxLength={70} onChange={(event) => setSearchQuery(event.target.value)} />
+                  <TextInput
+                    id="factory-search-query"
+                    labelText={isZh ? '检索问题' : 'Search query'}
+                    value={searchQuery}
+                    maxLength={70}
+                    invalid={Boolean(searchQueryError)}
+                    invalidText={searchQueryError}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setSearchQuery(value);
+                      if (value.trim()) {
+                        setSearchQueryError(undefined);
+                        if (actionError?.action === 'search-validation') {
+                          setActionError(undefined);
+                        }
+                      }
+                    }}
+                  />
                   <Select id="factory-search-engine" labelText={isZh ? '搜索引擎' : 'Search engine'} value={searchEngine} onChange={(event) => setSearchEngine(event.target.value as FactorySearchEngineId)}>
                     {engines.map((engine) => <SelectItem key={engine.engine} value={engine.engine} text={`${engine.displayName} · ¥${engine.priceCnyPerCall.toFixed(2)}/${isZh ? '次' : 'call'}`} />)}
                   </Select>
@@ -968,7 +1562,7 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
                       ? `本次搜索预计收取 ¥${(selectedEngine?.priceCnyPerCall ?? 0).toFixed(2)}。未修改请求时重试会复用同一请求号，避免重复调度；修改参数会生成新请求并可能再次计费。Reader 价格仍需以供应商控制台为准。`
                       : `This search is estimated at ¥${(selectedEngine?.priceCnyPerCall ?? 0).toFixed(2)}. An unchanged retry reuses its request ID to avoid redispatch; changing parameters creates a new potentially billable request. Verify Reader pricing in the provider console.`}</p>
                   </div>
-                  <Button type="submit" renderIcon={MagnifyingGlass} disabled={Boolean(busyAction) || !searchQuery.trim()}>
+                  <Button type="submit" renderIcon={MagnifyingGlass} disabled={Boolean(busyAction)}>
                     {busyAction === 'search' ? (isZh ? '正在联网搜索' : 'Searching the web') : (isZh ? '确认费用并搜索' : 'Confirm cost and search')}
                   </Button>
                 </form>
@@ -985,10 +1579,17 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
                 ) : null}
               </section>
 
-              <section className="factory-section" aria-labelledby="factory-review-heading">
+              <section
+                className={`factory-section${materializeErrors.sourceReview ? ' factory-section--invalid' : ''}`}
+                aria-labelledby="factory-review-heading"
+                aria-invalid={Boolean(materializeErrors.sourceReview)}
+                aria-describedby={materializeErrors.sourceReview
+                  ? 'factory-source-review-error'
+                  : undefined}
+              >
                 <header className="section-heading">
                   <div>
-                    <h2 id="factory-review-heading">{isZh ? '3. 逐个审核来源' : '3. Review every source'}</h2>
+                    <h2 id="factory-review-heading" tabIndex={-1}>{isZh ? '3. 逐个审核来源' : '3. Review every source'}</h2>
                     <p>{isZh
                       ? '先批准搜索线索再读取全文；Reader 返回的全文证据仍是新的待审核对象。任何批准都不能代替打开原网页核对。'
                       : 'Approve a discovery result before reading the full page. Reader evidence returns as a new pending object and still needs review. Approval never replaces checking the original page.'}</p>
@@ -997,6 +1598,17 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
                     {isZh ? '刷新' : 'Refresh'}
                   </Button>
                 </header>
+                {materializeErrors.sourceReview ? (
+                  <InlineNotification
+                    id="factory-source-review-error"
+                    kind="error"
+                    lowContrast
+                    hideCloseButton
+                    title={isZh ? '来源审核尚未完成' : 'Source review is incomplete'}
+                    subtitle={materializeErrors.sourceReview}
+                  />
+                ) : null}
+                {renderActionError('review')}
                 {snapshot.sources.length === 0 ? (
                   <EmptyState title={isZh ? '还没有来源' : 'No sources yet'} body={isZh ? '从上方粘贴原文或执行一次联网搜索。' : 'Paste source text or run a web search above.'} />
                 ) : (
@@ -1033,22 +1645,103 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
                       ? '此操作只生成候选主张，不会批准主张或冻结事件包。生成后必须在“事件包审核”中逐条编辑、批准或拒绝。'
                       : 'This only generates candidate claims. It does not approve claims or freeze the Event Pack. Edit, approve, or reject every claim in Event Pack Review afterward.'}</p>
                   </div>
-                  <div className="factory-evidence-ready">
+                  <div className={`factory-evidence-ready${materializeErrors.sourceReview ? ' is-invalid' : ''}`}>
                     <ShieldCheck size={21} aria-hidden="true" />
                     <span>{isZh ? `${approvedEvidence.length} 个已批准证据来源` : `${approvedEvidence.length} approved evidence source(s)`}</span>
                   </div>
                 </header>
+                {renderActionError('materialize')}
+                {Object.keys(materializeErrors).length > 0 ? (
+                  <div className="factory-validation-summary" role="alert">
+                    <strong>{isZh ? '完成以下项目后才能生成 Event Pack：' : 'Complete these items before generating the Event Pack:'}</strong>
+                    <ul>
+                      {MATERIALIZE_FIELD_ORDER.flatMap((field) => {
+                        const message = materializeErrors[field];
+                        if (!message) return [];
+                        return [(
+                          <li key={field}>
+                            <button
+                              type="button"
+                              onClick={() => focusFactoryTarget(MATERIALIZE_TARGETS[field])}
+                            >
+                              {message}
+                            </button>
+                          </li>
+                        )];
+                      })}
+                    </ul>
+                  </div>
+                ) : null}
                 <form onSubmit={(event) => void materialize(event)}>
                   <div className="factory-form-grid">
-                    <TextInput id="factory-pack-title" labelText={isZh ? '英文标题' : 'English title'} value={materializeTitle} maxLength={200} onChange={(event) => setMaterializeTitle(event.target.value)} />
+                    <TextInput
+                      id="factory-pack-title"
+                      labelText={isZh ? '英文标题' : 'English title'}
+                      value={materializeTitle}
+                      maxLength={200}
+                      invalid={Boolean(materializeErrors.title)}
+                      invalidText={materializeErrors.title}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setMaterializeTitle(value);
+                        if (value.trim().length >= 3) clearMaterializeError('title');
+                      }}
+                    />
                     <TextInput id="factory-pack-title-zh" labelText={isZh ? '中文标题（可选）' : 'Chinese title (optional)'} value={materializeTitleZh} maxLength={200} onChange={(event) => setMaterializeTitleZh(event.target.value)} />
-                    <TextArea id="factory-pack-summary" labelText={isZh ? '英文研究摘要' : 'English research summary'} value={summary} maxCount={1_000} enableCounter onChange={(event) => setSummary(event.target.value)} />
+                    <TextArea
+                      id="factory-pack-summary"
+                      labelText={isZh ? '英文研究摘要' : 'English research summary'}
+                      value={summary}
+                      maxCount={1_000}
+                      enableCounter
+                      invalid={Boolean(materializeErrors.summary)}
+                      invalidText={materializeErrors.summary}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setSummary(value);
+                        if (value.trim().length >= 8) clearMaterializeError('summary');
+                      }}
+                    />
                     <TextArea id="factory-pack-summary-zh" labelText={isZh ? '中文研究摘要（可选）' : 'Chinese research summary (optional)'} value={summaryZh} maxCount={1_000} enableCounter onChange={(event) => setSummaryZh(event.target.value)} />
-                    <TextInput id="factory-pack-instrument" labelText={isZh ? '证券代码' : 'Instrument symbol'} value={instrument} maxLength={32} onChange={(event) => setInstrument(event.target.value.toUpperCase())} />
-                    <TextInput id="factory-pack-asof" type="datetime-local" labelText={isZh ? '时点边界 (asOf)' : 'Point-in-time cutoff (asOf)'} value={asOf} onChange={(event) => setAsOf(event.target.value)} />
+                    <TextInput
+                      id="factory-pack-instrument"
+                      labelText={isZh ? '研究对象或证券代码' : 'Instrument or research object'}
+                      value={instrument}
+                      maxLength={32}
+                      invalid={Boolean(materializeErrors.instrument)}
+                      invalidText={materializeErrors.instrument}
+                      onChange={(event) => {
+                        const value = event.target.value.toUpperCase();
+                        setInstrument(value);
+                        if (value.trim()) clearMaterializeError('instrument');
+                      }}
+                    />
+                    <TextInput
+                      id="factory-pack-asof"
+                      type="datetime-local"
+                      labelText={isZh ? '时点边界 (asOf)' : 'Point-in-time cutoff (asOf)'}
+                      value={asOf}
+                      invalid={Boolean(materializeErrors.asOf)}
+                      invalidText={materializeErrors.asOf}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setAsOf(value);
+                        if (value && Number.isFinite(new Date(value).getTime())) {
+                          clearMaterializeError('asOf');
+                        }
+                      }}
+                    />
                     <NumberInput id="factory-maximum-claims" label={isZh ? '最多候选主张' : 'Maximum candidate claims'} min={1} max={50} value={maximumClaims} onChange={(_event, stateValue) => setMaximumClaims(Math.max(1, Math.min(50, Number(stateValue.value) || 16)))} />
                   </div>
-                  <fieldset className="factory-impact-channels">
+                  <fieldset
+                    id="factory-impact-channels"
+                    className={`factory-impact-channels${materializeErrors.impactChannels ? ' is-invalid' : ''}`}
+                    aria-invalid={Boolean(materializeErrors.impactChannels)}
+                    aria-describedby={materializeErrors.impactChannels
+                      ? 'factory-impact-channels-error'
+                      : undefined}
+                    tabIndex={-1}
+                  >
                     <legend>{isZh ? '需要抽取的影响通道' : 'Impact channels to extract'}</legend>
                     {IMPACT_CHANNELS.map((channel) => (
                       <Checkbox
@@ -1056,24 +1749,45 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
                         id={`factory-impact-${channel}`}
                         labelText={channel}
                         checked={impactChannels.includes(channel)}
-                        onChange={(_event, stateValue) => setImpactChannels((current) => stateValue.checked
-                          ? [...current, channel]
-                          : current.filter((item) => item !== channel))}
+                        onChange={(_event, stateValue) => {
+                          setImpactChannels((current) => stateValue.checked
+                            ? [...current, channel]
+                            : current.filter((item) => item !== channel));
+                          if (stateValue.checked) clearMaterializeError('impactChannels');
+                        }}
                       />
                     ))}
+                    {materializeErrors.impactChannels ? (
+                      <p id="factory-impact-channels-error" className="factory-field-error">
+                        {materializeErrors.impactChannels}
+                      </p>
+                    ) : null}
                   </fieldset>
-                  <Checkbox
-                    id="factory-acknowledge-review"
-                    labelText={isZh
-                      ? '我已逐个打开并核对所有批准来源，确认其中不含秘密、无关个人信息或未处理的恶意指令；我理解搜索和 AI 输出可能错误。'
-                      : 'I opened and reviewed every approved source, confirmed it contains no secrets, unnecessary personal data, or unhandled malicious instructions, and understand that search and AI output may be wrong.'}
-                    checked={acknowledgedReview}
-                    onChange={(_event, stateValue) => setAcknowledgedReview(stateValue.checked)}
-                  />
+                  <div className={`factory-review-acknowledgement${materializeErrors.acknowledgedReview ? ' is-invalid' : ''}`}>
+                    <Checkbox
+                      id="factory-acknowledge-review"
+                      labelText={isZh
+                        ? '我已逐个打开并核对所有批准来源，确认其中不含秘密、无关个人信息或未处理的恶意指令；我理解搜索和 AI 输出可能错误。'
+                        : 'I opened and reviewed every approved source, confirmed it contains no secrets, unnecessary personal data, or unhandled malicious instructions, and understand that search and AI output may be wrong.'}
+                      checked={acknowledgedReview}
+                      aria-describedby={materializeErrors.acknowledgedReview
+                        ? 'factory-acknowledge-review-error'
+                        : undefined}
+                      onChange={(_event, stateValue) => {
+                        setAcknowledgedReview(stateValue.checked);
+                        if (stateValue.checked) clearMaterializeError('acknowledgedReview');
+                      }}
+                    />
+                    {materializeErrors.acknowledgedReview ? (
+                      <p id="factory-acknowledge-review-error" className="factory-field-error">
+                        {materializeErrors.acknowledgedReview}
+                      </p>
+                    ) : null}
+                  </div>
                   <Button
                     type="submit"
                     renderIcon={ArrowRight}
-                    disabled={Boolean(busyAction) || approvedEvidence.length === 0 || !acknowledgedReview}
+                    disabled={Boolean(busyAction)}
                   >
                     {busyAction === 'materialize'
                       ? isZh ? '正在抽取候选主张' : 'Extracting candidate claims'
