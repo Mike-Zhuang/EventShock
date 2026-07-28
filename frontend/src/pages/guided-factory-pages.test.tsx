@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { api } from '../api/client';
+import { api, ApiError } from '../api/client';
 import type { EventPackFactorySnapshot, GuidedWorkflow } from '../api/types';
 import {
   readFactoryGuidedHandoff,
@@ -22,6 +22,18 @@ vi.mock('../state/workflow-context', () => ({
 }));
 
 vi.mock('../api/client', () => ({
+  ApiError: class MockApiError extends Error {
+    status: number;
+    detail?: string;
+    code?: string;
+
+    constructor(message: string, status: number, detail?: string, code?: string) {
+      super(message);
+      this.status = status;
+      this.detail = detail;
+      this.code = code;
+    }
+  },
   api: {
     getFactoryBuilds: vi.fn(),
     getFactorySearchEngines: vi.fn(),
@@ -152,6 +164,7 @@ describe('Event Pack Factory page', () => {
   });
 
   it('separates discovery snippets from evidence and discloses raw-text retention', async () => {
+    const user = userEvent.setup();
     render(
       <I18nProvider>
         <EventPackFactoryPage navigate={vi.fn()} />
@@ -164,7 +177,104 @@ describe('Event Pack Factory page', () => {
     expect(screen.getByRole('button', { name: 'Read full page into evidence' })).toBeInTheDocument();
     expect(screen.getByText(/Reader pricing has not been verified/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Delete build and raw text' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Generate and open human claim review' })).toBeDisabled();
+    const materialize = screen.getByRole('button', {
+      name: 'Generate and open human claim review',
+    });
+    expect(materialize).toBeEnabled();
+
+    await user.click(materialize);
+
+    expect(api.materializeFactoryBuild).not.toHaveBeenCalled();
+    expect(screen.getAllByText(/Approve at least one pasted or Reader full-text source/).length)
+      .toBeGreaterThan(0);
+    expect(screen.getAllByText(
+      'English research summary must contain at least 8 characters.',
+    ).length).toBeGreaterThan(0);
+    await waitFor(() => expect(screen.getByRole('heading', {
+      name: '3. Review every source',
+    })).toHaveFocus());
+  });
+
+  it('keeps Reader request IDs within the backend schema limit', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.addFactoryReaderSource).mockResolvedValue({
+      build: { ...snapshot.build, revision: 5 },
+      sources: [],
+      idempotencyReplayed: false,
+    });
+
+    render(
+      <I18nProvider>
+        <EventPackFactoryPage navigate={vi.fn()} />
+      </I18nProvider>,
+    );
+
+    await user.click(await screen.findByRole('button', {
+      name: 'Read full page into evidence',
+    }));
+
+    await waitFor(() => expect(api.addFactoryReaderSource).toHaveBeenCalled());
+    const clientRequestId = vi.mocked(api.addFactoryReaderSource).mock.calls[0][4];
+    expect(clientRequestId).toMatch(/^factory-reader-[0-9a-f-]{36}$/);
+    expect(clientRequestId.length).toBeLessThanOrEqual(80);
+  });
+
+  it('keeps incomplete actions clickable and highlights the exact missing inputs', async () => {
+    const user = userEvent.setup();
+    render(
+      <I18nProvider>
+        <EventPackFactoryPage navigate={vi.fn()} />
+      </I18nProvider>,
+    );
+
+    await screen.findByRole('heading', { name: 'Event Pack Factory' });
+
+    const createButton = screen.getByRole('button', { name: 'Create build' });
+    expect(createButton).toBeEnabled();
+    await user.click(createButton);
+    expect(screen.getByLabelText('Internal build title')).toHaveAttribute('aria-invalid', 'true');
+    await waitFor(() => expect(screen.getByLabelText('Internal build title')).toHaveFocus());
+
+    const pasteButton = screen.getByRole('button', { name: 'Check and add 1 source(s)' });
+    expect(pasteButton).toBeEnabled();
+    await user.click(pasteButton);
+    expect(screen.getByLabelText('Page title')).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByLabelText('Publisher')).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByLabelText('Raw webpage text')).toHaveAttribute('aria-invalid', 'true');
+    await waitFor(() => expect(screen.getByLabelText('Page title')).toHaveFocus());
+    expect(api.addFactoryPasteSource).not.toHaveBeenCalled();
+
+    const searchButton = screen.getByRole('button', { name: 'Confirm cost and search' });
+    expect(searchButton).toBeEnabled();
+    await user.click(searchButton);
+    expect(screen.getByLabelText('Search query')).toHaveAttribute('aria-invalid', 'true');
+    await waitFor(() => expect(screen.getByLabelText('Search query')).toHaveFocus());
+    expect(api.searchFactorySources).not.toHaveBeenCalled();
+  });
+
+  it('shows the missing temporary Zhipu credential beside the search step', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.searchFactorySources).mockRejectedValueOnce(new ApiError(
+      'Configure a temporary Zhipu API key before using Web Search.',
+      409,
+      undefined,
+      'ZHIPU_TEMPORARY_CREDENTIAL_REQUIRED',
+    ));
+
+    render(
+      <I18nProvider>
+        <EventPackFactoryPage navigate={vi.fn()} />
+      </I18nProvider>,
+    );
+
+    const query = await screen.findByLabelText('Search query');
+    await user.type(query, 'official launch notice');
+    await user.click(screen.getByRole('button', { name: 'Confirm cost and search' }));
+
+    expect(await screen.findByText(
+      'Configure a temporary Zhipu API key in AI configuration, then retry this action.',
+    )).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open AI configuration' })).toBeInTheDocument();
   });
 
   it('prevents a reviewed search result from being imported through Reader twice', async () => {
@@ -269,6 +379,58 @@ describe('Event Pack Factory page', () => {
     );
   });
 
+  it('restores the guided workflow linked build without offering an invalid replacement', async () => {
+    const user = userEvent.setup();
+    const linkedWorkflow: GuidedWorkflow = {
+      ...guidedWorkflow,
+      stage: 'SOURCE_REVIEW',
+      pendingProposal: undefined,
+      pendingProposalId: undefined,
+      draft: {
+        eventMetadata: guidedWorkflow.pendingProposal!.proposedEventMetadata,
+        sourceMethod: 'COMBINED',
+        searchQueries: ['official notice'],
+        eventPackBuildId: snapshot.build.id,
+      },
+    };
+    const otherBuild = {
+      ...snapshot.build,
+      id: 'epfb-other-1234',
+      title: 'Unrelated current build',
+    };
+    writeFactoryGuidedHandoff(linkedWorkflow);
+    vi.mocked(api.getGuidedWorkflow).mockResolvedValue(linkedWorkflow);
+    vi.mocked(api.getFactoryBuilds).mockResolvedValue([otherBuild, snapshot.build]);
+    vi.mocked(api.getFactoryBuild).mockImplementation(async (buildId) => (
+      buildId === snapshot.build.id
+        ? snapshot
+        : { ...snapshot, build: otherBuild }
+    ));
+    window.sessionStorage.setItem('eventshock:last-factory-build-id', otherBuild.id);
+
+    render(
+      <I18nProvider>
+        <EventPackFactoryPage navigate={vi.fn()} />
+      </I18nProvider>,
+    );
+
+    expect(await screen.findByRole('heading', {
+      name: snapshot.build.title,
+    })).toBeInTheDocument();
+    expect(screen.getByText('The guided workflow already has a linked build')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Link current build' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /Unrelated current build/ }));
+    expect(await screen.findByRole('button', { name: 'Open linked build' })).toBeInTheDocument();
+    expect(api.linkGuidedWorkflowArtifacts).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: 'Open linked build' }));
+    expect(await screen.findByRole('heading', {
+      name: snapshot.build.title,
+    })).toBeInTheDocument();
+    expect(api.linkGuidedWorkflowArtifacts).not.toHaveBeenCalled();
+  });
+
   it('prefills reviewed guided metadata and links only the server-returned build ID', async () => {
     const user = userEvent.setup();
     const sourceReviewWorkflow: GuidedWorkflow = {
@@ -355,7 +517,17 @@ describe('guided workflow page', () => {
     expect(screen.getByText('Study an index-inclusion event.').closest('article'))
       .toHaveClass('guided-message--user');
     const advance = screen.getByRole('button', { name: 'I reviewed this stage, continue' });
-    expect(advance).toBeDisabled();
+    expect(advance).toBeEnabled();
+
+    await user.click(advance);
+
+    expect(api.advanceGuidedWorkflow).not.toHaveBeenCalled();
+    expect(screen.getAllByText(/Review and apply the current candidate first/).length)
+      .toBeGreaterThan(0);
+    await waitFor(() => expect(screen.getByRole('heading', {
+      name: 'Event goal',
+      level: 3,
+    })).toHaveFocus());
 
     await user.click(screen.getByRole('button', { name: 'Apply reviewed candidate' }));
 
@@ -396,6 +568,16 @@ describe('guided workflow page', () => {
       .toBeInTheDocument();
     expect(screen.queryByLabelText('Human-saved scenario ID')).not.toBeInTheDocument();
 
+    await user.click(screen.getByRole('button', {
+      name: 'I reviewed this stage, continue',
+    }));
+
+    expect(api.advanceGuidedWorkflow).not.toHaveBeenCalled();
+    expect(screen.getAllByText(/generate a real Event Pack/).length).toBeGreaterThan(0);
+    await waitFor(() => expect(screen.getByRole('heading', {
+      name: 'Complete review in the dedicated workspace',
+    })).toHaveFocus());
+
     await user.click(screen.getByRole('button', { name: 'Open Event Pack Factory' }));
 
     expect(navigate).toHaveBeenCalledWith('factory');
@@ -404,5 +586,47 @@ describe('guided workflow page', () => {
       sourceMethod: 'PASTE',
       searchQueries: ['official event notice'],
     });
+  });
+
+  it('places a server-side review blocker beside the workspace that can fix it', async () => {
+    const user = userEvent.setup();
+    const claimReviewWorkflow: GuidedWorkflow = {
+      ...guidedWorkflow,
+      stage: 'CLAIM_REVIEW',
+      pendingProposal: undefined,
+      pendingProposalId: undefined,
+      draft: {
+        eventMetadata: guidedWorkflow.pendingProposal!.proposedEventMetadata,
+        sourceMethod: 'PASTE',
+        searchQueries: [],
+        eventPackId: 'event-pack-12345678',
+      },
+    };
+    vi.mocked(api.getGuidedWorkflows).mockResolvedValue([claimReviewWorkflow]);
+    vi.mocked(api.getGuidedWorkflow).mockResolvedValue(claimReviewWorkflow);
+    vi.mocked(api.advanceGuidedWorkflow).mockRejectedValueOnce(new ApiError(
+      'every candidate claim needs an explicit human review decision',
+      422,
+      undefined,
+      'GUIDED_WORKFLOW_STAGE_INCOMPLETE',
+    ));
+
+    render(
+      <I18nProvider>
+        <GuidedWorkflowPage navigate={vi.fn()} />
+      </I18nProvider>,
+    );
+
+    await user.click(await screen.findByRole('button', {
+      name: 'I reviewed this stage, continue',
+    }));
+
+    expect(await screen.findByText(
+      'every candidate claim needs an explicit human review decision',
+    )).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('heading', {
+      name: 'Complete review in the dedicated workspace',
+    })).toHaveFocus());
+    expect(screen.getByText('The dedicated workspace is incomplete')).toBeInTheDocument();
   });
 });

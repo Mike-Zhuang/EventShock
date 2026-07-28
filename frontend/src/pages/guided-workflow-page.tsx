@@ -17,7 +17,7 @@ import {
 } from '@phosphor-icons/react';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import type { Navigate } from '../app';
-import { api } from '../api/client';
+import { api, ApiError } from '../api/client';
 import type {
   GuidedStage,
   GuidedWorkflow,
@@ -62,6 +62,127 @@ const STAGE_LABELS: Record<GuidedStage, { en: string; zh: string }> = {
 
 function stageLabel(stage: GuidedStage, isZh: boolean): string {
   return isZh ? STAGE_LABELS[stage].zh : STAGE_LABELS[stage].en;
+}
+
+interface GuidedAdvanceBlocker {
+  message: string;
+  targetId: string;
+}
+
+function focusGuidedTarget(targetId: string): void {
+  window.requestAnimationFrame(() => {
+    const target = document.getElementById(targetId);
+    if (!(target instanceof HTMLElement)) return;
+    const reduceMotion = typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (typeof target.scrollIntoView === 'function') {
+      target.scrollIntoView({
+        behavior: reduceMotion ? 'auto' : 'smooth',
+        block: 'center',
+      });
+    }
+    target.focus({ preventScroll: true });
+  });
+}
+
+function guidedAdvanceBlocker(
+  workflow: GuidedWorkflow,
+  isZh: boolean,
+): GuidedAdvanceBlocker | undefined {
+  if (workflow.pendingProposal) {
+    return {
+      targetId: 'guided-proposal-heading',
+      message: isZh
+        ? '请先核对并应用当前候选；如果候选不正确，请在对话框中要求修改。'
+        : 'Review and apply the current candidate first, or ask for a correction in the conversation.',
+    };
+  }
+  const draft = workflow.draft;
+  if (workflow.stage === 'EVENT_GOAL' && !draft.eventMetadata) {
+    return {
+      targetId: 'guided-message',
+      message: isZh
+        ? '请先描述事件并应用一份完整的事件元数据候选。'
+        : 'Describe the event and apply a complete event-metadata candidate first.',
+    };
+  }
+  if (workflow.stage === 'SOURCE_METHOD' && !draft.sourceMethod) {
+    return {
+      targetId: 'guided-message',
+      message: isZh
+        ? '请先选择并应用来源方式。'
+        : 'Choose and apply a source method first.',
+    };
+  }
+  if (
+    ['SOURCE_REVIEW', 'CLAIM_REVIEW', 'PACK_METADATA_REVIEW', 'PACK_FREEZE_REVIEW']
+      .includes(workflow.stage)
+    && !draft.eventPackId
+  ) {
+    return {
+      targetId: 'guided-review-link-heading',
+      message: isZh
+        ? '请先在专业页面完成全文证据审核并生成真实 Event Pack；仅关联构建任务还不能进入下一阶段。'
+        : 'Complete full-text evidence review and generate a real Event Pack in the dedicated workspace. Linking only a build is not enough.',
+    };
+  }
+  if (workflow.stage === 'SCENARIO_INTERVENTION' && !draft.intervention) {
+    return {
+      targetId: 'guided-message',
+      message: isZh
+        ? '请先核对并应用一个单一干预候选。'
+        : 'Review and apply one intervention candidate first.',
+    };
+  }
+  if (
+    ['SCENARIO_INTERVENTION', 'SCENARIO_REVIEW', 'PREFLIGHT', 'READY_TO_SUBMIT']
+      .includes(workflow.stage)
+    && !draft.scenarioId
+  ) {
+    return {
+      targetId: 'guided-stage-workspace-action',
+      message: isZh
+        ? '请先在情景构建器中保存并关联当前工作流的情景。'
+        : 'Save and link this workflow scenario in Scenario Builder first.',
+    };
+  }
+  return undefined;
+}
+
+function guidedAdvanceErrorMessage(error: unknown, isZh: boolean): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!isZh || !(error instanceof ApiError)) return message;
+  if (message.includes('link the reviewed Event Pack')) {
+    return '请先完成全文证据审核、生成 Event Pack，并将服务器返回的真实 Event Pack 关联到本引导。';
+  }
+  if (message.includes('explicit human review decision')) {
+    return '仍有候选主张没有得到明确的人工批准、编辑或拒绝，请返回事件包审核。';
+  }
+  if (message.includes('must be frozen')) {
+    return '关联对象尚未冻结，请在对应专业页面完成冻结后再继续。';
+  }
+  if (message.includes('scenario')) {
+    return '情景尚未保存、关联或冻结，请返回情景构建器完成标红步骤。';
+  }
+  if (error.code === 'GUIDED_WORKFLOW_CONFLICT') {
+    return '该引导已在其他操作中更新。请刷新服务器状态后重新核对当前阶段。';
+  }
+  return message;
+}
+
+function guidedAdvanceErrorTarget(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    message.includes('link the reviewed Event Pack')
+    || message.includes('explicit human review decision')
+    || message.includes('must be frozen')
+  ) {
+    return 'guided-review-link-heading';
+  }
+  if (message.toLowerCase().includes('scenario')) {
+    return 'guided-stage-workspace-action';
+  }
+  return 'guided-advance-heading';
 }
 
 function ProposalDetails({
@@ -123,6 +244,7 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
   const [busyAction, setBusyAction] = useState<string>();
   const [error, setError] = useState<string>();
+  const [advanceError, setAdvanceError] = useState<GuidedAdvanceBlocker>();
 
   const load = async () => {
     setState('loading');
@@ -153,10 +275,33 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
   const run = async (action: string, operation: () => Promise<GuidedWorkflow>) => {
     setBusyAction(action);
     setError(undefined);
+    setAdvanceError(undefined);
     try {
       setCurrent(await operation());
     } catch (operationError) {
-      setError(operationError instanceof Error ? operationError.message : String(operationError));
+      const message = action === 'advance'
+        ? guidedAdvanceErrorMessage(operationError, isZh)
+        : operationError instanceof Error ? operationError.message : String(operationError);
+      setError(message);
+      if (action === 'advance') {
+        if (
+          operationError instanceof ApiError
+          && operationError.code === 'GUIDED_WORKFLOW_CONFLICT'
+          && workflow
+        ) {
+          try {
+            setCurrent(await api.getGuidedWorkflow(workflow.id));
+          } catch {
+            // 保留原冲突作为主错误；刷新失败不能掩盖需要重新核对服务器状态这一事实。
+          }
+        }
+        const targetId = guidedAdvanceErrorTarget(operationError);
+        setAdvanceError({
+          message,
+          targetId,
+        });
+        focusGuidedTarget(targetId);
+      }
     } finally {
       setBusyAction(undefined);
     }
@@ -187,6 +332,21 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
       workflow.pendingProposalId!,
       workflow.version,
     ));
+  };
+
+  const advanceWorkflow = () => {
+    if (!workflow) return;
+    const blocker = guidedAdvanceBlocker(workflow, isZh);
+    if (blocker) {
+      setError(undefined);
+      setAdvanceError(blocker);
+      focusGuidedTarget(blocker.targetId);
+      return;
+    }
+    void run(
+      'advance',
+      () => api.advanceGuidedWorkflow(workflow.id, workflow.version),
+    );
   };
 
   const currentStageIndex = workflow ? STAGES.indexOf(workflow.stage) : 0;
@@ -289,7 +449,7 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
         )}
       />
 
-      {error ? (
+      {error && !advanceError ? (
         <InlineNotification
           kind="error"
           lowContrast
@@ -381,11 +541,14 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
             </div>
 
             {pendingProposal ? (
-              <section className="guided-proposal" aria-labelledby="guided-proposal-heading">
+              <section
+                className={`guided-proposal${advanceError?.targetId === 'guided-proposal-heading' ? ' is-invalid' : ''}`}
+                aria-labelledby="guided-proposal-heading"
+              >
                 <header>
                   <div>
                     <span>{isZh ? '待人工决定的候选' : 'Candidate awaiting a human decision'}</span>
-                    <h3 id="guided-proposal-heading">{stageLabel(pendingProposal.stage, isZh)}</h3>
+                    <h3 id="guided-proposal-heading" tabIndex={-1}>{stageLabel(pendingProposal.stage, isZh)}</h3>
                   </div>
                   <Tag type={pendingProposal.readyForHumanReview ? 'green' : 'warm-gray'}>
                     {pendingProposal.readyForHumanReview
@@ -393,6 +556,15 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
                       : isZh ? '需要补充' : 'Needs clarification'}
                   </Tag>
                 </header>
+                {advanceError?.targetId === 'guided-proposal-heading' ? (
+                  <InlineNotification
+                    kind="error"
+                    lowContrast
+                    hideCloseButton
+                    title={isZh ? '先处理当前候选' : 'Resolve the current candidate first'}
+                    subtitle={advanceError.message}
+                  />
+                ) : null}
                 <ProposalDetails proposal={pendingProposal} isZh={isZh} />
                 <p className="guided-proposal__instruction">
                   {isZh
@@ -429,6 +601,10 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
                   maxCount={2_000}
                   enableCounter
                   disabled={Boolean(busyAction)}
+                  invalid={advanceError?.targetId === 'guided-message'}
+                  invalidText={advanceError?.targetId === 'guided-message'
+                    ? advanceError.message
+                    : undefined}
                   onChange={(event) => setMessage(event.target.value)}
                 />
                 <Button
@@ -442,15 +618,28 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
             ) : null}
 
             {needsExternalReview ? (
-              <section className="guided-review-link" aria-labelledby="guided-review-link-heading">
+              <section
+                className={`guided-review-link${advanceError?.targetId === 'guided-review-link-heading' ? ' is-invalid' : ''}`}
+                aria-labelledby="guided-review-link-heading"
+              >
                 <div>
-                  <h3 id="guided-review-link-heading">{isZh ? '在专业页面完成审核' : 'Complete review in the dedicated workspace'}</h3>
+                  <h3 id="guided-review-link-heading" tabIndex={-1}>{isZh ? '在专业页面完成审核' : 'Complete review in the dedicated workspace'}</h3>
                   <p>{isZh
                     ? '审核页保留完整字段、证据和冻结护栏。创建、生成或保存成功后，页面会把服务器返回的真实对象关联到本引导；这里不接受手工粘贴 ID。'
                     : 'The dedicated page retains complete fields, evidence, and freeze guardrails. After a successful create, materialize, or save, it links the real server-returned object to this workflow; pasted IDs are not accepted here.'}</p>
                 </div>
+                {advanceError?.targetId === 'guided-review-link-heading' ? (
+                  <InlineNotification
+                    kind="error"
+                    lowContrast
+                    hideCloseButton
+                    title={isZh ? '专业页面还有未完成项' : 'The dedicated workspace is incomplete'}
+                    subtitle={advanceError.message}
+                  />
+                ) : null}
                 {stageAction ? (
                   <Button
+                    id="guided-stage-workspace-action"
                     kind="tertiary"
                     renderIcon={Factory}
                     disabled={Boolean(busyAction)}
@@ -474,32 +663,50 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
                 </Button>
               </section>
             ) : stageAction ? (
-              <Button
-                kind="tertiary"
-                renderIcon={ArrowRight}
-                disabled={Boolean(busyAction)}
-                onClick={() => void openStageWorkspace()}
-              >
-                {stageAction.label}
-              </Button>
+              <div className={`guided-stage-action${advanceError?.targetId === 'guided-stage-workspace-action' ? ' is-invalid' : ''}`}>
+                {advanceError?.targetId === 'guided-stage-workspace-action' ? (
+                  <InlineNotification
+                    kind="error"
+                    lowContrast
+                    hideCloseButton
+                    title={isZh ? '情景尚未准备好' : 'The scenario is not ready'}
+                    subtitle={advanceError.message}
+                  />
+                ) : null}
+                <Button
+                  id="guided-stage-workspace-action"
+                  kind="tertiary"
+                  renderIcon={ArrowRight}
+                  disabled={Boolean(busyAction)}
+                  onClick={() => void openStageWorkspace()}
+                >
+                  {stageAction.label}
+                </Button>
+              </div>
             ) : null}
 
             {workflow.status === 'ACTIVE' ? (
-              <div className="guided-advance">
+              <div className={`guided-advance${advanceError?.targetId === 'guided-advance-heading' ? ' is-invalid' : ''}`}>
                 <div>
-                  <strong>{isZh ? '阶段确认' : 'Stage confirmation'}</strong>
+                  <strong id="guided-advance-heading" tabIndex={-1}>{isZh ? '阶段确认' : 'Stage confirmation'}</strong>
                   <p>{isZh
                     ? '只有在候选已应用、需要的对象已关联，并且你亲自核对当前阶段后才能继续。'
                     : 'Continue only after the candidate is applied, required artifacts are linked, and you personally reviewed this stage.'}</p>
                 </div>
+                {advanceError?.targetId === 'guided-advance-heading' ? (
+                  <InlineNotification
+                    kind="error"
+                    lowContrast
+                    hideCloseButton
+                    title={isZh ? '暂时不能进入下一阶段' : 'The next stage is not ready'}
+                    subtitle={advanceError.message}
+                  />
+                ) : null}
                 <Button
                   kind="primary"
                   renderIcon={ArrowRight}
-                  disabled={Boolean(busyAction) || Boolean(pendingProposal)}
-                  onClick={() => void run(
-                    'advance',
-                    () => api.advanceGuidedWorkflow(workflow.id, workflow.version),
-                  )}
+                  disabled={Boolean(busyAction)}
+                  onClick={advanceWorkflow}
                 >
                   {busyAction === 'advance'
                     ? isZh ? '正在检查阶段' : 'Checking stage'
