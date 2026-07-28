@@ -418,13 +418,18 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
         ],
       },
       {
-        label: t('nav.groupOptional'),
+        label: t('nav.groupResearch'),
         items: [
-          { id: 'ai', label: t('nav.ai'), icon: Cpu },
           { id: 'study', label: t('nav.study'), icon: Flask },
           { id: 'trace', label: t('nav.trace'), icon: TreeStructure },
           { id: 'governance', label: t('nav.governance'), icon: ShieldCheck },
           { id: 'export', label: t('nav.export'), icon: Archive },
+        ],
+      },
+      {
+        label: t('nav.groupOptional'),
+        items: [
+          { id: 'ai', label: t('nav.ai'), icon: Cpu },
         ],
       },
     ];
@@ -509,7 +514,7 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
         firstGoal: preferences.firstGoal,
         workspaceMode: nextMode,
       });
-      navigate(nextMode === 'GUIDED' ? 'guided' : 'cases');
+      navigate(nextMode === 'GUIDED' ? 'guided' : 'study');
     } catch {
       setWorkspaceModeError(true);
     } finally {

@@ -1074,6 +1074,22 @@ function normalizeClaim(value: unknown): EventClaim | null {
   };
 }
 
+function normalizeCaseValidationStatus(
+  value: unknown,
+): CaseSummary['validationStatus'] {
+  if (typeof value === 'string') {
+    return { level: value };
+  }
+  if (!isRecord(value)) return undefined;
+  const level = asOptionalString(read(value, 'level'));
+  const empiricalCalibration = asOptionalString(
+    read(value, 'empiricalCalibration', 'empirical_calibration'),
+  );
+  const claim = asOptionalString(read(value, 'claim'));
+  if (!level && !empiricalCalibration && !claim) return undefined;
+  return { level, empiricalCalibration, claim };
+}
+
 export function normalizeCases(value: unknown): CaseSummary[] {
   return unwrapItems(value)
     .map((item): CaseSummary | null => {
@@ -1095,7 +1111,9 @@ export function normalizeCases(value: unknown): CaseSummary[] {
         updatedAt: asOptionalString(read(item, 'updatedAt', 'updated_at')),
         featured: asBoolean(read(item, 'featured')),
         caseRole: asOptionalString(read(item, 'caseRole', 'case_role')),
-        validationStatus: asOptionalString(read(item, 'validationStatus', 'validation_status')),
+        validationStatus: normalizeCaseValidationStatus(
+          read(item, 'validationStatus', 'validation_status'),
+        ),
       };
     })
     .filter((item): item is CaseSummary => item !== null);

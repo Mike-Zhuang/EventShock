@@ -1,5 +1,5 @@
 import { Button, Tag } from '@carbon/react';
-import { ArrowRight, CalendarBlank, Flask, ShieldCheck, UsersThree } from '@phosphor-icons/react';
+import { ArrowRight, CalendarBlank, Flask, ShieldCheck, UsersThree, WarningCircle } from '@phosphor-icons/react';
 import { EmptyState, ErrorPanel, LoadingPanel, PageHeader, StatusBadge } from '../components/common';
 import { useI18n } from '../i18n';
 import { getPageGuide } from '../page-guidance';
@@ -27,6 +27,20 @@ export function CaseLibraryPage({ navigate }: { navigate: (view: ViewId) => void
     navigate('scenario');
   };
 
+  const validationStatusLabel = (status: string) => {
+    if (status === 'L5_CASE_AVAILABLE') return t('home.validationRunnableOnly');
+    if (status === 'PENDING_HUMAN_STUDY') return t('home.validationPendingStudy');
+    if (status === 'NOT_HISTORICALLY_CALIBRATED') return t('home.validationNotCalibrated');
+    return t('home.validationReviewRequired');
+  };
+
+  const validationStatusLabels = (
+    status: NonNullable<(typeof cases)[number]['validationStatus']>,
+  ) => [...new Set([
+    status.level,
+    status.empiricalCalibration,
+  ].filter((value): value is string => Boolean(value)).map(validationStatusLabel))];
+
   return (
     <div className="page page--cases">
       <section className="home-intro">
@@ -34,21 +48,48 @@ export function CaseLibraryPage({ navigate }: { navigate: (view: ViewId) => void
           <span className="eyebrow">{t('home.eyebrow')}</span>
           <h1>{t('home.title')}</h1>
           <p>{t('home.subtitle')}</p>
-          <section className="home-audience" aria-labelledby="home-audience-title">
-            <div className="home-audience__label">
+          <p className="home-intro__explainer">{t('home.plainExplainer')}</p>
+          <Button
+            className="home-intro__cta"
+            kind="tertiary"
+            renderIcon={ArrowRight}
+            onClick={() => navigate('factory')}
+          >
+            {t('home.addCase')}
+          </Button>
+        </div>
+        <div className="home-boundary" aria-label={t('common.limitations')}>
+          <section className="home-boundary__panel" aria-labelledby="home-audience-title">
+            <div className="home-boundary__label">
               <UsersThree size={20} weight="duotone" aria-hidden="true" />
               <span>{t('home.audienceLabel')}</span>
             </div>
-            <div>
-              <h2 id="home-audience-title">{t('home.audienceTitle')}</h2>
-              <p>{t('home.audienceBody')}</p>
+            <h2 id="home-audience-title">{t('home.audienceTitle')}</h2>
+            <p>{t('home.audienceBody')}</p>
+            <div className="home-boundary__guardrail">
+              <ShieldCheck size={18} weight="duotone" aria-hidden="true" />
+              <span>{t('home.disclaimerSynthetic')}</span>
+            </div>
+            <div className="home-boundary__guardrail">
+              <ShieldCheck size={18} weight="duotone" aria-hidden="true" />
+              <span>{t('home.resilience')}</span>
             </div>
           </section>
-        </div>
-        <div className="home-intro__guardrails" aria-label={t('common.limitations')}>
-          <div><ShieldCheck size={22} weight="duotone" /><span>{t('home.disclaimerForecast')}</span></div>
-          <div><ShieldCheck size={22} weight="duotone" /><span>{t('home.disclaimerAdvice')}</span></div>
-          <div><Flask size={22} weight="duotone" /><span>{t('home.disclaimerSynthetic')}</span></div>
+          <section className="home-boundary__panel home-boundary__panel--excluded" aria-labelledby="home-not-audience-title">
+            <div className="home-boundary__label">
+              <WarningCircle size={20} weight="duotone" aria-hidden="true" />
+              <span>{t('home.notAudienceLabel')}</span>
+            </div>
+            <h2 id="home-not-audience-title">{t('home.notAudienceTitle')}</h2>
+            <p>{t('home.notAudienceBody')}</p>
+            <h3>{t('home.notProvidedTitle')}</h3>
+            <ul>
+              <li>{t('home.notProvidedDirection')}</li>
+              <li>{t('home.notProvidedTiming')}</li>
+              <li>{t('home.notProvidedTarget')}</li>
+              <li>{t('home.notProvidedReality')}</li>
+            </ul>
+          </section>
         </div>
       </section>
 
@@ -70,8 +111,12 @@ export function CaseLibraryPage({ navigate }: { navigate: (view: ViewId) => void
                   <div className="case-row__tags">
                     {caseItem.isSynthetic ? <Tag type="warm-gray" size="sm">{language === 'zh-CN' ? caseItem.syntheticLabelZh ?? t('status.synthetic') : caseItem.syntheticLabel ?? t('status.synthetic')}</Tag> : null}
                     {caseItem.featured ? <Tag type="blue" size="sm">{language === 'zh-CN' ? '旗舰样本外演示' : 'Flagship out-of-sample demo'}</Tag> : null}
-                    {caseItem.caseRole === 'HISTORICAL_VALIDATION_CASE' ? <Tag type="cool-gray" size="sm">{language === 'zh-CN' ? '历史验证候选案例' : 'Historical validation candidate'}</Tag> : null}
-                    {caseItem.validationStatus ? <Tag type="warm-gray" size="sm">{caseItem.validationStatus.replaceAll('_', ' ')}</Tag> : null}
+                    {caseItem.caseRole === 'HISTORICAL_VALIDATION_CASE' ? <Tag type="cool-gray" size="sm">{t('home.historicalComparison')}</Tag> : null}
+                    {caseItem.validationStatus
+                      ? validationStatusLabels(caseItem.validationStatus).map((label) => (
+                        <Tag key={label} type="warm-gray" size="sm">{label}</Tag>
+                      ))
+                      : null}
                     {caseItem.status ? <StatusBadge status={caseItem.status} /> : null}
                   </div>
                   <h2>{language === 'zh-CN' ? caseItem.nameZh ?? caseItem.name : caseItem.name}</h2>

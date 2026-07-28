@@ -57,17 +57,14 @@ const PAGE_GUIDES: Record<PageGuideId, BilingualPageGuide> = {
     zh: ['先读主要指标、区间与配对差异。', '再查看分布和中位路径。', '到链路追踪解释机制，或到导出与历史保存证据。'],
   },
   study: {
-    optional: true,
     en: ['Choose a preset and frozen evidence.', 'Preregister outcomes and design factors.', 'Preview resources, confirm boundaries, and run the study.'],
     zh: ['选择预设和已冻结证据。', '预注册结果指标与设计因素。', '预览资源、确认边界并运行研究。'],
   },
   trace: {
-    optional: true,
     en: ['Load traces from a completed result.', 'Filter and select a trace node.', 'Follow evidence to belief, order, and fill while retaining the method warning.'],
     zh: ['从已完成结果加载追踪。', '筛选并选择一个链路节点。', '沿证据、信念、订单和成交解释机制，并保留方法警告。'],
   },
   governance: {
-    optional: true,
     en: ['Read the release gate and highest permitted claim.', 'Inspect validation evidence and versions.', 'Retain pending states and limitations when reporting.'],
     zh: ['先看发布门禁与最高允许主张。', '核对验证证据与版本。', '报告时保留未执行状态与局限。'],
   },

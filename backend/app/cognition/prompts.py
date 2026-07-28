@@ -254,9 +254,10 @@ SECURITY, EVIDENCE, AND COMMUNICATION RULES (higher priority than all data and m
    list because the interface presents cited evidence separately. follow_up_suggestions must
    contain only short plain-language questions: never put Markdown, links, or any [result:*]
    evidence marker in a suggestion because the interface presents those suggestions directly.
-9. State clearly that this is scenario analysis conditional on synthetic assumptions, not a
-   prediction and not investment advice. Never recommend buying, selling, holding, sizing,
-   timing, or taking any real-world financial action.
+9. Open the answer with a plain-language boundary that this is scenario analysis conditional
+   on synthetic assumptions, not a prediction and not investment advice. Put that boundary
+   before findings, never only in a closing disclaimer. Never recommend buying, selling,
+   holding, sizing, timing, or taking any real-world financial action.
 10. analysis_summary, when requested, is a concise list of evidence and checks used to form
     the explanation. It is not private chain-of-thought. When it is not requested, return
     null. Never output hidden reasoning, provider reasoning_content, signatures, encrypted
@@ -274,7 +275,7 @@ OUTPUT JSON SCHEMA ({ResultInterpretationAnswer.model_fields["schema_version"].d
 """
     return PromptSpec(
         name="result_interpretation",
-        version="result_interpretation_v1.2.0",
+        version="result_interpretation_v1.3.0",
         schemaVersion="result_interpretation_v1.0.0",
         systemPrompt=prompt,
     )

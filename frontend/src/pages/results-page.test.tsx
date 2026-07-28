@@ -24,6 +24,33 @@ const RESULTS = normalizeResults({
     baselineValue: 1,
     interventionValue: 0.45,
   },
+  primaryOutcome: 'maxSpreadBps',
+  pairedRuns: [
+    { seed: 101, baseline: { maxSpreadBps: 10 }, intervention: { maxSpreadBps: 16 }, delta: { maxSpreadBps: 6 } },
+    { seed: 102, baseline: { maxSpreadBps: 12 }, intervention: { maxSpreadBps: 19 }, delta: { maxSpreadBps: 7 } },
+  ],
+  metricSummaries: {
+    maxSpreadBps: {
+      baseline: { median: 11, interval95: { lower: 10, upper: 12 } },
+      intervention: { median: 17.5, interval95: { lower: 16, upper: 19 } },
+      delta: {
+        median: 6.5,
+        interval95: { lower: 6, upper: 7 },
+        validN: 2,
+      },
+    },
+  },
+  medianPaths: {
+    step: [0, 1],
+    baseline: { price: [100, 99], spreadBps: [10, 11], depth: [300, 285] },
+    intervention: { price: [100, 97], spreadBps: [11, 18], depth: [285, 220] },
+  },
+  agentFlows: {
+    MARKET_MAKER: {
+      baseline: { netVolume: 4 },
+      intervention: { netVolume: -8 },
+    },
+  },
   stoppingRule: {
     mode: 'FIXED_PAIR_COUNT',
     reason: 'FIXED_PAIR_COUNT_REACHED',
@@ -97,6 +124,16 @@ describe('ResultsPage 结果证据导航', () => {
   it('没有叙事报告时仍显示稳定概览、认知决策与版本来源锚点', () => {
     render(<I18nProvider><ResultsPage navigate={navigate} /></I18nProvider>);
 
+    expect(screen.getByRole('heading', { name: 'Before reading the numbers' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'What these results are' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'What these results are not' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'What you can do with them' })).toBeInTheDocument();
+    expect(screen.getByText('what a person should buy, sell, hold, or short')).toBeInTheDocument();
+    expect(screen.getByText('a real target price, return, or loss limit')).toBeInTheDocument();
+    expect(screen.getAllByTestId('simulated-chart')).toHaveLength(4);
+    expect(screen.getByRole('img', { name: /SIMULATED DATA: Paired seed differences/ })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: /SIMULATED DATA: Median market paths/ })).toBeInTheDocument();
+
     const overview = screen.getByRole('heading', { level: 2, name: 'Experiment overview' });
     expect(overview).toHaveAttribute('id', 'result-overview-heading');
     expect(screen.getByText('How does reduced market-making capacity change simulated liquidity?')).toBeInTheDocument();
@@ -119,7 +156,7 @@ describe('ResultsPage 结果证据导航', () => {
     const user = userEvent.setup();
     render(<I18nProvider><ResultsPage navigate={navigate} /></I18nProvider>);
 
-    await user.click(screen.getByRole('button', { name: 'Trace Explorer' }));
+    await user.click(screen.getByRole('button', { name: 'Mechanism Trace' }));
 
     expect(navigate).toHaveBeenCalledWith('trace', {
       experimentId: 'exp-overview',
