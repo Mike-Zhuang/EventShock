@@ -426,6 +426,18 @@ export function AiConfigurationPage() {
             : `The server still uses the temporary credential for ${config?.provider ?? '—'} / ${config?.model ?? '—'} with a ${config?.maxTokens ?? '—'}-token output limit. Until you submit an API key again, connection tests and live evaluations continue to use that active configuration.`}
         />
       ) : null}
+      {catalog ? (
+        <InlineNotification
+          kind={catalog.pricingSnapshotStatus === 'CURRENT'
+            && catalog.capabilitySnapshotStatus === 'CURRENT' ? 'info' : 'error'}
+          lowContrast
+          hideCloseButton
+          title={isZh ? '价格与能力快照定期校验' : 'Periodic pricing and capability verification'}
+          subtitle={isZh
+            ? `价格：${catalog.pricingSnapshotStatus ?? 'UNKNOWN'}（有效至 ${catalog.pricingSnapshotValidUntil ?? '未记录'}，周期 ${catalog.pricingReviewCadenceDays ?? '—'} 天）；能力：${catalog.capabilitySnapshotStatus ?? 'UNKNOWN'}（有效至 ${catalog.capabilitySnapshotValidUntil ?? '未记录'}，周期 ${catalog.capabilityReviewCadenceDays ?? '—'} 天）。过期后调用前失败关闭。`
+            : `Pricing: ${catalog.pricingSnapshotStatus ?? 'UNKNOWN'} (valid until ${catalog.pricingSnapshotValidUntil ?? 'not recorded'}, ${catalog.pricingReviewCadenceDays ?? '—'}-day cadence); capabilities: ${catalog.capabilitySnapshotStatus ?? 'UNKNOWN'} (valid until ${catalog.capabilitySnapshotValidUntil ?? 'not recorded'}, ${catalog.capabilityReviewCadenceDays ?? '—'}-day cadence). Stale snapshots fail closed before dispatch.`}
+        />
+      ) : null}
 
       <div className="ai-config-layout">
         <section className="ai-config-panel" aria-labelledby="provider-settings-heading">
@@ -524,6 +536,19 @@ export function AiConfigurationPage() {
                 {isZh ? '在 GitHub 提交兼容性 Issue' : 'Open a compatibility issue on GitHub'}
               </a>
             </div>
+          ) : null}
+          {selectedModel && selectedModel.validationEvidence?.liveKeyE2eStatus !== 'PASS' ? (
+            <InlineNotification
+              kind="warning"
+              lowContrast
+              hideCloseButton
+              title={isZh
+                ? '该具体模型尚无真实 Key 端到端通过证据'
+                : 'No real-key end-to-end pass is recorded for this exact model'}
+              subtitle={isZh
+                ? `${selectedProvider?.id ?? provider} / ${selectedModel?.id ?? model} 当前状态为 ${selectedModel?.validationEvidence?.liveKeyE2eStatus ?? 'UNVERIFIED'}；供应商级或 mock 契约测试不会被当作该型号的真实验证。`
+                : `${selectedProvider?.id ?? provider} / ${selectedModel?.id ?? model} is ${selectedModel?.validationEvidence?.liveKeyE2eStatus ?? 'UNVERIFIED'}; provider-level or mocked adapter tests are not presented as real validation of this exact model.`}
+            />
           ) : null}
           <div className="toggle-with-help">
             {explained('thinkingMode', isZh ? '思考模式' : 'Thinking mode')}
@@ -722,7 +747,39 @@ export function AiConfigurationPage() {
               <div><dt>{isZh ? '费用闸门输入上界' : 'Cost-gate input reserve'}</dt><dd>{formatRate(selectedModel.budgetInputRateUpperPerMillion, selectedModel.billingCurrency, language)}</dd></div>
               <div><dt>{isZh ? '费用闸门输出上界' : 'Cost-gate output reserve'}</dt><dd>{formatRate(selectedModel.budgetOutputRateUpperPerMillion, selectedModel.billingCurrency, language)}</dd></div>
               <div><dt>{isZh ? '价格核验日期' : 'Pricing verified'}</dt><dd>{selectedModel.pricingVerifiedAt ?? '—'}</dd></div>
+              <div><dt>{isZh ? '价格有效期' : 'Pricing valid until'}</dt><dd>{selectedModel.pricingValidUntil ?? '—'}</dd></div>
             </dl>
+          ) : null}
+          {selectedModel ? (
+            <div className="governance-table-wrap">
+              <table className="governance-table">
+                <thead><tr><th>{isZh ? '逐模型能力' : 'Per-model capability'}</th><th>{isZh ? '验证状态' : 'Validation status'}</th></tr></thead>
+                <tbody>
+                  {([
+                    ['official documentation', selectedModel.validationEvidence?.officialDocumentationStatus ?? 'UNVERIFIED'],
+                    ['adapter contract', selectedModel.validationEvidence?.adapterContractStatus ?? 'NOT_RUN'],
+                    ['real-key E2E', selectedModel.validationEvidence?.liveKeyE2eStatus ?? 'NOT_RUN'],
+                    ['structured output', selectedModel.validationEvidence?.structuredOutputStatus ?? 'UNVERIFIED'],
+                    ['streaming', selectedModel.validationEvidence?.streamingStatus ?? 'UNVERIFIED'],
+                    ['thinking + JSON', selectedModel.validationEvidence?.thinkingJsonStatus ?? 'UNVERIFIED'],
+                    ['usage / cost', selectedModel.validationEvidence?.usageCostStatus ?? 'UNVERIFIED'],
+                  ] as const).map(([capability, status]) => (
+                    <tr key={capability}><td>{capability}</td><td><code>{status}</code></td></tr>
+                  ))}
+                </tbody>
+              </table>
+              <p>{selectedModel.validationEvidence?.verificationScope
+                ?? 'UNKNOWN_MODEL_UNVERIFIED'}</p>
+              {selectedModel.validationEvidence?.evidenceSourceUrl ? (
+                <a
+                  href={selectedModel.validationEvidence.evidenceSourceUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {isZh ? '打开该型号能力证据' : 'Open exact-model capability evidence'}
+                </a>
+              ) : null}
+            </div>
           ) : null}
           {selectedProvider ? <Notice>{isZh
             ? '供应商返回的结构化内容仍会经过本地 Schema、证据引用和时间边界校验；供应商原生模式不会绕过这些约束。'

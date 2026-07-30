@@ -61,12 +61,32 @@ interface FriendlyRequestError {
   message: string;
   retryable: boolean;
   uncertainBillableAttempts: number;
+  failureStage?: string;
+  repairAttempted: boolean;
+  repairUsed: boolean;
+  billingConclusion: string;
   traceId?: string;
   needsConfiguration: boolean;
 }
 
 type HistoryState = 'loading' | 'ready' | 'error';
 type HistoryDetailState = 'idle' | 'loading' | 'error';
+type FollowUpSuggestionCategory = 'CURRENT_RESULT' | 'NEW_EXPERIMENT' | 'EXTERNAL_DATA';
+
+function followUpSuggestionCategory(suggestion: string): FollowUpSuggestionCategory {
+  const normalized = suggestion.toLowerCase();
+  if (
+    /external data|real-world data|historical data|market data|outside source|外部数据|现实数据|历史数据|市场数据|新增来源/.test(normalized)
+  ) {
+    return 'EXTERNAL_DATA';
+  }
+  if (
+    /new experiment|new run|rerun|run again|matched seeds|seed pairs|larger sample|sensitivity run|ablation|change the intervention|increase.*pairs|\b(25|50|100) (pairs|seeds)\b|新实验|重新运行|再次运行|匹配种子|扩大样本|敏感性实验|消融实验|改变干预|增加到/.test(normalized)
+  ) {
+    return 'NEW_EXPERIMENT';
+  }
+  return 'CURRENT_RESULT';
+}
 
 const STREAM_STAGE_LABELS: Record<StreamState['stage'], { en: string; zh: string }> = {
   CONNECTING: { en: 'Opening a secure result stream', zh: '正在建立安全结果流' },
@@ -225,7 +245,20 @@ function friendlyRequestError(
     code,
     message: knownCopy ? (isZh ? knownCopy.zh : knownCopy.en) : fallbackMessage,
     retryable,
-    uncertainBillableAttempts: streamError?.uncertainBillableAttempts ?? 0,
+    uncertainBillableAttempts: error instanceof ApiError
+      ? error.uncertainBillableAttempts ?? 0
+      : 0,
+    failureStage: error instanceof ApiError ? error.failureStage : undefined,
+    repairAttempted: error instanceof ApiError
+      ? Boolean(error.repairAttempted ?? error.repairUsed)
+      : false,
+    repairUsed: error instanceof ApiError ? Boolean(error.repairUsed) : false,
+    billingConclusion: error instanceof ApiError
+      ? error.billingConclusion
+        ?? ((error.uncertainBillableAttempts ?? 0) > 0
+          ? 'BILLING_UNCERTAIN'
+          : 'NO_UNCERTAIN_BILLING_EVIDENCE')
+      : 'NO_BILLING_METADATA',
     traceId: error instanceof ApiError ? error.traceId : undefined,
     needsConfiguration: Boolean(knownCopy?.configuration),
   };
@@ -236,6 +269,26 @@ function formatElapsed(elapsedMs: number, language: ResultInterpretationLanguage
     minimumFractionDigits: 1,
     maximumFractionDigits: 1,
   }).format(Math.max(0, elapsedMs) / 1_000);
+}
+
+function billingConclusionLabel(value: string, isZh: boolean): string {
+  const labels: Record<string, [string, string]> = {
+    BILLING_UNCERTAIN: ['Billing is uncertain', '计费状态不确定'],
+    NO_PROVIDER_ATTEMPT_RECORDED: [
+      'No provider attempt was recorded',
+      '未记录到供应商调用',
+    ],
+    PROVIDER_ATTEMPT_RECORDED_NO_UNCERTAIN_BILLING: [
+      'A provider attempt was recorded; no uncertain-billing attempt was reported',
+      '已记录供应商调用；未报告计费不确定调用',
+    ],
+    NO_UNCERTAIN_BILLING_EVIDENCE: [
+      'No uncertain-billing evidence was reported',
+      '未报告计费不确定证据',
+    ],
+    NO_BILLING_METADATA: ['Billing metadata is unavailable', '无可用计费元数据'],
+  };
+  return labels[value]?.[isZh ? 1 : 0] ?? value.replaceAll('_', ' ');
 }
 
 function formatHistoryDate(value: string, language: ResultInterpretationLanguage): string {
@@ -275,9 +328,11 @@ function boundedConversation(messages: DisplayMessage[]): ResultInterpretationCh
 export function ResultInterpretationAssistant({
   experimentId,
   navigate,
+  onCreateExperimentDraft,
 }: {
   experimentId: string;
   navigate: Navigate;
+  onCreateExperimentDraft?: (suggestion: string) => void;
 }) {
   const { language, t } = useI18n();
   const [config, setConfig] = useState<LlmConfigView>();
@@ -636,6 +691,10 @@ export function ResultInterpretationAssistant({
       retryable: true,
       // 浏览器停止等待后无法确认上游是否已经开始或完成计费调用。
       uncertainBillableAttempts: 1,
+      failureStage: streamState?.stage,
+      repairAttempted: streamState?.stage === 'REPAIRING',
+      repairUsed: false,
+      billingConclusion: 'BILLING_UNCERTAIN',
       needsConfiguration: false,
     });
   };
@@ -961,19 +1020,68 @@ export function ResultInterpretationAssistant({
                           suggestion,
                           language,
                         );
+                        const category = followUpSuggestionCategory(visibleSuggestion);
+                        if (category === 'NEW_EXPERIMENT') {
+                          return (
+                            <div
+                              key={`${message.id}-${suggestionIndex}`}
+                              className="result-assistant__suggestion-item"
+                            >
+                              <p>{visibleSuggestion}</p>
+                              <span>
+                                <Tag type="blue" size="sm">
+                                  {isZh ? '需要新实验' : 'New experiment required'}
+                                </Tag>
+                                <Tag type="warm-gray" size="sm">
+                                  {isZh ? '尚未运行' : 'Not run'}
+                                </Tag>
+                              </span>
+                              {onCreateExperimentDraft ? (
+                                <Button
+                                  kind="tertiary"
+                                  size="sm"
+                                  disabled={sending || historyPersistedWarning}
+                                  onClick={() => onCreateExperimentDraft(visibleSuggestion)}
+                                >
+                                  {isZh ? '创建预填场景草稿' : 'Create prefilled scenario draft'}
+                                </Button>
+                              ) : null}
+                            </div>
+                          );
+                        }
+                        if (category === 'EXTERNAL_DATA') {
+                          return (
+                            <div
+                              key={`${message.id}-${suggestionIndex}`}
+                              className="result-assistant__suggestion-item"
+                            >
+                              <p>{visibleSuggestion}</p>
+                              <Tag type="gray" size="sm">
+                                {isZh ? '需要外部数据' : 'External data required'}
+                              </Tag>
+                            </div>
+                          );
+                        }
                         return (
-                          <Button
+                          <div
                             key={`${message.id}-${suggestionIndex}`}
-                            kind="ghost"
-                            size="sm"
-                            disabled={sending || !canUseModel || historyPersistedWarning}
-                            onClick={() => {
-                              setDraft(visibleSuggestion);
-                              window.requestAnimationFrame(() => composerRef.current?.focus());
-                            }}
+                            className="result-assistant__suggestion-item"
                           >
-                            {visibleSuggestion}
-                          </Button>
+                            <Tag type="gray" size="sm">
+                              {isZh ? '当前结果可回答' : 'Answerable from current result'}
+                            </Tag>
+                            <Button
+                              kind="ghost"
+                              size="sm"
+                              disabled={sending || !canUseModel || historyPersistedWarning}
+                              onClick={() => {
+                                setDraft(visibleSuggestion);
+                                window.requestAnimationFrame(() => composerRef.current?.focus());
+                              }}
+                            >
+                              {visibleSuggestion}
+                            </Button>
+                          </div>
                         );
                       })}
                     </div>
@@ -1064,6 +1172,25 @@ export function ResultInterpretationAssistant({
               {requestError.traceId ? <span>{isZh ? '追踪号' : 'Trace'}: <code>{requestError.traceId}</code></span> : null}
             </p>
           ) : null}
+          <dl className="definition-list definition-list--compact">
+            <div>
+              <dt>{isZh ? '失败阶段' : 'Failure stage'}</dt>
+              <dd>{requestError.failureStage?.replaceAll('_', ' ')
+                ?? (isZh ? '未记录' : 'Not recorded')}</dd>
+            </div>
+            <div>
+              <dt>{isZh ? '修复尝试' : 'Repair attempt'}</dt>
+              <dd>{requestError.repairAttempted
+                ? requestError.repairUsed
+                  ? isZh ? '已尝试并记录修复' : 'Attempted; repair recorded'
+                  : isZh ? '已尝试，未采用修复结果' : 'Attempted; repair result not used'
+                : isZh ? '未尝试' : 'Not attempted'}</dd>
+            </div>
+            <div>
+              <dt>{isZh ? '计费结论' : 'Billing conclusion'}</dt>
+              <dd>{billingConclusionLabel(requestError.billingConclusion, isZh)}</dd>
+            </div>
+          </dl>
           {requestError.needsConfiguration ? (
             <Button
               kind="tertiary"

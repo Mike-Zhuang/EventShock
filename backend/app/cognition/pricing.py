@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import ROUND_UP, Decimal
 from types import MappingProxyType
 from typing import Literal
@@ -28,6 +30,8 @@ FX_SOURCE_URL = "https://www.federalreserve.gov/Releases/h10/current/default.htm
 PRICING_SNAPSHOT_VERSION = "multi-provider-public-list-2026-07-20"
 PRICING_VERIFIED_AT = "2026-07-20T00:00:00Z"
 MULTI_PROVIDER_PRICING_VERIFIED_AT = "2026-07-20T00:00:00Z"
+PRICING_MAX_AGE_DAYS = 31
+PRICING_SNAPSHOT_VALID_UNTIL = "2026-08-20T00:00:00Z"
 
 # 2026-07-10 的美联储 H.10 为 6.7766 CNY/USD。预算换算刻意采用更低的
 # 6.00 CNY/USD，使同一人民币刊例费用得到更高的美元预算值；这不是账单汇率。
@@ -46,6 +50,7 @@ class ZhipuTokenPrice:
     outputCnyPerMillion: Decimal
     sourceUrl: str = PRICE_SOURCE_URL
     verifiedAt: str = PRICING_VERIFIED_AT
+    validUntil: str = PRICING_SNAPSHOT_VALID_UNTIL
     pricingNote: str = "Maximum published pay-as-you-go rate across all token-length tiers."
 
     @property
@@ -121,6 +126,7 @@ class TokenPriceDescriptor:
     sourceUrl: str
     region: str
     verifiedAt: str = MULTI_PROVIDER_PRICING_VERIFIED_AT
+    validUntil: str = PRICING_SNAPSHOT_VALID_UNTIL
     pricingNote: str = "Published pay-as-you-go token price; account discounts are excluded."
 
 
@@ -341,14 +347,17 @@ MODEL_TOKEN_PRICES = MappingProxyType(
 )
 
 
-def getTokenPrice(provider: ProviderId | str, modelId: str) -> TokenPriceDescriptor | None:
-    """先验证 provider/model 联合键，再返回价格；未知价格不做推测。"""
+def getTokenPriceSnapshot(
+    provider: ProviderId | str,
+    modelId: str,
+) -> TokenPriceDescriptor | None:
+    """返回原始快照条目；仅用于展示来源与过期状态，不授权模型调用。"""
 
     getModel(provider, modelId)
     price = MODEL_TOKEN_PRICES.get((provider, modelId))  # type: ignore[arg-type]
     if price is not None or provider != "zhipu":
         return price
-    legacyPrice = getZhipuTokenPrice(modelId)
+    legacyPrice = getZhipuTokenPriceSnapshot(modelId)
     if legacyPrice is None:
         return None
     return TokenPriceDescriptor(
@@ -363,15 +372,89 @@ def getTokenPrice(provider: ProviderId | str, modelId: str) -> TokenPriceDescrip
         sourceUrl=legacyPrice.sourceUrl,
         region="CN",
         verifiedAt=legacyPrice.verifiedAt,
+        validUntil=legacyPrice.validUntil,
         pricingNote=legacyPrice.pricingNote,
     )
 
 
-def getZhipuTokenPrice(modelId: str) -> ZhipuTokenPrice | None:
-    """返回可核验价格；未知价格返回 None，由调用方执行 fail-closed。"""
+def getTokenPrice(
+    provider: ProviderId | str,
+    modelId: str,
+    *,
+    clock: Callable[[], datetime] | None = None,
+) -> TokenPriceDescriptor | None:
+    """只返回仍在有效期内的价格；未知或过期快照统一 fail-closed。"""
+
+    price = getTokenPriceSnapshot(provider, modelId)
+    if price is None or not _pricingSnapshotFresh(
+        price.verifiedAt,
+        price.validUntil,
+        clock=clock,
+    ):
+        return None
+    return price
+
+
+def getZhipuTokenPriceSnapshot(modelId: str) -> ZhipuTokenPrice | None:
+    """返回智谱原始快照条目；调用门禁必须使用 ``getZhipuTokenPrice``。"""
 
     getZhipuModel(modelId)
     return ZHIPU_TOKEN_PRICES.get(modelId)
+
+
+def getZhipuTokenPrice(
+    modelId: str,
+    *,
+    clock: Callable[[], datetime] | None = None,
+) -> ZhipuTokenPrice | None:
+    """返回未过期的可核验价格；未知或过期均返回 None。"""
+
+    price = getZhipuTokenPriceSnapshot(modelId)
+    if price is None or not _pricingSnapshotFresh(
+        price.verifiedAt,
+        price.validUntil,
+        clock=clock,
+    ):
+        return None
+    return price
+
+
+def pricingSnapshotStatus(
+    *,
+    clock: Callable[[], datetime] | None = None,
+) -> Literal["CURRENT", "STALE_FAIL_CLOSED"]:
+    return (
+        "CURRENT"
+        if _pricingSnapshotFresh(
+            PRICING_VERIFIED_AT,
+            PRICING_SNAPSHOT_VALID_UNTIL,
+            clock=clock,
+        )
+        else "STALE_FAIL_CLOSED"
+    )
+
+
+def _pricingSnapshotFresh(
+    verifiedAt: str,
+    validUntil: str,
+    *,
+    clock: Callable[[], datetime] | None,
+) -> bool:
+    verifiedAtDate = _parseUtcSnapshotTimestamp(verifiedAt)
+    validUntilDate = _parseUtcSnapshotTimestamp(validUntil)
+    if validUntilDate <= verifiedAtDate:
+        raise RuntimeError("pricing snapshot validity must end after verification")
+    now = clock() if clock is not None else datetime.now(UTC)
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("pricing clock must return a timezone-aware datetime")
+    return verifiedAtDate <= now.astimezone(UTC) <= validUntilDate
+
+
+def _parseUtcSnapshotTimestamp(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise RuntimeError("pricing snapshot timestamps must be timezone-aware")
+    return parsed.astimezone(UTC)
 
 
 def _usdUpperBound(cnyAmount: Decimal) -> Decimal:
@@ -381,8 +464,13 @@ def _usdUpperBound(cnyAmount: Decimal) -> Decimal:
     )
 
 
-def usageCostUpperBoundUsd(modelId: str, usage: ModelUsage) -> Decimal:
-    price = getZhipuTokenPrice(modelId)
+def usageCostUpperBoundUsd(
+    modelId: str,
+    usage: ModelUsage,
+    *,
+    clock: Callable[[], datetime] | None = None,
+) -> Decimal:
+    price = getZhipuTokenPrice(modelId, clock=clock)
     if price is None:
         raise ModelGatewayError(
             FailureCode.MODEL_PRICING_UNAVAILABLE,
@@ -405,6 +493,8 @@ def usageCostUpperBoundForProviderUsd(
     provider: ProviderId | str,
     modelId: str,
     usage: ModelUsage,
+    *,
+    clock: Callable[[], datetime] | None = None,
 ) -> Decimal:
     """按联合 provider/model 与保守预算率计算费用上界。
 
@@ -412,7 +502,7 @@ def usageCostUpperBoundForProviderUsd(
     口径变化导致硬预算被低估。
     """
 
-    price = getTokenPrice(provider, modelId)
+    price = getTokenPrice(provider, modelId, clock=clock)
     if price is None:
         raise ModelGatewayError(
             FailureCode.MODEL_PRICING_UNAVAILABLE,
@@ -454,16 +544,17 @@ def estimateReservation(
     systemPrompt: str = "",
     userContent: str = "",
     provider: ProviderId | str = DEFAULT_PROVIDER,
+    clock: Callable[[], datetime] | None = None,
 ) -> CostReservation:
     # 旧智谱型号继续走旧目录与旧价格表；通用安全集合走联合键目录。
     if provider == "zhipu":
         descriptor = getZhipuModel(modelId)
-        legacyPrice = getZhipuTokenPrice(modelId)
+        legacyPrice = getZhipuTokenPrice(modelId, clock=clock)
         price = None
     else:
         descriptor = getModel(provider, modelId)
         legacyPrice = None
-        price = getTokenPrice(provider, modelId)
+        price = getTokenPrice(provider, modelId, clock=clock)
     if provider == "zhipu" and legacyPrice is None:
         raise ModelGatewayError(
             FailureCode.MODEL_PRICING_UNAVAILABLE,
@@ -523,7 +614,12 @@ def estimateReservation(
 class ModelCostBudget:
     """以预留/结算方式保证任何并发调用都不能越过场景美元硬上限。"""
 
-    def __init__(self, capUsd: float | Decimal) -> None:
+    def __init__(
+        self,
+        capUsd: float | Decimal,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self._capUsd = Decimal(str(capUsd)).quantize(COST_QUANTUM_USD)
         if self._capUsd < 0:
             raise ValueError("capUsd must be non-negative")
@@ -544,6 +640,8 @@ class ModelCostBudget:
         self._billingCurrency: str | None = None
         self._priceSourceUrl: str | None = None
         self._providerPricingVerifiedAt: str | None = None
+        self._providerPricingValidUntil: str | None = None
+        self._clock = clock
 
     def reserve(self, request: ModelRequest, policy: ModelPolicy) -> CostReservation:
         draft = estimateReservation(
@@ -553,8 +651,9 @@ class ModelCostBudget:
             systemPrompt=request.systemPrompt,
             userContent=request.userContent,
             provider=request.provider,
+            clock=self._clock,
         )
-        price = getTokenPrice(request.provider, request.model)
+        price = getTokenPrice(request.provider, request.model, clock=self._clock)
         if price is None:
             raise ModelGatewayError(
                 FailureCode.MODEL_PRICING_UNAVAILABLE,
@@ -570,6 +669,7 @@ class ModelCostBudget:
             self._billingCurrency = price.currency
             self._priceSourceUrl = price.sourceUrl
             self._providerPricingVerifiedAt = price.verifiedAt
+            self._providerPricingValidUntil = price.validUntil
             activeUsd = sum(
                 (item.maximumUsd for item in self._active.values()),
                 Decimal("0"),
@@ -631,11 +731,23 @@ class ModelCostBudget:
                     FailureCode.MODEL_USAGE_MISSING,
                     "provider token usage was missing or outside the reserved maximum",
                 )
-            chargedUsd = (
-                usageCostUpperBoundUsd(active.modelId, usage)
-                if active.provider == "zhipu"
-                else usageCostUpperBoundForProviderUsd(active.provider, active.modelId, usage)
-            )
+            try:
+                chargedUsd = (
+                    usageCostUpperBoundUsd(active.modelId, usage, clock=self._clock)
+                    if active.provider == "zhipu"
+                    else usageCostUpperBoundForProviderUsd(
+                        active.provider,
+                        active.modelId,
+                        usage,
+                        clock=self._clock,
+                    )
+                )
+            except ModelGatewayError:
+                # 预留后价格快照若恰好过期，无法再可信地精算结算额；保守消耗
+                # 完整预留，避免跨过期边界后预算被错误释放。
+                self._chargedUsd += active.maximumUsd
+                self._unknownUsageCalls += 1
+                raise
             if uncertainAttempts:
                 # timeout/transport error 后无法知道请求是否已到达并计费。按预留总额中
                 # 对应响应次数的比例继续占用预算，不能因后续重试成功而静默释放。
@@ -704,6 +816,10 @@ class ModelCostBudget:
                 "fxConversionApplied": self._billingCurrency == "CNY",
                 "pricingSnapshotVersion": PRICING_SNAPSHOT_VERSION,
                 "pricingVerifiedAt": self._providerPricingVerifiedAt or PRICING_VERIFIED_AT,
+                "pricingValidUntil": (
+                    self._providerPricingValidUntil or PRICING_SNAPSHOT_VALID_UNTIL
+                ),
+                "pricingSnapshotStatus": pricingSnapshotStatus(clock=self._clock),
                 "priceSourceUrl": self._priceSourceUrl or PRICE_SOURCE_URL,
                 "fxSourceUrl": FX_SOURCE_URL,
                 "officialFxSnapshotCnyPerUsd": float(OFFICIAL_FX_SNAPSHOT_CNY_PER_USD),

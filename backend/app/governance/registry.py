@@ -601,7 +601,8 @@ def _coreComponents() -> tuple[ComponentRecord, ...]:
             ),
             limitations=(
                 "Topology and node traits are synthetic and are not reconstructed from real social users.",
-                "Network parameters have not received external empirical validation for SpaceX investors.",
+                "Network parameters have not received external empirical validation for the "
+                "people or institutions represented by the selected Event Pack.",
             ),
             fallback=_fallback(
                 ("invalid graph", "unknown node", "propagation limit"),

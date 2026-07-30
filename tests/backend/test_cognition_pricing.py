@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import ROUND_UP, Decimal
 
 import pytest
@@ -16,7 +17,10 @@ from backend.app.cognition import (
     SamplingConfig,
     SessionConfigStore,
     estimateReservation,
+    getTokenPrice,
+    getTokenPriceSnapshot,
     getZhipuTokenPrice,
+    pricingSnapshotStatus,
     sha256Text,
     usageCostUpperBoundUsd,
 )
@@ -84,6 +88,49 @@ def test_official_price_snapshot_is_explicit_and_unknown_prices_fail_closed() ->
             apiKey="test-price-secret-key",
             model="glm-4.6",
         )
+
+
+def test_expired_price_snapshot_fails_closed_with_an_injected_clock() -> None:
+    def freshClock() -> datetime:
+        return datetime(2026, 7, 29, tzinfo=UTC)
+
+    def staleClock() -> datetime:
+        return datetime(2026, 8, 21, tzinfo=UTC)
+
+    currentPrice = getTokenPrice("zhipu", "glm-5.2", clock=freshClock)
+    rawSnapshot = getTokenPriceSnapshot("zhipu", "glm-5.2")
+    assert currentPrice is not None
+    assert rawSnapshot is not None
+    assert rawSnapshot.validUntil == "2026-08-20T00:00:00Z"
+    assert pricingSnapshotStatus(clock=freshClock) == "CURRENT"
+    assert getTokenPrice("zhipu", "glm-5.2", clock=staleClock) is None
+    assert getZhipuTokenPrice("glm-5.2", clock=staleClock) is None
+    assert pricingSnapshotStatus(clock=staleClock) == "STALE_FAIL_CLOSED"
+
+    with pytest.raises(ModelGatewayError) as staleReservation:
+        ModelCostBudget(100, clock=staleClock).reserve(_request(), ModelPolicy())
+    assert staleReservation.value.code == FailureCode.MODEL_PRICING_UNAVAILABLE
+
+
+def test_snapshot_expiry_during_an_active_reservation_consumes_the_full_bound() -> None:
+    now = [datetime(2026, 7, 29, tzinfo=UTC)]
+
+    def mutableClock() -> datetime:
+        return now[0]
+
+    budget = ModelCostBudget(10, clock=mutableClock)
+    reservation = budget.reserve(_request(), ModelPolicy())
+    now[0] = datetime(2026, 8, 21, tzinfo=UTC)
+
+    with pytest.raises(ModelGatewayError) as staleSettlement:
+        budget.settle(
+            reservation,
+            _result(ModelUsage(promptTokens=1_000, completionTokens=500)),
+        )
+
+    assert staleSettlement.value.code == FailureCode.MODEL_PRICING_UNAVAILABLE
+    assert budget.snapshot()["chargedUsdUpperBound"] == float(reservation.maximumUsd)
+    assert budget.snapshot()["unknownUsageCalls"] == 1
 
 
 def test_full_context_and_one_repair_define_pre_dispatch_reservation() -> None:

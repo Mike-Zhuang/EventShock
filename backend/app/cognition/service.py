@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import threading
 import time
 import uuid
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field, model_validator
@@ -68,6 +69,7 @@ from backend.app.cognition.prompts import (
 from backend.app.cognition.provider_gateways import ProviderGatewayRouter
 from backend.app.cognition.result_interpreter import (
     DEFAULT_RESULT_TOOLS,
+    INITIAL_RESULT_TOOLS,
     ResultInterpretationRun,
     ResultLanguage,
     buildResultIndex,
@@ -75,12 +77,18 @@ from backend.app.cognition.result_interpreter import (
     toolActivities,
     toolResultsPayload,
 )
+from backend.app.cognition.result_semantics import (
+    deterministicInterpretationFallback,
+    semanticRepairInstruction,
+    validateInterpretationSemantics,
+)
 from backend.app.cognition.streaming import (
     ModelStreamObserver,
     ModelStreamProgress,
     ModelStreamStage,
     emitModelStreamProgress,
 )
+from backend.app.event_pack_claims import buildLlmClaimQualityMetadata
 from backend.app.guided_workflow.models import (
     GuidedWorkflowProposal,
     GuidedWorkflowView,
@@ -88,6 +96,8 @@ from backend.app.guided_workflow.models import (
 from backend.app.security import UnsafeModelOutputError
 
 SourceType = Literal["OFFICIAL", "REPORTING", "ESTIMATE", "USER_PROVIDED"]
+STRUCTURED_SUCCESS_RELEASE_THRESHOLD = 0.95
+LOGGER = logging.getLogger(__name__)
 
 
 class ExternalEvidenceSource(StrictFrozenModel):
@@ -131,6 +141,8 @@ class ConnectionTestResult(StrictFrozenModel):
     latency_ms: float = Field(ge=0.0)
     total_tokens: int = Field(ge=0)
     repair_used: bool
+    thinking_preference_enabled: bool = False
+    thinking_enabled: bool = False
 
 
 class EventClaimExtractionRun(StrictFrozenModel):
@@ -144,6 +156,8 @@ class EventClaimExtractionRun(StrictFrozenModel):
     repair_used: bool
     latency_ms: float = Field(ge=0.0)
     total_tokens: int = Field(ge=0)
+    thinking_preference_enabled: bool = False
+    thinking_enabled: bool = False
 
 
 class BeliefDecisionRun(StrictFrozenModel):
@@ -163,6 +177,8 @@ class BeliefDecisionRun(StrictFrozenModel):
     transport_attempts: int = Field(default=0, ge=0)
     failure_codes: tuple[str, ...] = ()
     fallback_reason: str | None = None
+    thinking_preference_enabled: bool = False
+    thinking_enabled: bool = False
 
 
 class CognitionTelemetryView(StrictFrozenModel):
@@ -179,6 +195,17 @@ class CognitionTelemetryView(StrictFrozenModel):
     cache_hit_rate: float = Field(ge=0.0, le=1.0)
     fallback_rate: float = Field(ge=0.0, le=1.0)
     invalid_output_rate: float = Field(ge=0.0, le=1.0)
+    structured_successes: int = Field(ge=0)
+    structured_success_rate: float = Field(ge=0.0, le=1.0)
+    structured_success_threshold: float = Field(ge=0.0, le=1.0)
+    structured_success_gate_status: Literal["PASS", "FAIL", "NOT_EVALUATED"]
+    failure_category_counts: dict[str, int]
+    observation_scope: Literal[
+        "PERSISTED_SITE_WIDE",
+        "PROCESS_LOCAL",
+        "PERSISTENCE_DEGRADED",
+    ]
+    observed_since: str
 
 
 class CognitionEvalSummary(StrictFrozenModel):
@@ -201,6 +228,8 @@ class ClosableModelGateway(Protocol):
 
 GatewayFactory = Callable[[ImmutableDecisionCache | None], ClosableModelGateway]
 ResultValidator = Callable[[ModelResult[Any]], None]
+TelemetryLoader = Callable[[], dict[str, Any] | None]
+TelemetryRecorder = Callable[[dict[str, Any]], None]
 
 
 class _TelemetryState:
@@ -210,20 +239,32 @@ class _TelemetryState:
         "cachedTokens",
         "completionTokens",
         "fallbacks",
+        "failureCategoryCounts",
         "invalidOutputs",
+        "observedSince",
         "promptTokens",
+        "structuredSuccesses",
         "totalLatencyMs",
     )
 
-    def __init__(self) -> None:
-        self.calls = 0
-        self.cacheHits = 0
-        self.fallbacks = 0
-        self.invalidOutputs = 0
-        self.promptTokens = 0
-        self.completionTokens = 0
-        self.cachedTokens = 0
-        self.totalLatencyMs = 0.0
+    def __init__(self, persisted: dict[str, Any] | None = None) -> None:
+        source = persisted or {}
+        self.calls = max(0, int(source.get("calls", 0)))
+        self.cacheHits = max(0, int(source.get("cacheHits", 0)))
+        self.fallbacks = max(0, int(source.get("fallbacks", 0)))
+        self.invalidOutputs = max(0, int(source.get("invalidOutputs", 0)))
+        self.structuredSuccesses = max(0, int(source.get("structuredSuccesses", 0)))
+        self.promptTokens = max(0, int(source.get("promptTokens", 0)))
+        self.completionTokens = max(0, int(source.get("completionTokens", 0)))
+        self.cachedTokens = max(0, int(source.get("cachedTokens", 0)))
+        self.totalLatencyMs = max(0.0, float(source.get("totalLatencyMs", 0.0)))
+        categoryCounts = source.get("failureCategoryCounts")
+        self.failureCategoryCounts = {
+            str(name): max(0, count)
+            for name, count in (categoryCounts.items() if isinstance(categoryCounts, dict) else ())
+            if isinstance(count, int) and not isinstance(count, bool)
+        }
+        self.observedSince = str(source.get("observedSince") or datetime.now(UTC).isoformat())
 
 
 INVALID_OUTPUT_CODES = frozenset(
@@ -237,6 +278,29 @@ INVALID_OUTPUT_CODES = frozenset(
         FailureCode.PROMPT_DISCLOSURE_BLOCKED,
     }
 )
+
+FAILURE_CATEGORY_BY_CODE: dict[FailureCode, str] = {
+    FailureCode.MODEL_TIMEOUT: "AVAILABILITY",
+    FailureCode.MODEL_TRANSPORT_ERROR: "TRANSPORT",
+    FailureCode.MODEL_AUTHENTICATION_ERROR: "AUTHENTICATION",
+    FailureCode.MODEL_PERMISSION_ERROR: "AUTHENTICATION",
+    FailureCode.MODEL_RATE_LIMITED: "RATE_LIMIT",
+    FailureCode.MODEL_OVERLOADED: "AVAILABILITY",
+    FailureCode.MODEL_QUOTA_EXHAUSTED: "QUOTA",
+    FailureCode.MODEL_REQUEST_INVALID: "INVALID_REQUEST",
+    FailureCode.MODEL_RESPONSE_INVALID: "INVALID_OUTPUT",
+    FailureCode.MODEL_PRICING_UNAVAILABLE: "COST_CONTROL",
+    FailureCode.MODEL_COST_BUDGET_EXCEEDED: "COST_CONTROL",
+    FailureCode.MODEL_USAGE_MISSING: "USAGE_ACCOUNTING",
+    FailureCode.SCHEMA_INVALID: "INVALID_OUTPUT",
+    FailureCode.REFUSAL: "SAFETY_OR_REFUSAL",
+    FailureCode.CONTENT_FILTERED: "SAFETY_OR_REFUSAL",
+    FailureCode.EVIDENCE_ID_UNKNOWN: "GROUNDING",
+    FailureCode.ACTION_NOT_ALLOWED: "AUTHORITY_BOUNDARY",
+    FailureCode.PROMPT_DISCLOSURE_BLOCKED: "SAFETY_OR_REFUSAL",
+    FailureCode.FALLBACK_USED: "RULE_FALLBACK",
+    FailureCode.RULE_FALLBACK_USED: "RULE_FALLBACK",
+}
 
 
 def _defaultGatewayFactory(cache: ImmutableDecisionCache | None) -> ClosableModelGateway:
@@ -255,14 +319,22 @@ class CognitionService:
         gatewayFactory: GatewayFactory | None = None,
         modelPolicy: ModelPolicy | None = None,
         clock: Callable[[], float] = time.perf_counter,
+        telemetryLoader: TelemetryLoader | None = None,
+        telemetryRecorder: TelemetryRecorder | None = None,
     ) -> None:
         self._configStore = configStore or SessionConfigStore()
         self._decisionCache = decisionCache or ImmutableDecisionCache()
         self._gatewayFactory = gatewayFactory or _defaultGatewayFactory
         self._modelPolicy = modelPolicy or ModelPolicy()
         self._clock = clock
-        self._telemetry = _TelemetryState()
+        persistedTelemetry = telemetryLoader() if telemetryLoader is not None else None
+        self._telemetry = _TelemetryState(persistedTelemetry)
         self._telemetryLock = threading.RLock()
+        self._telemetryRecorder = telemetryRecorder
+        self._telemetryPersistenceConfigured = (
+            telemetryLoader is not None and telemetryRecorder is not None
+        )
+        self._telemetryPersistenceHealthy = self._telemetryPersistenceConfigured
         self._lastEvalSuite: EvalSuiteResult | None = None
 
     def __repr__(self) -> str:
@@ -385,6 +457,8 @@ class CognitionService:
             latency_ms=result.latencyMs,
             total_tokens=result.usage.totalTokens,
             repair_used=result.repairUsed,
+            thinking_preference_enabled=runtime.thinkingEnabled,
+            thinking_enabled=request.samplingConfig.thinking_enabled,
         )
 
     async def extractEventClaims(
@@ -507,6 +581,8 @@ class CognitionService:
             repair_used=result.repairUsed,
             latency_ms=result.latencyMs,
             total_tokens=result.usage.totalTokens,
+            thinking_preference_enabled=runtime.thinkingEnabled,
+            thinking_enabled=request.samplingConfig.thinking_enabled,
         )
 
     async def proposeGuidedWorkflow(
@@ -516,6 +592,7 @@ class CognitionService:
         workflow: GuidedWorkflowView,
         latestUserMessage: str,
         language: Literal["en", "zh-CN"],
+        progressObserver: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> GuidedWorkflowProposal:
         """生成单阶段、待人工应用的工作流候选，不授予任何写入权限。"""
 
@@ -560,6 +637,18 @@ class CognitionService:
             maxTokens=2_048,
             streamResponse=False,
         )
+        if progressObserver is not None:
+            # 在真正请求供应商前先持久化 requestId。若记录失败则停止调用，
+            # 避免出现“已计费但系统完全没有审计证据”的新不确定状态。
+            progressObserver(
+                "PROVIDER_DISPATCHED",
+                {
+                    "providerRequestId": request.requestId,
+                    "httpResponseReceived": None,
+                    "usageReceived": None,
+                    "parseCompleted": False,
+                },
+            )
 
         def validateProposal(modelResult: ModelResult[Any]) -> None:
             proposal = modelResult.data
@@ -574,13 +663,42 @@ class CognitionService:
                     "guided proposal attempted to change the deterministic workflow stage",
                 )
 
-        result = await self._execute(
-            request=request,
-            schema=GuidedWorkflowProposal,
-            policy=self._policy(allowRuleFallback=False),
-            resultValidator=validateProposal,
-            useDecisionCache=False,
-        )
+        try:
+            result = await self._execute(
+                request=request,
+                schema=GuidedWorkflowProposal,
+                policy=self._policy(allowRuleFallback=False),
+                resultValidator=validateProposal,
+                useDecisionCache=False,
+            )
+        except ModelGatewayError as error:
+            if progressObserver is not None:
+                try:
+                    progressObserver(
+                        "PROVIDER_RESPONSE_FAILED",
+                        {
+                            "providerRequestId": request.requestId,
+                            "httpResponseReceived": error.httpStatus is not None,
+                            "usageReceived": False,
+                            "parseCompleted": False,
+                            "failureCode": error.code.value,
+                        },
+                    )
+                except Exception:
+                    # 原始供应商失败必须保留为主异常；恢复页仍可从初始
+                    # PROVIDER_DISPATCHED 记录判断这次请求可能已经计费。
+                    pass
+            raise
+        if progressObserver is not None:
+            progressObserver(
+                "PROVIDER_RESPONSE_VALIDATED",
+                {
+                    "providerRequestId": result.requestId,
+                    "httpResponseReceived": True,
+                    "usageReceived": True,
+                    "parseCompleted": True,
+                },
+            )
         return result.data
 
     async def generateBeliefDecision(
@@ -590,6 +708,7 @@ class CognitionService:
         observation: Observation,
         costBudget: ModelCostBudget | None = None,
         allowRuleFallback: bool = True,
+        progressObserver: ModelStreamObserver | None = None,
     ) -> BeliefDecisionRun:
         runtime = self._configStore.getRuntimeConfig(sessionId)
         request = self._buildRequest(
@@ -602,6 +721,8 @@ class CognitionService:
             observationHash=canonicalHash(observation),
             allowedEvidenceIds=observation.evidenceIds(),
             allowedActionValues=frozenset(action.value for action in observation.allowed_actions),
+            streamResponse=progressObserver is not None,
+            streamObserver=progressObserver,
         )
         result = await self._execute(
             request=request,
@@ -635,6 +756,8 @@ class CognitionService:
             transport_attempts=result.transportAttempts,
             failure_codes=failureCodes,
             fallback_reason=fallbackReason,
+            thinking_preference_enabled=runtime.thinkingEnabled,
+            thinking_enabled=request.samplingConfig.thinking_enabled,
         )
 
     async def interpretExperimentResult(
@@ -664,7 +787,7 @@ class CognitionService:
         )
 
         if initial:
-            selectedTools = DEFAULT_RESULT_TOOLS
+            selectedTools = INITIAL_RESULT_TOOLS
         else:
             await emitModelStreamProgress(
                 progressObserver,
@@ -717,6 +840,7 @@ class CognitionService:
                     dict.fromkeys(
                         (
                             ResultEvidenceTool.OVERVIEW,
+                            ResultEvidenceTool.METRIC_SUMMARY,
                             ResultEvidenceTool.LIMITATIONS,
                             *plannerResult.data.tools,
                         )
@@ -789,6 +913,7 @@ class CognitionService:
                 includeAnalysisSummary=includeAnalysisSummary,
             ),
         )
+        terminalAnswerResult = answerResult
         usage = answerResult.usage
         latencyMs = answerResult.latencyMs
         cacheHit = answerResult.cacheHit
@@ -796,6 +921,122 @@ class CognitionService:
         transportAttempts = answerResult.transportAttempts
         uncertainBillableAttempts = answerResult.uncertainBillableAttempts
         failureCodes = list(answerResult.failureCodes)
+        semanticStatus: Literal[
+            "PASSED",
+            "REPAIRED",
+            "DETERMINISTIC_FALLBACK",
+        ] = "PASSED"
+        deterministicFallbackUsed = False
+        semanticReport = validateInterpretationSemantics(
+            answerResult.data,
+            result,
+            requirePrimaryFinding=initial,
+        )
+        semanticViolationCodes = list(semanticReport.violation_codes)
+
+        if not semanticReport.valid:
+            # 结构合格但语义不合格的候选只保留在当前内存中。这里最多发起一次
+            # 精确语义修复；只有修复通过校验或确定性模板才能成为持久化终态。
+            repairUsed = True
+            await emitModelStreamProgress(
+                progressObserver,
+                ModelStreamProgress(stage=ModelStreamStage.REPAIRING, repair=True),
+            )
+            semanticRepairPayload = {
+                **answerPayload,
+                "semantic_repair_instruction": semanticRepairInstruction(
+                    answerResult.data,
+                    semanticReport,
+                    language=language,
+                ),
+            }
+            semanticRepairRequest = self._buildRequest(
+                runtime=runtime,
+                sessionId=sessionId,
+                requestId=self._newRequestId("result-semantic-repair"),
+                prompt=RESULT_INTERPRETATION_PROMPT,
+                userContent=buildResultInterpretationUserMessage(semanticRepairPayload),
+                agentConfigHash=canonicalHash(
+                    {
+                        "workflow": RESULT_INTERPRETATION_PROMPT.version,
+                        "language": language,
+                        "includeAnalysisSummary": includeAnalysisSummary,
+                        "tools": [tool.value for tool in selectedTools],
+                        "semanticRepair": True,
+                        "semanticViolationCodes": [
+                            code.value for code in semanticReport.violation_codes
+                        ],
+                    }
+                ),
+                observationHash=canonicalHash(semanticRepairPayload),
+                allowedEvidenceIds=allowedEvidenceIds,
+                maxTokens=4_096,
+                streamResponse=True,
+                streamObserver=progressObserver,
+            )
+            try:
+                semanticRepairResult = await self._execute(
+                    request=semanticRepairRequest,
+                    schema=ResultInterpretationAnswer,
+                    policy=self._interpretationPolicy(stage="answer"),
+                    resultValidator=validateInterpretation,
+                    useDecisionCache=False,
+                )
+                semanticRepairResult = replace(
+                    semanticRepairResult,
+                    data=self._normalizeInterpretationAnswer(
+                        semanticRepairResult.data,
+                        language=language,
+                        includeAnalysisSummary=includeAnalysisSummary,
+                    ),
+                )
+                usage = usage.plus(semanticRepairResult.usage)
+                latencyMs += semanticRepairResult.latencyMs
+                cacheHit = cacheHit and semanticRepairResult.cacheHit
+                repairUsed = semanticRepairResult.repairUsed or repairUsed
+                transportAttempts += semanticRepairResult.transportAttempts
+                uncertainBillableAttempts += semanticRepairResult.uncertainBillableAttempts
+                failureCodes.extend(semanticRepairResult.failureCodes)
+                repairedSemanticReport = validateInterpretationSemantics(
+                    semanticRepairResult.data,
+                    result,
+                    requirePrimaryFinding=initial,
+                )
+                semanticViolationCodes.extend(repairedSemanticReport.violation_codes)
+                if repairedSemanticReport.valid:
+                    terminalAnswerResult = semanticRepairResult
+                    semanticStatus = "REPAIRED"
+                else:
+                    deterministicFallbackUsed = True
+                    semanticStatus = "DETERMINISTIC_FALLBACK"
+                    terminalAnswerResult = replace(
+                        semanticRepairResult,
+                        data=deterministicInterpretationFallback(
+                            result,
+                            language=language,
+                            includeAnalysisSummary=includeAnalysisSummary,
+                        ),
+                    )
+            except ModelGatewayError as error:
+                # 语义修复失败不能放行初始候选，也不能触发第二次语义修复。
+                cacheHit = False
+                repairUsed = error.repairUsed or repairUsed
+                transportAttempts += max(0, error.attempts)
+                uncertainBillableAttempts += max(0, error.uncertainBillableAttempts)
+                failureCodes.append(error.code)
+                deterministicFallbackUsed = True
+                semanticStatus = "DETERMINISTIC_FALLBACK"
+                terminalAnswerResult = replace(
+                    answerResult,
+                    data=deterministicInterpretationFallback(
+                        result,
+                        language=language,
+                        includeAnalysisSummary=includeAnalysisSummary,
+                    ),
+                )
+
+        # 同一代码可能同时出现在初始候选与修复候选中；历史只保留稳定去重集合。
+        semanticViolationCodeValues = tuple(sorted({code.value for code in semanticViolationCodes}))
         if plannerResult is not None:
             usage = plannerResult.usage.plus(usage)
             latencyMs += plannerResult.latencyMs
@@ -821,10 +1062,10 @@ class CognitionService:
         )
 
         return ResultInterpretationRun(
-            interpretation=answerResult.data,
+            interpretation=terminalAnswerResult.data,
             result_hash=resultHash,
-            provider=answerResult.provider,
-            model=answerResult.model,
+            provider=terminalAnswerResult.provider,
+            model=terminalAnswerResult.model,
             tool_activity=toolActivities(toolResults, language),
             usage=ModelUsage(
                 promptTokens=usage.promptTokens,
@@ -838,7 +1079,11 @@ class CognitionService:
             planner_used=not initial,
             prompt_version=RESULT_INTERPRETATION_PROMPT.version,
             planner_fallback_used=plannerError is not None,
-            thinking_enabled=runtime.thinkingEnabled,
+            semantic_validation_status=semanticStatus,
+            deterministic_fallback_used=deterministicFallbackUsed,
+            semantic_violation_codes=semanticViolationCodeValues,
+            thinking_preference_enabled=runtime.thinkingEnabled,
+            thinking_enabled=answerRequest.samplingConfig.thinking_enabled,
             streamed=True,
             transport_attempts=transportAttempts,
             uncertain_billable_attempts=uncertainBillableAttempts,
@@ -850,6 +1095,7 @@ class CognitionService:
             state = self._telemetry
             calls = state.calls
             totalTokens = state.promptTokens + state.completionTokens
+            structuredSuccessRate = state.structuredSuccesses / calls if calls else 0.0
             return CognitionTelemetryView(
                 calls=calls,
                 cache_hits=state.cacheHits,
@@ -864,6 +1110,29 @@ class CognitionService:
                 cache_hit_rate=(round(state.cacheHits / calls, 6) if calls else 0.0),
                 fallback_rate=(round(state.fallbacks / calls, 6) if calls else 0.0),
                 invalid_output_rate=(round(state.invalidOutputs / calls, 6) if calls else 0.0),
+                structured_successes=state.structuredSuccesses,
+                structured_success_rate=round(structuredSuccessRate, 6),
+                structured_success_threshold=STRUCTURED_SUCCESS_RELEASE_THRESHOLD,
+                structured_success_gate_status=(
+                    "NOT_EVALUATED"
+                    if calls == 0
+                    else (
+                        "PASS"
+                        if structuredSuccessRate >= STRUCTURED_SUCCESS_RELEASE_THRESHOLD
+                        else "FAIL"
+                    )
+                ),
+                failure_category_counts=dict(sorted(state.failureCategoryCounts.items())),
+                observation_scope=(
+                    "PERSISTED_SITE_WIDE"
+                    if self._telemetryPersistenceHealthy
+                    else (
+                        "PERSISTENCE_DEGRADED"
+                        if self._telemetryPersistenceConfigured
+                        else "PROCESS_LOCAL"
+                    )
+                ),
+                observed_since=state.observedSince,
             )
 
     def runEvaluation(self, samples: tuple[EvalSample, ...]) -> EvalSuiteResult:
@@ -996,6 +1265,9 @@ class CognitionService:
                 advanced.seed,
             )
         )
+        # 所有当前 CognitionService 工作流都要求严格结构化 JSON。全局开关只表示
+        # 用户偏好，不能覆盖工作流的传输约束；显式参数暂时保留以兼容旧调用方。
+        _ = thinkingEnabled
         return ModelRequest(
             provider=runtime.provider,
             model=runtime.model,
@@ -1010,9 +1282,7 @@ class CognitionService:
             allowedEvidenceIds=allowedEvidenceIds,
             allowedActionValues=allowedActionValues,
             samplingConfig=SamplingConfig(
-                thinking_enabled=(
-                    runtime.thinkingEnabled if thinkingEnabled is None else thinkingEnabled
-                ),
+                thinking_enabled=False,
                 do_sample=samplingRequested,
                 max_tokens=min(runtime.maxTokens, maxTokens or runtime.maxTokens),
                 temperature=advanced.temperature,
@@ -1029,21 +1299,72 @@ class CognitionService:
 
     def _recordResult(self, result: ModelResult[Any]) -> None:
         invalid = any(code in INVALID_OUTPUT_CODES for code in result.failureCodes)
+        categories = {FAILURE_CATEGORY_BY_CODE.get(code, "UNKNOWN") for code in result.failureCodes}
+        delta = {
+            "calls": 1,
+            "cacheHits": int(result.cacheHit),
+            "fallbacks": int(result.fallbackUsed),
+            "invalidOutputs": int(invalid),
+            "structuredSuccesses": int(not result.fallbackUsed),
+            "promptTokens": result.usage.promptTokens,
+            "completionTokens": result.usage.completionTokens,
+            "cachedTokens": result.usage.cachedTokens,
+            "totalLatencyMs": max(result.latencyMs, 0.0),
+            "failureCategoryCounts": {category: 1 for category in categories},
+        }
         with self._telemetryLock:
             self._telemetry.calls += 1
             self._telemetry.cacheHits += int(result.cacheHit)
             self._telemetry.fallbacks += int(result.fallbackUsed)
             self._telemetry.invalidOutputs += int(invalid)
+            self._telemetry.structuredSuccesses += int(not result.fallbackUsed)
             self._telemetry.promptTokens += result.usage.promptTokens
             self._telemetry.completionTokens += result.usage.completionTokens
             self._telemetry.cachedTokens += result.usage.cachedTokens
             self._telemetry.totalLatencyMs += max(result.latencyMs, 0.0)
+            for category in categories:
+                self._telemetry.failureCategoryCounts[category] = (
+                    self._telemetry.failureCategoryCounts.get(category, 0) + 1
+                )
+        self._persistTelemetryDelta(delta)
 
     def _recordError(self, failureCode: FailureCode | None, latencyMs: float) -> None:
+        category = (
+            FAILURE_CATEGORY_BY_CODE.get(failureCode, "UNKNOWN")
+            if failureCode is not None
+            else "UNKNOWN"
+        )
+        delta = {
+            "calls": 1,
+            "cacheHits": 0,
+            "fallbacks": 0,
+            "invalidOutputs": int(failureCode in INVALID_OUTPUT_CODES),
+            "structuredSuccesses": 0,
+            "promptTokens": 0,
+            "completionTokens": 0,
+            "cachedTokens": 0,
+            "totalLatencyMs": max(latencyMs, 0.0),
+            "failureCategoryCounts": {category: 1},
+        }
         with self._telemetryLock:
             self._telemetry.calls += 1
             self._telemetry.invalidOutputs += int(failureCode in INVALID_OUTPUT_CODES)
             self._telemetry.totalLatencyMs += max(latencyMs, 0.0)
+            self._telemetry.failureCategoryCounts[category] = (
+                self._telemetry.failureCategoryCounts.get(category, 0) + 1
+            )
+        self._persistTelemetryDelta(delta)
+
+    def _persistTelemetryDelta(self, delta: dict[str, Any]) -> None:
+        """持久化失败不得让已计费调用失败或触发客户端重试。"""
+
+        if self._telemetryRecorder is None:
+            return
+        try:
+            self._telemetryRecorder(delta)
+        except Exception:
+            self._telemetryPersistenceHealthy = False
+            LOGGER.exception("Cognition telemetry persistence degraded")
 
     def _policy(self, *, allowRuleFallback: bool) -> ModelPolicy:
         return self._modelPolicy.model_copy(
@@ -1130,10 +1451,25 @@ class CognitionService:
     ) -> tuple[dict[str, Any], ...]:
         claims: list[dict[str, Any]] = []
         for index, candidate in enumerate(extraction.claims):
-            sourceTypes = {
-                sourceById[sourceId].sourceType for sourceId in candidate.source_evidence_ids
-            }
-            sourceTier = next(iter(sourceTypes)) if len(sourceTypes) == 1 else "MIXED"
+            claimSources = tuple(sourceById[sourceId] for sourceId in candidate.source_evidence_ids)
+            sourceTypes = tuple(source.sourceType for source in claimSources)
+            sourceTypeSet = set(sourceTypes)
+            sourceTier = next(iter(sourceTypeSet)) if len(sourceTypeSet) == 1 else "MIXED"
+            publishedAtValues = tuple(
+                source.publishedAt for source in claimSources if source.publishedAt is not None
+            )
+            # 任一来源缺失发布时间时不把多来源主张误标为完整时间边界。
+            publishedAt = (
+                max(publishedAtValues) if len(publishedAtValues) == len(claimSources) else None
+            )
+            qualityMetadata = buildLlmClaimQualityMetadata(
+                candidate.claim,
+                sourceTypes=sourceTypes,
+                publishedAt=publishedAt,
+                knownAt=candidate.known_at,
+                requestedImpactChannels=requestedImpactChannels,
+                modelReportedConfidence=candidate.confidence,
+            )
             claims.append(
                 {
                     "claimId": candidate.candidate_claim_id,
@@ -1142,8 +1478,7 @@ class CognitionService:
                     "sourceIds": list(candidate.source_evidence_ids),
                     "sourceTier": sourceTier,
                     "knownAt": candidate.known_at.isoformat(),
-                    "confidence": candidate.confidence,
-                    "impactChannels": list(requestedImpactChannels),
+                    **qualityMetadata,
                     "reviewStatus": "AI_PROPOSED",
                     "isRequired": index == 0,
                     "evidenceQuote": candidate.claim[:500],

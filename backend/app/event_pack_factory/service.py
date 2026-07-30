@@ -24,6 +24,7 @@ from backend.app.event_pack_factory.models import (
     EvidenceRole,
     FactoryMutationResult,
     FactorySourceRawText,
+    FactorySourceSecurityFinding,
     PasteSourceInput,
     ReaderSourceInput,
     SearchRunRecord,
@@ -31,6 +32,7 @@ from backend.app.event_pack_factory.models import (
     SourceReviewInput,
     SourceReviewStatus,
     SourceSecurityDecision,
+    SourceSelectionStatus,
     WebSearchRequest,
 )
 from backend.app.event_pack_factory.reader import ZhipuReaderClient
@@ -52,6 +54,46 @@ MAX_REVIEW_SUMMARY_CHARACTERS = 2_000
 MAX_VERIFIED_QUOTE_CHARACTERS = 500
 MAX_VERIFIED_QUOTES_CHARACTERS = 4_000
 _SAFE_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}$")
+
+
+def _safeFactorySecurityFindings(
+    scan: ContentScanResult,
+) -> tuple[FactorySourceSecurityFinding, ...]:
+    """压缩安全发现项，保留位置/动作但不携带任何命中内容。"""
+
+    findings: list[FactorySourceSecurityFinding] = []
+    for finding in scan.findings:
+        if finding.code in {
+            "PRIVATE_KEY_MATERIAL",
+            "API_KEY_OR_TOKEN",
+            "PASSWORD_VALUE",
+            "URL_EMBEDDED_CREDENTIAL",
+        }:
+            riskCategory = "SECRET"
+            recommendedAction = "REMOVE_ROTATE_AND_RESUBMIT"
+        elif finding.severity.value in {"CRITICAL", "HIGH"}:
+            riskCategory = "HIGH_RISK_IDENTITY_OR_ACTIVE_CONTENT"
+            recommendedAction = "REMOVE_AND_RESUBMIT"
+        elif finding.code in {"EMAIL_ADDRESS", "PHONE_NUMBER"} and scan.officialHost is not None:
+            riskCategory = "PUBLIC_ORGANIZATION_CONTACT"
+            recommendedAction = "VERIFY_PUBLIC_CONTACT_OR_REDACT"
+        elif finding.code in {"EMAIL_ADDRESS", "PHONE_NUMBER"}:
+            riskCategory = "CONTACT_INFORMATION"
+            recommendedAction = "REDACT_OR_EDIT"
+        else:
+            riskCategory = "GENERAL_REVIEW_MATCH"
+            recommendedAction = "REVIEW_EDIT_OR_REMOVE"
+        findings.append(
+            FactorySourceSecurityFinding(
+                code=finding.code,
+                severity=finding.severity.value,
+                field=finding.field,
+                offset=finding.offset,
+                riskCategory=riskCategory,
+                recommendedAction=recommendedAction,
+            )
+        )
+    return tuple(findings)
 
 
 @dataclass(frozen=True, slots=True)
@@ -441,6 +483,45 @@ class EventPackFactoryService:
         )
         return FactoryMutationResult(build=build, sources=(source,))
 
+    def setSourceIncluded(
+        self,
+        *,
+        ownerUserId: str,
+        buildId: str,
+        sourceId: str,
+        expectedRevision: int,
+        included: bool,
+    ) -> FactoryMutationResult:
+        self._cleanupExpired()
+        build, source = self._repository.setSourceSelection(
+            ownerUserId=_validatedOwner(ownerUserId),
+            buildId=_validatedId(buildId, "buildId"),
+            sourceId=_validatedId(sourceId, "sourceId"),
+            expectedRevision=_validatedRevision(expectedRevision),
+            selectionStatus=(
+                SourceSelectionStatus.INCLUDED if included else SourceSelectionStatus.EXCLUDED
+            ),
+        )
+        return FactoryMutationResult(build=build, sources=(source,))
+
+    def permanentlyDeleteSourceText(
+        self,
+        *,
+        ownerUserId: str,
+        buildId: str,
+        sourceId: str,
+        expectedRevision: int,
+    ) -> FactoryMutationResult:
+        """永久删除沿用既有清除事务，但只由明确确认的独立 API 调用。"""
+
+        return self.reviewSource(
+            ownerUserId=ownerUserId,
+            buildId=buildId,
+            sourceId=sourceId,
+            expectedRevision=expectedRevision,
+            reviewInput=SourceReviewInput(status=SourceReviewStatus.REJECTED),
+        )
+
     def getSourceRawText(
         self,
         *,
@@ -553,6 +634,7 @@ class EventPackFactoryService:
             for source in snapshot.sources
             if source.evidenceRole is EvidenceRole.EVIDENCE
             and source.reviewStatus is SourceReviewStatus.PENDING
+            and source.selectionStatus is SourceSelectionStatus.INCLUDED
         ]
         if pendingEvidence:
             raise FactoryValidationError(
@@ -716,6 +798,11 @@ class EventPackFactoryService:
                 FactoryErrorCode.SOURCE_REVIEW_REQUIRED,
                 "The source requires explicit human approval.",
             )
+        if source.selectionStatus is SourceSelectionStatus.EXCLUDED:
+            raise FactoryValidationError(
+                FactoryErrorCode.SOURCE_REVIEW_REQUIRED,
+                "The source is excluded from the current evidence set.",
+            )
         return source
 
     def _prepareEvidenceSource(
@@ -766,6 +853,9 @@ class EventPackFactoryService:
                 evidenceRole=EvidenceRole.EVIDENCE,
                 reviewStatus=SourceReviewStatus.PENDING,
                 securityDecision=SourceSecurityDecision(scan.decision.value),
+                sourceReviewLabel=scan.sourceReviewLabel.value,
+                officialHost=scan.officialHost,
+                securityFindings=_safeFactorySecurityFindings(scan),
                 title=_plainText(title, maximum=300, fieldName="title"),
                 publisher=_plainText(publisher, maximum=200, fieldName="publisher"),
                 url=normalizedUrl,
@@ -822,6 +912,9 @@ class EventPackFactoryService:
             evidenceRole=EvidenceRole.DISCOVERY_ONLY,
             reviewStatus=SourceReviewStatus.PENDING,
             securityDecision=SourceSecurityDecision(scan.decision.value),
+            sourceReviewLabel=scan.sourceReviewLabel.value,
+            officialHost=scan.officialHost,
+            securityFindings=_safeFactorySecurityFindings(scan),
             title=_plainText(title, maximum=300, fieldName="title"),
             publisher=_plainText(publisher, maximum=200, fieldName="publisher"),
             url=normalizedUrl,
@@ -855,7 +948,7 @@ class EventPackFactoryService:
             or parent.url is None
         ):
             raise FactoryValidationError(
-                FactoryErrorCode.READER_SOURCE_NOT_ALLOWED,
+                FactoryErrorCode.READER_SOURCE_IDENTITY_INVALID,
                 "Reader input must reference a search result from this build.",
             )
         if parent.reviewStatus is not SourceReviewStatus.APPROVED:

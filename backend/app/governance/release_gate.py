@@ -65,6 +65,7 @@ class GateEvaluator(StrEnum):
     INVENTORY = "INVENTORY"
     RED_TEAM_DEFINITIONS = "RED_TEAM_DEFINITIONS"
     RED_TEAM_EXECUTIONS = "RED_TEAM_EXECUTIONS"
+    STRUCTURED_SUCCESS = "STRUCTURED_SUCCESS"
     EXTERNAL_EVIDENCE = "EXTERNAL_EVIDENCE"
 
 
@@ -154,6 +155,9 @@ class ReleaseContext(GovernanceModel):
     evaluatedAt: datetime
     evidence: tuple[ReleaseEvidence, ...] = ()
     redTeamResults: tuple[RedTeamResult, ...] = ()
+    structuredSuccessCalls: int = Field(default=0, ge=0)
+    structuredSuccessRate: float = Field(default=0.0, ge=0.0, le=1.0)
+    structuredSuccessThreshold: float = Field(default=0.95, ge=0.0, le=1.0)
 
     @field_validator("evaluatedAt")
     @classmethod
@@ -182,6 +186,9 @@ class ReleaseGateReport(GovernanceModel):
     humanEvidenceComplete: bool
     gateResults: tuple[P0GateResult, ...]
     blockerGateIds: tuple[str, ...]
+    blockerCategoryCounts: dict[str, int]
+    blockerSummaries: tuple[dict[str, object], ...]
+    useCaseAxes: tuple[dict[str, str], ...]
 
 
 P0_GATES: tuple[P0GateDefinition, ...] = (
@@ -208,6 +215,14 @@ P0_GATES: tuple[P0GateDefinition, ...] = (
         evaluator=GateEvaluator.RED_TEAM_EXECUTIONS,
         criterion="Every registered P0 red-team case has been executed and scored PASS with any required human evidence verified.",
         failureEffect="Release remains blocked; a definition without an executed result is not evidence of safety.",
+    ),
+    P0GateDefinition(
+        gateId="p0-structured-output-success",
+        title="Structured model-output success rate meets the release threshold",
+        owner="LLM & Evaluation Lead",
+        evaluator=GateEvaluator.STRUCTURED_SUCCESS,
+        criterion="Persisted site-wide model calls have a structured-output success rate of at least 95%.",
+        failureEffect="Release remains blocked until real calls are observed and the structured-output success rate meets the threshold.",
     ),
     P0GateDefinition(
         gateId="p0-automated-tests",
@@ -369,6 +384,35 @@ def _redTeamExecutionGate(gate: P0GateDefinition, context: ReleaseContext) -> P0
     )
 
 
+def _structuredSuccessGate(
+    gate: P0GateDefinition,
+    context: ReleaseContext,
+) -> P0GateResult:
+    if context.structuredSuccessCalls == 0:
+        return P0GateResult(
+            gateId=gate.gateId,
+            status=GateStatus.NOT_EVALUATED,
+            detail=(
+                "No persisted model-call observations are available; the structured-output "
+                f"success threshold is {context.structuredSuccessThreshold:.1%}."
+            ),
+        )
+    status = (
+        GateStatus.PASS
+        if context.structuredSuccessRate >= context.structuredSuccessThreshold
+        else GateStatus.FAIL
+    )
+    return P0GateResult(
+        gateId=gate.gateId,
+        status=status,
+        detail=(
+            f"Structured-output success: {context.structuredSuccessRate:.1%} across "
+            f"{context.structuredSuccessCalls} persisted calls; required "
+            f"{context.structuredSuccessThreshold:.1%}."
+        ),
+    )
+
+
 def _externalEvidenceGate(gate: P0GateDefinition, context: ReleaseContext) -> P0GateResult:
     requiredType = gate.requiredEvidenceType
     if requiredType is None:
@@ -414,6 +458,8 @@ def evaluateP0Release(context: ReleaseContext) -> ReleaseGateReport:
             result = _redTeamDefinitionGate(gate)
         elif gate.evaluator is GateEvaluator.RED_TEAM_EXECUTIONS:
             result = _redTeamExecutionGate(gate, context)
+        elif gate.evaluator is GateEvaluator.STRUCTURED_SUCCESS:
+            result = _structuredSuccessGate(gate, context)
         else:
             result = _externalEvidenceGate(gate, context)
         gateResults.append(result)
@@ -428,6 +474,34 @@ def evaluateP0Release(context: ReleaseContext) -> ReleaseGateReport:
     humanEvidenceComplete = all(
         result.status is GateStatus.PASS for result in gateResults if result.gateId in humanGateIds
     )
+    gateDefinitions = {gate.gateId: gate for gate in P0_GATES}
+    gateResultsById = {result.gateId: result for result in gateResults}
+    blockerSummaries: list[dict[str, object]] = []
+    blockerCategoryCounts: dict[str, int] = {}
+    for gateId in blockerGateIds:
+        definition = gateDefinitions[gateId]
+        result = gateResultsById[gateId]
+        category = (
+            definition.requiredEvidenceType.value
+            if definition.requiredEvidenceType is not None
+            else definition.evaluator.value
+        )
+        blockerCategoryCounts[category] = blockerCategoryCounts.get(category, 0) + 1
+        blockerSummaries.append(
+            {
+                "gateId": gateId,
+                "category": category,
+                "status": result.status.value,
+                "owner": definition.owner,
+                "requiredEvidence": (
+                    definition.requiredEvidenceType.value
+                    if definition.requiredEvidenceType is not None
+                    else definition.criterion
+                ),
+                "evidenceIds": list(result.evidenceIds),
+                "actionTarget": f"#gate-{gateId}",
+            }
+        )
     return ReleaseGateReport(
         releaseId=context.releaseId,
         evaluatedAt=context.evaluatedAt,
@@ -439,6 +513,40 @@ def evaluateP0Release(context: ReleaseContext) -> ReleaseGateReport:
         humanEvidenceComplete=humanEvidenceComplete,
         gateResults=tuple(gateResults),
         blockerGateIds=blockerGateIds,
+        blockerCategoryCounts=dict(sorted(blockerCategoryCounts.items())),
+        blockerSummaries=tuple(blockerSummaries),
+        useCaseAxes=(
+            {
+                "axisId": "CONTROLLED_DEMO",
+                "label": "Controlled educational demo",
+                "status": "ALLOWED_WITH_BOUNDARIES",
+                "boundary": "Synthetic mechanism demonstration only.",
+            },
+            {
+                "axisId": "INTERNAL_RESEARCH_PROTOTYPE",
+                "label": "Internal research prototype",
+                "status": "ALLOWED_WITH_BOUNDARIES",
+                "boundary": "Exploratory internal use with explicit limitations and audit evidence.",
+            },
+            {
+                "axisId": "REAL_WORLD_PREDICTIVE_CLAIM",
+                "label": "Real-world predictive claim",
+                "status": "BLOCKED",
+                "boundary": "No external predictive validation has been completed.",
+            },
+            {
+                "axisId": "INVESTMENT_DECISION",
+                "label": "Investment decision support",
+                "status": "PROHIBITED",
+                "boundary": "The system is not investment advice or a trading signal.",
+            },
+            {
+                "axisId": "PRODUCTION_EXTERNAL_VALIDATION",
+                "label": "Production / external validation",
+                "status": "BLOCKED" if not canRelease else "READY_FOR_CONTROLLED_REVIEW",
+                "boundary": "Requires every release gate and independent human evidence.",
+            },
+        ),
     )
 
 

@@ -2,6 +2,7 @@ import { Button } from '@carbon/react';
 import {
   ArrowRight,
   BookOpenText,
+  DownloadSimple,
   WarningCircle,
 } from '@phosphor-icons/react';
 import {
@@ -16,6 +17,7 @@ import {
   auditResultEvidence,
   getLocalizedResultEvidence,
   type ResultEvidenceCitationAudit,
+  type ResultEvidenceAudit,
 } from './result-evidence';
 import { SafeMarkdown } from './safe-markdown';
 
@@ -23,6 +25,46 @@ interface ResultInterpretationContentProps {
   experimentId: string;
   message: ResultInterpretationAssistantMessage;
   navigate: Navigate;
+}
+
+function auditJson(
+  message: ResultInterpretationAssistantMessage,
+  audit: ResultEvidenceAudit,
+): string {
+  return JSON.stringify({
+    schemaVersion: 'result_evidence_audit_v1.0.0',
+    message: {
+      id: message.id,
+      createdAt: message.createdAt,
+      provider: message.provider,
+      model: message.model,
+      promptVersion: message.promptVersion,
+    },
+    integrity: {
+      issues: audit.issues,
+      missingFromGrounding: audit.missingFromGrounding,
+      missingFromText: audit.missingFromText,
+      missingToolActivity: audit.missingToolActivity,
+      unreferencedToolActivity: audit.unreferencedToolActivity,
+      unknownEvidenceIds: audit.unknownEvidenceIds,
+      mismatchedToolEvidenceIds: audit.mismatchedToolEvidenceIds,
+      citations: audit.citations,
+    },
+    groundingReferences: message.groundingReferences,
+    toolActivity: message.toolActivity,
+  }, null, 2);
+}
+
+function integrityIssueLabel(issue: string, isZh: boolean): string {
+  const labels: Record<string, { en: string; zh: string }> = {
+    missing: { en: 'Missing citation or read record', zh: '引用或读取记录缺失' },
+    unknown: { en: 'Legacy or unknown evidence reference', zh: '旧版或未知证据引用' },
+    mismatch: { en: 'Evidence tool and reference do not match', zh: '证据工具与引用不匹配' },
+  };
+  const label = labels[issue];
+  return label
+    ? isZh ? label.zh : label.en
+    : isZh ? '其他完整性异常' : 'Other integrity issue';
 }
 
 function evidenceStatusText(
@@ -98,6 +140,18 @@ export function ResultInterpretationContent({
       experimentId,
       target: evidence.target,
     });
+  };
+
+  const downloadAudit = () => {
+    const blob = new Blob([auditJson(message, audit)], { type: 'application/json' });
+    const objectUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = objectUrl;
+    anchor.download = `eventshock-result-audit-${message.id.replaceAll(/[^A-Za-z0-9_-]/g, '-')}.json`;
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(objectUrl);
   };
 
   const renderCitation = ({ evidenceId }: { evidenceId: string }) => {
@@ -234,6 +288,28 @@ export function ResultInterpretationContent({
 
           <details className="result-assistant__technical-evidence">
             <summary>{isZh ? '技术详情' : 'Technical details'}</summary>
+            {audit.issues.length > 0 ? (
+              <div className="result-assistant__technical-alerts">
+                <strong>{isZh ? '优先核对的异常' : 'Issues to review first'}</strong>
+                <ul>
+                  {[...new Set(audit.issues)].map((issue) => (
+                    <li key={issue}>{integrityIssueLabel(issue, isZh)}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : (
+              <p className="result-assistant__technical-ok">
+                {isZh ? '未发现证据引用完整性异常。' : 'No evidence-reference integrity issue was found.'}
+              </p>
+            )}
+            {audit.unreferencedToolActivity.length > 0 ? (
+              <p className="result-assistant__unreferenced-summary">
+                <strong>{isZh ? '已读取但未引用：' : 'Inspected but not cited:'}</strong>{' '}
+                {isZh
+                  ? `${audit.unreferencedToolActivity.length} 个结果区段`
+                  : `${audit.unreferencedToolActivity.length} result section(s)`}
+              </p>
+            ) : null}
             <ul>
               {audit.citations
                 .filter((citation) => citation.inline || citation.groundingListed)
@@ -267,17 +343,15 @@ export function ResultInterpretationContent({
                     </li>
                   );
                 })}
-              {audit.unreferencedToolActivity.map((evidenceId) => {
-                const activity = message.toolActivity.filter((item) => item.evidenceId === evidenceId);
-                return (
-                  <li key={`uncited-${evidenceId}`}>
-                    <code>{evidenceId}</code>
-                    <span>{isZh ? '已读取但未在回答中引用' : 'Inspected but not cited'}: {' '}
-                      {activity.map((item) => item.tool).join(', ')}</span>
-                  </li>
-                );
-              })}
             </ul>
+            <Button
+              kind="tertiary"
+              size="sm"
+              renderIcon={DownloadSimple}
+              onClick={downloadAudit}
+            >
+              {isZh ? '下载审计 JSON' : 'Download audit JSON'}
+            </Button>
           </details>
         </details>
       ) : null}

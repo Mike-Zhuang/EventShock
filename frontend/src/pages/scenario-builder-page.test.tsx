@@ -2,11 +2,21 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { api } from '../api/client';
-import type { GuidedWorkflow, LlmModelDescriptor, SavedScenario } from '../api/types';
+import type {
+  GuidedWorkflow,
+  LlmModelDescriptor,
+  SavedScenario,
+  ScenarioDraft,
+  ScenarioValidation,
+} from '../api/types';
+import { I18nProvider } from '../i18n';
 import {
+  findMechanismDisabledCheck,
   getLlmModelAvailability,
   GuidedScenarioReplacementError,
   linkSavedScenarioToGuidedWorkflow,
+  MechanismDisabledRecovery,
+  scenariosHaveSameContent,
   SecondaryOutcomeOption,
 } from './scenario-builder-page';
 
@@ -47,6 +57,87 @@ describe('次要结果指标布局', () => {
     expect(getLlmModelAvailability(missingOutputLimit)).toBe('OUTPUT_LIMIT_UNVERIFIED');
     expect(getLlmModelAvailability(missingPrice)).toBe('PRICE_UNVERIFIED');
     expect(getLlmModelAvailability(undefined)).toBe('MISSING');
+  });
+});
+
+describe('情景验证修复与草稿版本语义', () => {
+  it('为机制禁用错误提供可直接执行的两个修复动作和折叠技术详情', async () => {
+    const user = userEvent.setup();
+    const onUseMarketMaker = vi.fn();
+    const onReviewEvidence = vi.fn();
+    render(
+      <I18nProvider>
+        <MechanismDisabledRecovery
+          claimId="claim-clarification-review"
+          onUseMarketMaker={onUseMarketMaker}
+          onReviewEvidence={onReviewEvidence}
+        />
+      </I18nProvider>,
+    );
+
+    expect(screen.getByRole('heading', {
+      name: 'Clarification delay is unavailable for this Event Pack',
+    })).toBeInTheDocument();
+    expect(screen.getByText(/no approved clarification claim/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Use market-making capacity' }));
+    await user.click(screen.getByRole('button', {
+      name: 'Review evidence and add clarification claim',
+    }));
+    expect(onUseMarketMaker).toHaveBeenCalledOnce();
+    expect(onReviewEvidence).toHaveBeenCalledOnce();
+
+    const details = screen.getByText('Technical details').closest('details');
+    expect(details).not.toHaveAttribute('open');
+    await user.click(screen.getByText('Technical details'));
+    expect(details).toHaveAttribute('open');
+    expect(screen.getByText('claim-clarification-review')).toBeVisible();
+    expect(screen.getByText('INTERVENTION_MECHANISM_DISABLED')).toBeVisible();
+  });
+
+  it('识别机制错误，并用完整规范化内容而非对象引用判断 dirty 状态', () => {
+    const validation: ScenarioValidation = {
+      valid: false,
+      simulationRunnable: false,
+      requestedCognitionRunnable: false,
+      degradationReasons: [],
+      requiresExplicitRuleFallbackConfirmation: false,
+      checks: [{
+        id: 'INTERVENTION_MECHANISM_DISABLED',
+        label: 'INTERVENTION_MECHANISM_DISABLED',
+        passed: false,
+        severity: 'error',
+      }],
+    };
+    expect(findMechanismDisabledCheck(validation)?.id)
+      .toBe('INTERVENTION_MECHANISM_DISABLED');
+
+    const saved: ScenarioDraft = {
+      eventPackId: 'pack-one',
+      intervention: {
+        parameter: 'marketMakerCapacity',
+        baselineValue: 1,
+        interventionValue: 0.45,
+      },
+      seedCount: 10,
+      populationSize: 56,
+      steps: 120,
+      secondaryOutcomes: ['maxDrawdownPct', 'recoverySteps'],
+    };
+    const reordered = {
+      steps: 120,
+      populationSize: 56,
+      seedCount: 10 as const,
+      secondaryOutcomes: ['maxDrawdownPct', 'recoverySteps'],
+      intervention: {
+        interventionValue: 0.45,
+        baselineValue: 1,
+        parameter: 'marketMakerCapacity' as const,
+      },
+      eventPackId: 'pack-one',
+    };
+
+    expect(scenariosHaveSameContent(saved, reordered)).toBe(true);
+    expect(scenariosHaveSameContent(saved, { ...saved, steps: 121 })).toBe(false);
   });
 });
 

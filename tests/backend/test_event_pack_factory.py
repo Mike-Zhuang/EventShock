@@ -723,7 +723,8 @@ def test_unsafe_search_results_and_queries_are_dropped_before_storage(tmp_path: 
 def test_public_https_url_validator_blocks_ssrf_targets(url: str) -> None:
     with pytest.raises(FactoryValidationError) as error:
         normalizePublicHttpsUrl(url)
-    assert error.value.code is FactoryErrorCode.READER_SOURCE_NOT_ALLOWED
+    assert error.value.code is FactoryErrorCode.UNSAFE_SOURCE_URL
+    assert error.value.details == {"securityBoundary": "PUBLIC_HTTPS_PORT_443_ONLY"}
 
 
 def test_public_https_url_and_domain_normalization() -> None:
@@ -959,10 +960,23 @@ def test_reader_transport_error_does_not_retain_api_key_in_exception_chain() -> 
     asyncio.run(client.aclose())
 
 
+def test_reader_rejects_missing_temporary_key_with_authentication_error() -> None:
+    client = ZhipuReaderClient(transport=httpx.MockTransport(lambda request: httpx.Response(200)))
+    with pytest.raises(FactoryValidationError) as error:
+        asyncio.run(client.read("https://www.example.com/article", apiKey=""))
+    assert error.value.code is FactoryErrorCode.READER_AUTHENTICATION_FAILED
+    asyncio.run(client.aclose())
+
+
 def test_reader_pricing_is_explicitly_unknown() -> None:
     assert READER_CAPABILITY.endpoint == ZHIPU_READER_URL
     assert READER_CAPABILITY.billingStatus.value == "UNKNOWN"
     assert "Confirm current billing" in READER_CAPABILITY.pricingNote
+    assert READER_CAPABILITY.targetFetchAuthority == "PROVIDER_DELEGATED"
+    assert READER_CAPABILITY.applicationDnsValidation == "NOT_PERFORMED"
+    assert READER_CAPABILITY.redirectValidation == "PROVIDER_RESPONSIBILITY_NOT_VERIFIED"
+    assert READER_CAPABILITY.publicUrlStaticValidation == "PUBLIC_HTTPS_PORT_443_ONLY"
+    assert "Review the returned source identity" in READER_CAPABILITY.securityNote
 
 
 def test_owner_can_view_and_revise_raw_text_only_with_new_pending_revision(

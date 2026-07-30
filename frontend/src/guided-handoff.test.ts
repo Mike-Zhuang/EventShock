@@ -2,14 +2,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GuidedWorkflow } from './api/types';
 import {
   FACTORY_GUIDED_HANDOFF_KEY,
+  GUIDED_RETURN_CONTEXT_KEY,
   SCENARIO_GUIDED_HANDOFF_KEY,
   clearFactoryGuidedHandoff,
   clearScenarioGuidedHandoff,
   guidedHandoffStorageKey,
   readFactoryGuidedHandoff,
+  readGuidedReturnContext,
   readScenarioGuidedHandoff,
   synchronizeGuidedHandoffOwner,
   writeFactoryGuidedHandoff,
+  writeGuidedReturnContext,
   writeScenarioGuidedHandoff,
 } from './guided-handoff';
 
@@ -82,6 +85,20 @@ describe('guided handoff storage', () => {
     });
   });
 
+  it('stores a bounded return route to the same guided workflow', () => {
+    writeGuidedReturnContext(workflow);
+
+    expect(readGuidedReturnContext()).toMatchObject({
+      ownerUserId: OWNER_USER_ID,
+      workflowId: workflow.id,
+      stage: 'SCENARIO_INTERVENTION',
+    });
+    expect(window.sessionStorage.getItem(guidedHandoffStorageKey(
+      GUIDED_RETURN_CONTEXT_KEY,
+      OWNER_USER_ID,
+    ))).not.toBeNull();
+  });
+
   it('discards malformed and expired values instead of trusting storage', () => {
     const factoryKey = guidedHandoffStorageKey(FACTORY_GUIDED_HANDOFF_KEY, OWNER_USER_ID);
     window.sessionStorage.setItem(
@@ -145,12 +162,15 @@ describe('guided handoff storage', () => {
   it('isolates handoffs per account so a second user in the same tab cannot read them', () => {
     writeFactoryGuidedHandoff(workflow);
     writeScenarioGuidedHandoff(workflow);
+    writeGuidedReturnContext(workflow);
     expect(readFactoryGuidedHandoff()).toBeDefined();
+    expect(readGuidedReturnContext()).toBeDefined();
 
     // 同一浏览器标签页切换到另一个账号后，前一账号的交接数据必须不可见且被销毁。
     synchronizeGuidedHandoffOwner('guided-owner-0002');
     expect(readFactoryGuidedHandoff()).toBeUndefined();
     expect(readScenarioGuidedHandoff()).toBeUndefined();
+    expect(readGuidedReturnContext()).toBeUndefined();
 
     // 切回原账号也不能再读到已被销毁的旧数据，避免串号泄漏研究元数据。
     synchronizeGuidedHandoffOwner(OWNER_USER_ID);
@@ -161,11 +181,13 @@ describe('guided handoff storage', () => {
   it('clears handoffs when the session ends so a later login cannot reapply them', () => {
     writeFactoryGuidedHandoff(workflow);
     writeScenarioGuidedHandoff(workflow);
+    writeGuidedReturnContext(workflow);
 
     // 退出登录（无 owner）应清理当前账号的全部交接数据。
     synchronizeGuidedHandoffOwner();
     synchronizeGuidedHandoffOwner(OWNER_USER_ID);
     expect(readFactoryGuidedHandoff()).toBeUndefined();
     expect(readScenarioGuidedHandoff()).toBeUndefined();
+    expect(readGuidedReturnContext()).toBeUndefined();
   });
 });

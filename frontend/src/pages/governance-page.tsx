@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type {
   CognitionEvalSummary,
+  DeploymentStatus,
   GovernanceInventory,
   RedTeamRegistry,
   ReleaseGateView,
@@ -20,6 +21,7 @@ import type {
   ValidationLadderView,
 } from '../api/types';
 import { EmptyState, LoadingPanel, Notice, PageHeader, StatusBadge } from '../components/common';
+import { GITHUB_REPOSITORY_URL } from '../external-links';
 import { useI18n } from '../i18n';
 import { getPageGuide } from '../page-guidance';
 import { useWorkflow } from '../state/workflow-context';
@@ -32,6 +34,7 @@ interface GovernanceData {
   ladder: ValidationLadderView;
   evalSummary: CognitionEvalSummary;
   systemMetrics: SystemMetrics;
+  deploymentStatus: DeploymentStatus;
 }
 
 const LADDER_TITLES_ZH: Record<string, string> = {
@@ -49,6 +52,11 @@ const LADDER_TITLES_ZH: Record<string, string> = {
 const STATUS_ZH: Record<string, string> = {
   PASS: '通过',
   FAIL: '失败',
+  PENDING: '等待中',
+  UNKNOWN: '未知',
+  INCOMPLETE: '证据不完整',
+  SUCCEEDED: '成功',
+  FAILED: '失败',
   BLOCKED: '阻止发布',
   NOT_RUN: '尚未执行',
   NOT_EVALUATED: '尚未评估',
@@ -66,6 +74,9 @@ const STATUS_ZH: Record<string, string> = {
   TEST_VERIFIED: '测试验证',
   DOCUMENTED_ONLY: '仅有文档',
   READY_FOR_CONTROLLED_DEMO: '可用于受控演示',
+  ALLOWED_WITH_BOUNDARIES: '附边界允许',
+  PROHIBITED: '禁止',
+  READY_FOR_CONTROLLED_REVIEW: '可进入受控审核',
 };
 
 function statusLabel(status: string, isZh: boolean): string {
@@ -73,9 +84,9 @@ function statusLabel(status: string, isZh: boolean): string {
 }
 
 function statusTagType(status: string): 'green' | 'red' | 'blue' | 'warm-gray' | 'purple' {
-  if (['PASS', 'APPROVED_FOR_DEMO', 'AUTOMATED_EVIDENCE_AVAILABLE'].includes(status)) return 'green';
-  if (['FAIL', 'BLOCKED', 'NOT_APPROVED'].includes(status)) return 'red';
-  if (status.includes('PENDING') || status.includes('AWAITING') || status === 'NOT_RUN') return 'warm-gray';
+  if (['PASS', 'SUCCEEDED', 'MATCH', 'APPROVED_FOR_DEMO', 'AUTOMATED_EVIDENCE_AVAILABLE'].includes(status)) return 'green';
+  if (['FAIL', 'FAILED', 'BLOCKED', 'PROHIBITED', 'NOT_APPROVED', 'STATUS_FILE_MISMATCH', 'MAIN_MISMATCH'].includes(status)) return 'red';
+  if (status.includes('PENDING') || status.includes('AWAITING') || ['NOT_RUN', 'UNKNOWN', 'INCOMPLETE'].includes(status)) return 'warm-gray';
   if (status.includes('VERIFIED')) return 'blue';
   return 'purple';
 }
@@ -97,15 +108,32 @@ export function GovernancePage() {
     setLoading(true);
     setError(undefined);
     try {
-      const [inventory, redTeam, releaseGate, ladder, evalSummary, systemMetrics] = await Promise.all([
+      const [
+        inventory,
+        redTeam,
+        releaseGate,
+        ladder,
+        evalSummary,
+        systemMetrics,
+        deploymentStatus,
+      ] = await Promise.all([
         api.getGovernanceInventory(),
         api.getRedTeamRegistry(),
         api.getReleaseGate(),
         api.getValidationLadder(),
         api.getEvalSummary(),
         api.getSystemMetrics(),
+        api.getDeploymentStatus(),
       ]);
-      setData({ inventory, redTeam, releaseGate, ladder, evalSummary, systemMetrics });
+      setData({
+        inventory,
+        redTeam,
+        releaseGate,
+        ladder,
+        evalSummary,
+        systemMetrics,
+        deploymentStatus,
+      });
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : String(loadError));
     } finally {
@@ -178,11 +206,186 @@ export function GovernancePage() {
             </dl>
           </section>
 
+          <section className="governance-panel" aria-labelledby="use-case-axes-heading">
+            <div className="section-heading">
+              <h2 id="use-case-axes-heading">{isZh ? '五轴使用边界状态' : 'Five-axis use boundary status'}</h2>
+              <p>{isZh
+                ? '同一套证据对教学演示、内部研究、现实预测、投资决策和生产外部验证具有不同结论。'
+                : 'The same evidence yields different conclusions for demos, internal research, prediction, investment decisions, and externally validated production use.'}</p>
+            </div>
+            <div className="component-inventory-grid">
+              {data.releaseGate.useCaseAxes.map((axis) => (
+                <article key={axis.axisId}>
+                  <Tag type={statusTagType(axis.status)} size="sm">
+                    {statusLabel(axis.status, isZh)}
+                  </Tag>
+                  <h3>{isZh ? ({
+                    CONTROLLED_DEMO: '受控教学演示',
+                    INTERNAL_RESEARCH_PROTOTYPE: '内部研究原型',
+                    REAL_WORLD_PREDICTIVE_CLAIM: '现实世界预测主张',
+                    INVESTMENT_DECISION: '投资决策支持',
+                    PRODUCTION_EXTERNAL_VALIDATION: '生产与外部验证',
+                  }[axis.axisId] ?? axis.label) : axis.label}</h3>
+                  <p>{axis.boundary}</p>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <section
+            className="governance-panel governance-panel--deployment"
+            aria-labelledby="deployment-evidence-heading"
+          >
+            <div className="section-heading section-heading--with-control">
+              <div>
+                <h2 id="deployment-evidence-heading">
+                  {isZh ? '生产部署直接证据' : 'Direct production deployment evidence'}
+                </h2>
+                <p>
+                  {isZh
+                    ? '运行中进程的健康 SHA 是当前部署版本的权威来源；受限状态文件只补充 GitHub main、CI 和同步时间。'
+                    : 'The running process health SHA is authoritative for the deployed version. The restricted status file only supplements GitHub main, CI, and synchronization timing.'}
+                </p>
+              </div>
+              <Tag type={statusTagType(data.deploymentStatus.requiredChecksStatus)}>
+                {isZh ? '三项必需检查' : 'Required checks'}:{' '}
+                {statusLabel(data.deploymentStatus.requiredChecksStatus, isZh)}
+              </Tag>
+            </div>
+
+            <div className="governance-stat-grid">
+              <div>
+                <span>{isZh ? '已部署 SHA' : 'Deployed SHA'}</span>
+                <strong>
+                  <a
+                    href={`${GITHUB_REPOSITORY_URL}/commit/${encodeURIComponent(data.deploymentStatus.deployedCommit)}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    <code>{data.deploymentStatus.deployedCommit}</code>
+                  </a>
+                </strong>
+              </div>
+              <div>
+                <span>{isZh ? 'GitHub main SHA' : 'GitHub main SHA'}</span>
+                <strong>
+                  {data.deploymentStatus.githubMainCommit ? (
+                    <a
+                      href={`${GITHUB_REPOSITORY_URL}/commit/${encodeURIComponent(data.deploymentStatus.githubMainCommit)}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      <code>{data.deploymentStatus.githubMainCommit}</code>
+                    </a>
+                  ) : <code>{t('common.unavailable')}</code>}
+                </strong>
+              </div>
+              <div>
+                <span>{isZh ? '分支' : 'Branch'}</span>
+                <strong>{data.deploymentStatus.branch ?? t('common.unavailable')}</strong>
+              </div>
+              <div>
+                <span>{isZh ? '提交对齐' : 'Commit alignment'}</span>
+                <strong>
+                  <Tag type={statusTagType(data.deploymentStatus.commitAlignment)} size="sm">
+                    {statusLabel(data.deploymentStatus.commitAlignment, isZh)}
+                  </Tag>
+                </strong>
+              </div>
+              <div>
+                <span>{isZh ? '最近同步' : 'Last sync'}</span>
+                <strong>{safeDate(data.deploymentStatus.lastSyncAt, language)}</strong>
+                <small>{statusLabel(data.deploymentStatus.lastSyncResult, isZh)}</small>
+              </div>
+              <div>
+                <span>{isZh ? '最近部署' : 'Last deploy'}</span>
+                <strong>{safeDate(data.deploymentStatus.lastDeployAt, language)}</strong>
+              </div>
+              <div>
+                <span>{isZh ? '最近失败' : 'Last failure'}</span>
+                <strong>
+                  {data.deploymentStatus.lastFailureCode
+                    ?? (isZh ? '无已记录失败' : 'No recorded failure')}
+                </strong>
+                <small>{safeDate(data.deploymentStatus.lastFailureAt, language)}</small>
+              </div>
+              <div>
+                <span>{isZh ? '证据来源' : 'Evidence source'}</span>
+                <strong>{statusLabel(data.deploymentStatus.statusSource, isZh)}</strong>
+                <small>
+                  {statusLabel(data.deploymentStatus.statusFileState, isZh)}
+                  {data.deploymentStatus.statusErrorCode
+                    ? ` · ${data.deploymentStatus.statusErrorCode}`
+                    : ''}
+                </small>
+              </div>
+            </div>
+
+            <div className="governance-table-wrap">
+              <table className="governance-table">
+                <thead>
+                  <tr>
+                    <th>{isZh ? '必需检查' : 'Required check'}</th>
+                    <th>{isZh ? '状态' : 'Status'}</th>
+                    <th>{isZh ? '完成时间' : 'Completed'}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.deploymentStatus.requiredChecks.length > 0
+                    ? data.deploymentStatus.requiredChecks.map((check) => (
+                      <tr key={check.name}>
+                        <td>
+                          <strong>
+                            <a
+                              href={`${GITHUB_REPOSITORY_URL}/actions?query=${encodeURIComponent(check.name)}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              {check.name}
+                            </a>
+                          </strong>
+                        </td>
+                        <td>
+                          <Tag type={statusTagType(check.status)} size="sm">
+                            {statusLabel(check.status, isZh)}
+                          </Tag>
+                        </td>
+                        <td>{safeDate(check.completedAt, language)}</td>
+                      </tr>
+                    ))
+                    : (
+                      <tr>
+                        <td colSpan={3}>
+                          {isZh
+                            ? '三项检查尚无可验证证据，状态保持 UNKNOWN。'
+                            : 'No verifiable evidence is available for the three checks; status remains UNKNOWN.'}
+                        </td>
+                      </tr>
+                    )}
+                </tbody>
+              </table>
+            </div>
+
+            <InlineNotification
+              kind={data.deploymentStatus.requiredChecksStatus === 'FAIL' ? 'error' : 'warning'}
+              lowContrast
+              hideCloseButton
+              title={isZh
+                ? '同步日志不能替代公网直接证据'
+                : 'Synchronization logs do not replace direct public evidence'}
+              subtitle={isZh
+                ? `请直接核对本治理接口和 /api/health；日志只用于运维排查。证据观测时间：${safeDate(data.deploymentStatus.observedAt, language)}。`
+                : `Verify this governance endpoint and /api/health directly; logs are operational troubleshooting context only. Evidence observed: ${safeDate(data.deploymentStatus.observedAt, language)}.`}
+            />
+          </section>
+
           <section className="governance-panel governance-panel--operations" aria-labelledby="operations-heading">
             <div className="section-heading section-heading--with-control">
               <div>
                 <h2 id="operations-heading">{isZh ? '有界运行指标' : 'Bounded runtime metrics'}</h2>
-                <p>{isZh ? '只显示当前单进程实例的聚合观测；不记录路径、正文、会话标识或凭据。' : 'Aggregates cover only this single-process instance. Paths, bodies, session identifiers, and credentials are not recorded.'}</p>
+                <p>{isZh
+                  ? '请求延迟属于当前实例；认知安全指标持久化为站点级聚合，且不记录路径、正文、会话标识或凭据。'
+                  : 'Request latency is instance-local; cognition safety metrics are persisted site-wide aggregates without paths, bodies, session identifiers, or credentials.'}</p>
               </div>
               <Tag type={data.systemMetrics.storage.database === 'ok' ? 'green' : 'red'}>{isZh ? '数据库' : 'Database'}: {data.systemMetrics.storage.database}</Tag>
             </div>
@@ -195,6 +398,7 @@ export function GovernancePage() {
               <div><span>{isZh ? '运行中或排队' : 'Active or queued'}</span><strong>{data.systemMetrics.experiments.activeOrQueued} / {data.systemMetrics.experiments.maximumActiveOrQueued}</strong></div>
               <div><span>{isZh ? '保留实验数' : 'Retained experiments'}</span><strong>{data.systemMetrics.storage.retainedExperiments} / {data.systemMetrics.storage.maximumRetainedExperiments}</strong></div>
               <div><span>{isZh ? 'LLM 调用' : 'LLM calls'}</span><strong>{data.systemMetrics.cognition.calls.toLocaleString(language)}</strong></div>
+              <div><span>{isZh ? '认知观测范围' : 'Cognition observation scope'}</span><strong>{statusLabel(data.systemMetrics.cognition.observationScope, isZh)}</strong></div>
             </div>
             <InlineNotification
               kind="info"
@@ -246,7 +450,25 @@ export function GovernancePage() {
                 <div><span>{isZh ? '回退率' : 'Fallback rate'}</span><strong>{rate(data.evalSummary.telemetry.fallbackRate, language)}</strong></div>
                 <div><span>{isZh ? '无效输出率' : 'Invalid output rate'}</span><strong>{rate(data.evalSummary.telemetry.invalidOutputRate, language)}</strong></div>
                 <div><span>{isZh ? '缓存命中率' : 'Cache hit rate'}</span><strong>{rate(data.evalSummary.telemetry.cacheHitRate, language)}</strong></div>
+                <div><span>{isZh ? '结构化成功率' : 'Structured success rate'}</span><strong>{rate(data.evalSummary.telemetry.structuredSuccessRate, language)}</strong></div>
+                <div><span>{isZh ? '发布门槛' : 'Release threshold'}</span><strong>{rate(data.evalSummary.telemetry.structuredSuccessThreshold, language)}</strong></div>
+                <div><span>{isZh ? '成功率门禁' : 'Success-rate gate'}</span><strong>{statusLabel(data.evalSummary.telemetry.structuredSuccessGateStatus, isZh)}</strong></div>
+                <div><span>{isZh ? '观测起点' : 'Observed since'}</span><strong>{safeDate(data.evalSummary.telemetry.observedSince, language)}</strong></div>
               </div>
+              {Object.keys(data.evalSummary.telemetry.failureCategoryCounts).length > 0 ? (
+                <div className="governance-table-wrap">
+                  <table className="governance-table">
+                    <thead><tr><th>{isZh ? '失败类别' : 'Failure category'}</th><th>{isZh ? '次数' : 'Count'}</th></tr></thead>
+                    <tbody>
+                      {Object.entries(data.evalSummary.telemetry.failureCategoryCounts).map(
+                        ([category, count]) => (
+                          <tr key={category}><td><code>{category}</code></td><td>{count}</td></tr>
+                        ),
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
               {data.evalSummary.evaluatedCases === 0 ? (
                 <InlineNotification
                   kind="warning"
@@ -327,13 +549,56 @@ export function GovernancePage() {
             </div>
           </section>
 
+          <section className="governance-panel" aria-labelledby="release-blocker-summary-heading">
+            <div className="section-heading">
+              <h2 id="release-blocker-summary-heading">{isZh ? '阻断项分类与处置' : 'Blocker categories and actions'}</h2>
+              <p>{isZh
+                ? '每个阻断项都绑定负责人、所需证据和可跳转的门禁详情。'
+                : 'Every blocker is bound to an owner, required evidence, and a direct action target.'}</p>
+            </div>
+            <div className="governance-stat-grid governance-stat-grid--compact">
+              {Object.entries(data.releaseGate.blockerCategoryCounts).map(
+                ([category, count]) => (
+                  <div key={category}><span>{category.replaceAll('_', ' ')}</span><strong>{count}</strong></div>
+                ),
+              )}
+            </div>
+            <div className="governance-table-wrap">
+              <table className="governance-table">
+                <thead>
+                  <tr>
+                    <th>{isZh ? '类别 / 门禁' : 'Category / gate'}</th>
+                    <th>{isZh ? '负责人' : 'Owner'}</th>
+                    <th>{isZh ? '所需证据' : 'Required evidence'}</th>
+                    <th>{isZh ? '动作' : 'Action'}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.releaseGate.blockerSummaries.map((blocker) => (
+                    <tr key={blocker.gateId}>
+                      <td><strong>{blocker.category.replaceAll('_', ' ')}</strong><small>{blocker.gateId}</small></td>
+                      <td>{blocker.owner}</td>
+                      <td>
+                        {blocker.requiredEvidence}
+                        {blocker.evidenceIds.length > 0
+                          ? <small>{blocker.evidenceIds.join(', ')}</small>
+                          : <small>{isZh ? '尚无证据 ID' : 'No evidence ID attached'}</small>}
+                      </td>
+                      <td><a href={blocker.actionTarget}>{isZh ? '查看并处理' : 'Review action'}</a></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
           <section className="governance-panel governance-panel--release-details" aria-labelledby="release-blockers-heading">
             <div className="section-heading"><h2 id="release-blockers-heading">{isZh ? '发布证据门禁详情' : 'Release evidence gate details'}</h2></div>
             <div className="gate-result-list">
               {data.releaseGate.gateResults.map((gate) => {
                 const definition = data.releaseGate.definitions.find((item) => item.gateId === gate.gateId);
                 return (
-                  <article key={gate.gateId}>
+                  <article key={gate.gateId} id={`gate-${gate.gateId}`}>
                     <Tag type={statusTagType(gate.status)} size="sm">{statusLabel(gate.status, isZh)}</Tag>
                     <div><h3>{definition?.title ?? gate.gateId}</h3><p>{gate.detail}</p><small>{definition?.owner}</small></div>
                   </article>

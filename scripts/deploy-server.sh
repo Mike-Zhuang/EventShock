@@ -51,6 +51,7 @@ run_compose() {
     -u EVENTSHOCK_APP_IMAGE \
     -u EVENTSHOCK_AUTH_COOKIE_SECURE \
     -u EVENTSHOCK_AUTH_REQUIRED \
+    -u EVENTSHOCK_DEPLOYMENT_STATUS_FILE \
     -u EVENTSHOCK_RELEASE_COMMIT \
     -u EVENTSHOCK_SECRETS_DIR \
     -u EVENTSHOCK_SMTP_HOST \
@@ -175,6 +176,8 @@ check_source() {
     || fail "源码目录缺少可执行的 Nginx systemd 安装器。"
   [[ -x "${SOURCE_ROOT}/scripts/caddy-startup-gate.sh" ]] \
     || fail "源码目录缺少可执行的 Caddy 启动门控。"
+  [[ -x "${SOURCE_ROOT}/scripts/verify-restart-recovery.sh" ]] \
+    || fail "源码目录缺少可执行的受控重启恢复验证器。"
   compgen -G "${SOURCE_ROOT}/event-packs/*/manifest.json" >/dev/null \
     || fail "源码目录没有可部署的 event-packs/*/manifest.json。"
 }
@@ -326,6 +329,8 @@ validate_auth_configuration() {
     || fail "EVENTSHOCK_AUTH_REQUIRED 必须为 true。"
   [[ "$(shared_env_value EVENTSHOCK_AUTH_COOKIE_SECURE)" == "true" ]] \
     || fail "EVENTSHOCK_AUTH_COOKIE_SECURE 必须为 true。"
+  [[ "$(shared_env_value EVENTSHOCK_DEPLOYMENT_STATUS_FILE)" == "/data/deployment-status.json" ]] \
+    || fail "EVENTSHOCK_DEPLOYMENT_STATUS_FILE 必须精确为 /data/deployment-status.json。"
   [[ -n "$(shared_env_value EVENTSHOCK_ADMIN_EMAIL)" ]] \
     || fail "EVENTSHOCK_ADMIN_EMAIL 不能为空。"
   [[ -n "$(shared_env_value EVENTSHOCK_SMTP_HOST)" ]] \

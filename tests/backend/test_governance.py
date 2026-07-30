@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from backend.app.cognition.catalog import listModels
+from backend.app.cognition.catalog import listModels, modelValidationEvidence
 from backend.app.cognition.prompts import PROMPT_REGISTRY
 from backend.app.governance.redteam import (
     RED_TEAM_CASES,
@@ -85,6 +85,7 @@ def test_component_inventory_is_strict_complete_and_runtime_aligned() -> None:
         if record.promptDetails is not None
     }
     assert promptHashes == {prompt.promptHash for prompt in PROMPT_REGISTRY}
+
     assert len(inventoryHash()) == 64
     assert all(character in "0123456789abcdef" for character in inventoryHash())
 
@@ -107,6 +108,14 @@ def test_component_inventory_is_strict_complete_and_runtime_aligned() -> None:
             "approvalStatus",
         ):
             assert item[requiredField]
+
+
+def test_unknown_model_validation_is_explicitly_unverified() -> None:
+    evidence = modelValidationEvidence("openai", "unknown-future-model")
+    assert evidence["knownModel"] is False
+    assert evidence["officialDocumentationStatus"] == "UNVERIFIED"
+    assert evidence["liveKeyE2eStatus"] == "NOT_RUN"
+    assert evidence["verificationScope"] == "UNKNOWN_MODEL_UNVERIFIED"
 
 
 def test_red_team_registry_covers_every_required_attack_category() -> None:
@@ -246,6 +255,19 @@ def test_default_release_gate_is_blocked_and_preserves_pending_human_state() -> 
     assert byGateId["p0-component-inventory"].status is GateStatus.PASS
     assert byGateId["p0-red-team-definitions"].status is GateStatus.PASS
     assert byGateId["p0-red-team-execution"].status is GateStatus.NOT_EVALUATED
+    assert byGateId["p0-structured-output-success"].status is GateStatus.NOT_EVALUATED
+    assert {axis["axisId"]: axis["status"] for axis in report.useCaseAxes} == {
+        "CONTROLLED_DEMO": "ALLOWED_WITH_BOUNDARIES",
+        "INTERNAL_RESEARCH_PROTOTYPE": "ALLOWED_WITH_BOUNDARIES",
+        "REAL_WORLD_PREDICTIVE_CLAIM": "BLOCKED",
+        "INVESTMENT_DECISION": "PROHIBITED",
+        "PRODUCTION_EXTERNAL_VALIDATION": "BLOCKED",
+    }
+    assert report.blockerSummaries
+    assert all(summary["owner"] for summary in report.blockerSummaries)
+    assert all(
+        str(summary["actionTarget"]).startswith("#gate-") for summary in report.blockerSummaries
+    )
     for gate in P0_GATES:
         if gate.requiredEvidenceType in HUMAN_EVIDENCE_TYPES:
             assert byGateId[gate.gateId].status is GateStatus.PENDING_HUMAN_EVIDENCE
@@ -274,3 +296,26 @@ def test_automated_test_artifact_cannot_satisfy_human_release_gates() -> None:
     assert byGateId["p0-user-comprehension"].status is GateStatus.PENDING_HUMAN_EVIDENCE
     assert byGateId["p0-domain-expert-review"].status is GateStatus.PENDING_HUMAN_EVIDENCE
     assert report.canRelease is False
+
+
+def test_structured_success_rate_is_an_explicit_release_gate() -> None:
+    failed = evaluateP0Release(
+        ReleaseContext(
+            releaseId="structured-success-fail",
+            evaluatedAt=EXECUTED_AT,
+            structuredSuccessCalls=20,
+            structuredSuccessRate=0.9,
+        )
+    )
+    passed = evaluateP0Release(
+        ReleaseContext(
+            releaseId="structured-success-pass",
+            evaluatedAt=EXECUTED_AT,
+            structuredSuccessCalls=20,
+            structuredSuccessRate=0.95,
+        )
+    )
+    failedById = {result.gateId: result for result in failed.gateResults}
+    passedById = {result.gateId: result for result in passed.gateResults}
+    assert failedById["p0-structured-output-success"].status is GateStatus.FAIL
+    assert passedById["p0-structured-output-success"].status is GateStatus.PASS

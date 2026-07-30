@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -39,6 +40,22 @@ class SourceSecurityDecision(StrEnum):
     REVIEW = "REVIEW"
 
 
+class SourceSelectionStatus(StrEnum):
+    INCLUDED = "INCLUDED"
+    EXCLUDED = "EXCLUDED"
+
+
+class FactorySourceSecurityFinding(StrictFactoryModel):
+    """安全的扫描摘要；不允许包含命中原文或脱敏摘录。"""
+
+    code: str
+    severity: str
+    field: str
+    offset: int = Field(ge=0)
+    riskCategory: str
+    recommendedAction: str
+
+
 class EventPackFactoryBuild(StrictFactoryModel):
     id: str
     ownerUserId: str
@@ -57,6 +74,10 @@ class EventPackFactorySource(StrictFactoryModel):
     evidenceRole: EvidenceRole
     reviewStatus: SourceReviewStatus
     securityDecision: SourceSecurityDecision
+    selectionStatus: SourceSelectionStatus = SourceSelectionStatus.INCLUDED
+    sourceReviewLabel: str = "URL_MISSING"
+    officialHost: str | None = None
+    securityFindings: tuple[FactorySourceSecurityFinding, ...] = ()
     title: str
     publisher: str
     url: str | None = None
@@ -76,6 +97,7 @@ class EventPackFactorySource(StrictFactoryModel):
         return (
             self.evidenceRole is EvidenceRole.EVIDENCE
             and self.reviewStatus is SourceReviewStatus.APPROVED
+            and self.selectionStatus is SourceSelectionStatus.INCLUDED
         )
 
 
@@ -118,6 +140,11 @@ class ReaderCapabilityDescriptor(StrictFactoryModel):
     endpoint: str
     billingStatus: ReaderBillingStatus = ReaderBillingStatus.UNKNOWN
     pricingNote: str
+    targetFetchAuthority: Literal["PROVIDER_DELEGATED"]
+    applicationDnsValidation: Literal["NOT_PERFORMED"]
+    redirectValidation: Literal["PROVIDER_RESPONSIBILITY_NOT_VERIFIED"]
+    publicUrlStaticValidation: Literal["PUBLIC_HTTPS_PORT_443_ONLY"]
+    securityNote: str
 
 
 class WebSearchRequest(StrictFactoryModel):

@@ -38,6 +38,16 @@ READER_CAPABILITY = ReaderCapabilityDescriptor(
         "Reader pricing is not asserted by EventShock Lab. "
         "Confirm current billing in the Zhipu console before use."
     ),
+    targetFetchAuthority="PROVIDER_DELEGATED",
+    applicationDnsValidation="NOT_PERFORMED",
+    redirectValidation="PROVIDER_RESPONSIBILITY_NOT_VERIFIED",
+    publicUrlStaticValidation="PUBLIC_HTTPS_PORT_443_ONLY",
+    securityNote=(
+        "EventShock Lab validates the submitted URL syntax and blocks direct private-address "
+        "targets. Zhipu performs the target DNS resolution, network connection, and any webpage "
+        "redirect handling; those provider-side hops cannot be IP-pinned or revalidated by this "
+        "application. Review the returned source identity before approving it as evidence."
+    ),
 )
 
 
@@ -102,7 +112,7 @@ class ZhipuReaderClient:
         normalizedUrl = normalizePublicHttpsUrl(url)
         if not apiKey or apiKey != apiKey.strip() or len(apiKey) > 4_096:
             raise FactoryValidationError(
-                FactoryErrorCode.READER_SOURCE_NOT_ALLOWED,
+                FactoryErrorCode.READER_AUTHENTICATION_FAILED,
                 "A valid in-memory Zhipu API key is required.",
             )
 

@@ -30,11 +30,13 @@ from backend.app.event_pack_factory.models import (
     EventPackFactorySource,
     EvidenceRole,
     FactorySourceRawText,
+    FactorySourceSecurityFinding,
     SearchEngine,
     SearchRunRecord,
     SourceInputKind,
     SourceReviewStatus,
     SourceSecurityDecision,
+    SourceSelectionStatus,
 )
 
 MAX_ACTIVE_EVIDENCE_SOURCES_PER_BUILD = 24
@@ -122,9 +124,15 @@ class EventPackFactoryRepository:
                     review_status TEXT NOT NULL CHECK(
                         review_status IN ('PENDING', 'APPROVED', 'REJECTED')
                     ),
+                    selection_status TEXT NOT NULL DEFAULT 'INCLUDED' CHECK(
+                        selection_status IN ('INCLUDED', 'EXCLUDED')
+                    ),
                     security_decision TEXT NOT NULL CHECK(
                         security_decision IN ('ALLOW', 'REVIEW')
                     ),
+                    source_review_label TEXT NOT NULL DEFAULT 'URL_MISSING',
+                    official_host TEXT,
+                    security_findings_json TEXT NOT NULL DEFAULT '[]',
                     title TEXT NOT NULL CHECK(length(title) BETWEEN 1 AND 300),
                     publisher TEXT NOT NULL CHECK(length(publisher) BETWEEN 1 AND 200),
                     url TEXT,
@@ -189,6 +197,7 @@ class EventPackFactoryRepository:
                 """
             )
             self._migrateBuildRetention(connection)
+            self._migrateSourceReviewMetadata(connection)
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_event_pack_factory_builds_retention
@@ -225,6 +234,37 @@ class EventPackFactoryRepository:
                 """,
                 (expiresAt.isoformat(), row["id"]),
             )
+
+    @staticmethod
+    def _migrateSourceReviewMetadata(connection: sqlite3.Connection) -> None:
+        """为旧 Factory 数据库补充可逆排除和安全摘要字段。"""
+
+        columns = {
+            str(row["name"])
+            for row in connection.execute(
+                "PRAGMA table_info(event_pack_factory_sources)"
+            ).fetchall()
+        }
+        migrations = {
+            "selection_status": (
+                "ALTER TABLE event_pack_factory_sources "
+                "ADD COLUMN selection_status TEXT NOT NULL DEFAULT 'INCLUDED'"
+            ),
+            "source_review_label": (
+                "ALTER TABLE event_pack_factory_sources "
+                "ADD COLUMN source_review_label TEXT NOT NULL DEFAULT 'URL_MISSING'"
+            ),
+            "official_host": (
+                "ALTER TABLE event_pack_factory_sources ADD COLUMN official_host TEXT"
+            ),
+            "security_findings_json": (
+                "ALTER TABLE event_pack_factory_sources "
+                "ADD COLUMN security_findings_json TEXT NOT NULL DEFAULT '[]'"
+            ),
+        }
+        for columnName, statement in migrations.items():
+            if columnName not in columns:
+                connection.execute(statement)
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
@@ -437,6 +477,7 @@ class EventPackFactoryRepository:
                     """
                     UPDATE event_pack_factory_sources
                     SET review_status = 'REJECTED',
+                        selection_status = 'EXCLUDED',
                         review_summary = '[SOURCE_REJECTED_AND_TEXT_DELETED]',
                         verified_evidence_quotes_json = '[]',
                         updated_at = ?
@@ -469,6 +510,56 @@ class EventPackFactoryRepository:
             raise RuntimeError("reviewed source could not be loaded")
         if reviewStatus is SourceReviewStatus.REJECTED:
             self._checkpointSensitiveDeletion()
+        return build, self._sourceFromRow(updatedRow)
+
+    def setSourceSelection(
+        self,
+        *,
+        ownerUserId: str,
+        buildId: str,
+        sourceId: str,
+        expectedRevision: int,
+        selectionStatus: SourceSelectionStatus,
+        now: datetime | None = None,
+    ) -> tuple[EventPackFactoryBuild, EventPackFactorySource]:
+        """切换当前证据集成员资格；原文、审核结论与安全摘要均保留。"""
+
+        timestamp = now or utcNowDateTime()
+        with self._writeLock, self.connection() as connection:
+            self._requireRevision(connection, ownerUserId, buildId, expectedRevision)
+            row = connection.execute(
+                """
+                SELECT source.* FROM event_pack_factory_sources AS source
+                JOIN event_pack_factory_builds AS build ON build.id = source.build_id
+                WHERE source.id = ? AND source.build_id = ? AND build.owner_user_id = ?
+                """,
+                (sourceId, buildId, ownerUserId),
+            ).fetchone()
+            if row is None:
+                raise FactoryNotFoundError(source=True)
+            if (
+                SourceReviewStatus(row["review_status"]) is SourceReviewStatus.REJECTED
+                and selectionStatus is SourceSelectionStatus.INCLUDED
+            ):
+                raise FactoryValidationError(
+                    FactoryErrorCode.SOURCE_REVIEW_REQUIRED,
+                    "Deleted source text cannot be restored; add the source again.",
+                )
+            connection.execute(
+                """
+                UPDATE event_pack_factory_sources
+                SET selection_status = ?, updated_at = ?
+                WHERE id = ? AND build_id = ?
+                """,
+                (selectionStatus.value, timestamp.isoformat(), sourceId, buildId),
+            )
+            build = self._advanceBuild(connection, buildId, expectedRevision)
+            updatedRow = connection.execute(
+                "SELECT * FROM event_pack_factory_sources WHERE id = ?",
+                (sourceId,),
+            ).fetchone()
+        if updatedRow is None:
+            raise RuntimeError("selected source could not be loaded")
         return build, self._sourceFromRow(updatedRow)
 
     def getSource(
@@ -602,12 +693,21 @@ class EventPackFactoryRepository:
                 """
                 UPDATE event_pack_factory_sources
                 SET review_status = 'PENDING', security_decision = ?,
+                    source_review_label = ?, official_host = ?,
+                    security_findings_json = ?,
                     content_hash = ?, content_length = ?, review_summary = ?,
                     verified_evidence_quotes_json = ?, updated_at = ?
                 WHERE id = ? AND build_id = ?
                 """,
                 (
                     source.securityDecision.value,
+                    source.sourceReviewLabel,
+                    source.officialHost,
+                    json.dumps(
+                        [item.model_dump(mode="json") for item in source.securityFindings],
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
                     source.contentHash,
                     source.contentLength,
                     source.reviewSummary,
@@ -656,6 +756,7 @@ class EventPackFactoryRepository:
                 WHERE source.build_id = ?
                   AND source.evidence_role = 'EVIDENCE'
                   AND source.review_status = 'APPROVED'
+                  AND source.selection_status = 'INCLUDED'
                 ORDER BY source.created_at, source.id
                 """,
                 (ownerUserId, buildId),
@@ -683,6 +784,7 @@ class EventPackFactoryRepository:
                 WHERE source.build_id = ?
                   AND source.evidence_role = 'EVIDENCE'
                   AND source.review_status = 'APPROVED'
+                  AND source.selection_status = 'INCLUDED'
                 ORDER BY source.created_at, source.id
                 """,
                 (ownerUserId, buildId),
@@ -1043,11 +1145,13 @@ class EventPackFactoryRepository:
         connection.execute(
             """
             INSERT INTO event_pack_factory_sources (
-                id, build_id, kind, evidence_role, review_status, security_decision,
-                title, publisher, url, published_at, known_at, content_hash,
-                content_length, review_summary, verified_evidence_quotes_json,
-                search_run_id, parent_source_id, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                id, build_id, kind, evidence_role, review_status, selection_status,
+                security_decision, source_review_label, official_host,
+                security_findings_json, title, publisher, url, published_at, known_at,
+                content_hash, content_length, review_summary,
+                verified_evidence_quotes_json, search_run_id, parent_source_id,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 source.id,
@@ -1055,7 +1159,15 @@ class EventPackFactoryRepository:
                 source.kind.value,
                 source.evidenceRole.value,
                 source.reviewStatus.value,
+                source.selectionStatus.value,
                 source.securityDecision.value,
+                source.sourceReviewLabel,
+                source.officialHost,
+                json.dumps(
+                    [item.model_dump(mode="json") for item in source.securityFindings],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
                 source.title,
                 source.publisher,
                 source.url,
@@ -1169,6 +1281,12 @@ class EventPackFactoryRepository:
         quotes = json.loads(row["verified_evidence_quotes_json"])
         if not isinstance(quotes, list) or not all(isinstance(item, str) for item in quotes):
             raise RuntimeError("stored Event Pack Factory quote data is invalid")
+        securityFindingValues = json.loads(row["security_findings_json"])
+        if not isinstance(securityFindingValues, list):
+            raise RuntimeError("stored Event Pack Factory security data is invalid")
+        securityFindings = tuple(
+            FactorySourceSecurityFinding.model_validate(item) for item in securityFindingValues
+        )
         return EventPackFactorySource(
             id=row["id"],
             buildId=row["build_id"],
@@ -1176,6 +1294,10 @@ class EventPackFactoryRepository:
             evidenceRole=EvidenceRole(row["evidence_role"]),
             reviewStatus=SourceReviewStatus(row["review_status"]),
             securityDecision=SourceSecurityDecision(row["security_decision"]),
+            selectionStatus=SourceSelectionStatus(row["selection_status"]),
+            sourceReviewLabel=row["source_review_label"],
+            officialHost=row["official_host"],
+            securityFindings=securityFindings,
             title=row["title"],
             publisher=row["publisher"],
             url=row["url"],

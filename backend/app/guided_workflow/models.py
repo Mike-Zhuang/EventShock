@@ -31,6 +31,33 @@ class GuidedWorkflowStatus(StrEnum):
     ACTIVE = "ACTIVE"
     COMPLETED = "COMPLETED"
     CANCELLED = "CANCELLED"
+    ARCHIVED = "ARCHIVED"
+
+
+class GuidedArchivedProposalStatus(StrEnum):
+    APPLIED = "APPLIED"
+    SUPERSEDED = "SUPERSEDED"
+    DISMISSED = "DISMISSED"
+
+
+class GuidedArchivedProposalReason(StrEnum):
+    APPLIED_BY_HUMAN = "APPLIED_BY_HUMAN"
+    REPLACED_BY_NEW_PROPOSAL = "REPLACED_BY_NEW_PROPOSAL"
+    STAGE_ADVANCED_BY_HUMAN = "STAGE_ADVANCED_BY_HUMAN"
+    WORKFLOW_ARCHIVED_BY_HUMAN = "WORKFLOW_ARCHIVED_BY_HUMAN"
+
+
+class GuidedTurnOperationStatus(StrEnum):
+    PENDING = "PENDING"
+    RESULT_READY = "RESULT_READY"
+    SUCCEEDED = "SUCCEEDED"
+    UNKNOWN = "UNKNOWN"
+    ABANDONED_BY_USER = "ABANDONED_BY_USER"
+
+
+class GuidedTurnRecoveryAction(StrEnum):
+    RETRY_CACHED_COMMIT = "RETRY_CACHED_COMMIT"
+    ABANDON_AND_AUTHORIZE_RETRY = "ABANDON_AND_AUTHORIZE_RETRY"
 
 
 class GuidedSourceMethod(StrEnum):
@@ -141,6 +168,19 @@ class GuidedWorkflowDraft(StrictModel):
     scenarioId: str | None = None
 
 
+class GuidedArchivedProposal(StrictModel):
+    schemaVersion: Literal["guided_archived_proposal_v1.0.0"] = "guided_archived_proposal_v1.0.0"
+    id: str = Field(
+        min_length=8,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,79}$",
+    )
+    proposal: GuidedWorkflowProposal
+    status: GuidedArchivedProposalStatus
+    archivedAt: datetime
+    reason: GuidedArchivedProposalReason
+
+
 class GuidedWorkflowView(StrictModel):
     schemaVersion: Literal["1.0.0"] = "1.0.0"
     id: str
@@ -151,6 +191,7 @@ class GuidedWorkflowView(StrictModel):
     draft: GuidedWorkflowDraft
     pendingProposal: GuidedWorkflowProposal | None = None
     pendingProposalId: str | None = None
+    archivedProposals: tuple[GuidedArchivedProposal, ...] = ()
     messages: tuple[GuidedWorkflowMessage, ...]
     createdAt: datetime
     updatedAt: datetime
@@ -169,6 +210,62 @@ class GuidedTurnRequest(StrictModel):
         max_length=80,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,79}$",
     )
+
+
+class GuidedTurnOperationView(StrictModel):
+    schemaVersion: Literal["1.0.0"] = "1.0.0"
+    workflowId: str
+    clientRequestId: str
+    expectedVersion: int = Field(ge=1)
+    status: GuidedTurnOperationStatus
+    errorCode: str | None = None
+    requestMessage: str | None = None
+    language: Literal["en", "zh-CN"] | None = None
+    cachedProposalAvailable: bool
+    supersedesClientRequestId: str | None = None
+    authorizedRetryClientRequestId: str | None = None
+    recoveryOptions: tuple[GuidedTurnRecoveryAction, ...] = ()
+    providerRequestId: str | None = None
+    httpResponseReceived: bool | None = None
+    usageReceived: bool | None = None
+    parseCompleted: bool | None = None
+    failureStage: str | None = None
+    createdAt: datetime
+    updatedAt: datetime
+
+
+class GuidedTurnRecoveryRequest(StrictModel):
+    recoveryRequestId: str = Field(
+        min_length=8,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,79}$",
+    )
+    action: GuidedTurnRecoveryAction
+    expectedVersion: int = Field(ge=1)
+    newClientRequestId: str | None = Field(
+        default=None,
+        min_length=8,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,79}$",
+    )
+
+    @model_validator(mode="after")
+    def validateRecoveryAction(self) -> GuidedTurnRecoveryRequest:
+        if (
+            self.action is GuidedTurnRecoveryAction.ABANDON_AND_AUTHORIZE_RETRY
+            and self.newClientRequestId is None
+        ):
+            raise ValueError("newClientRequestId is required when authorizing a retry")
+        if (
+            self.action is GuidedTurnRecoveryAction.RETRY_CACHED_COMMIT
+            and self.newClientRequestId is not None
+        ):
+            raise ValueError("newClientRequestId is only valid when authorizing a retry")
+        return self
+
+
+class GuidedArchiveRequest(StrictModel):
+    expectedVersion: int = Field(ge=1)
 
 
 class GuidedProposalActionRequest(StrictModel):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,9 +12,14 @@ from backend.app.auth import AuthRepository
 from backend.app.database import Database
 from backend.app.guided_workflow import (
     GuidedAdvanceRequest,
+    GuidedArchivedProposal,
+    GuidedArchivedProposalReason,
+    GuidedArchivedProposalStatus,
+    GuidedArchiveRequest,
     GuidedLinkRequest,
     GuidedProposalActionRequest,
     GuidedStage,
+    GuidedTurnRecoveryRequest,
     GuidedTurnRequest,
     GuidedWorkflowConflictError,
     GuidedWorkflowProposal,
@@ -27,6 +33,10 @@ from backend.app.guided_workflow.models import (
     GuidedWorkflowStatus,
     ProposedEventMetadata,
     ProposedIntervention,
+)
+from backend.app.guided_workflow.stage_openings import (
+    guidedStageOpening,
+    guidedStageOpeningMessageId,
 )
 
 
@@ -189,7 +199,7 @@ def _advance(
     expectedVersion: int,
     acknowledgedHumanReview: bool = True,
 ):
-    return fixture.service.advance(
+    advanced = fixture.service.advance(
         workflowId,
         ownerUserId,
         GuidedAdvanceRequest(
@@ -197,6 +207,276 @@ def _advance(
             acknowledgedHumanReview=acknowledgedHumanReview,
         ),
     )
+    latestMessage = advanced.messages[-1]
+    assert latestMessage.role == "assistant"
+    assert latestMessage.stage is advanced.stage
+    assert latestMessage.proposalId is None
+    assert latestMessage.content == guidedStageOpening(
+        advanced.stage,
+        advanced.language,
+    )
+    return advanced
+
+
+def test_archived_proposal_model_rejects_unknown_fields() -> None:
+    archived = GuidedArchivedProposal(
+        id="proposal-strict-history-001",
+        proposal=_proposal(
+            GuidedStage.EVENT_GOAL,
+            eventMetadata=_eventMetadata(),
+        ),
+        status=GuidedArchivedProposalStatus.APPLIED,
+        archivedAt=datetime.now(UTC),
+        reason=GuidedArchivedProposalReason.APPLIED_BY_HUMAN,
+    )
+
+    assert archived.schemaVersion == "guided_archived_proposal_v1.0.0"
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        GuidedArchivedProposal.model_validate(
+            {
+                **archived.model_dump(mode="json"),
+                "untrustedField": "must not be accepted",
+            }
+        )
+
+
+def test_pending_proposals_are_archived_on_replace_apply_and_stage_advance(
+    tmp_path: Path,
+) -> None:
+    fixture = _workflowFixture(tmp_path)
+    workflow = fixture.service.create(fixture.firstOwnerId, "en")
+    first = fixture.service.saveTurn(
+        workflowId=workflow.id,
+        ownerUserId=fixture.firstOwnerId,
+        request=_turn(
+            message="Draft the first bounded event proposal.",
+            expectedVersion=workflow.version,
+            clientRequestId="proposal-history-first-001",
+        ),
+        proposal=_proposal(
+            GuidedStage.EVENT_GOAL,
+            eventMetadata=_eventMetadata(),
+            assistantMessage="First event proposal awaiting review.",
+        ),
+    )
+    firstProposalId = first.pendingProposalId or ""
+
+    second = fixture.service.saveTurn(
+        workflowId=workflow.id,
+        ownerUserId=fixture.firstOwnerId,
+        request=_turn(
+            message="Replace it with a more precise bounded proposal.",
+            expectedVersion=first.version,
+            clientRequestId="proposal-history-second-001",
+        ),
+        proposal=_proposal(
+            GuidedStage.EVENT_GOAL,
+            eventMetadata=_eventMetadata(),
+            assistantMessage="Second event proposal awaiting review.",
+        ),
+    )
+    secondProposalId = second.pendingProposalId or ""
+    assert second.pendingProposalId != firstProposalId
+    assert [(item.id, item.status, item.reason) for item in second.archivedProposals] == [
+        (
+            firstProposalId,
+            GuidedArchivedProposalStatus.SUPERSEDED,
+            GuidedArchivedProposalReason.REPLACED_BY_NEW_PROPOSAL,
+        )
+    ]
+
+    applied = _applyPending(
+        fixture,
+        workflow.id,
+        fixture.firstOwnerId,
+        expectedVersion=second.version,
+        proposalId=secondProposalId,
+    )
+    assert applied.draft.eventMetadata == _eventMetadata()
+    assert applied.pendingProposal is None
+    assert [(item.id, item.status, item.reason) for item in applied.archivedProposals] == [
+        (
+            firstProposalId,
+            GuidedArchivedProposalStatus.SUPERSEDED,
+            GuidedArchivedProposalReason.REPLACED_BY_NEW_PROPOSAL,
+        ),
+        (
+            secondProposalId,
+            GuidedArchivedProposalStatus.APPLIED,
+            GuidedArchivedProposalReason.APPLIED_BY_HUMAN,
+        ),
+    ]
+
+    third = fixture.service.saveTurn(
+        workflowId=workflow.id,
+        ownerUserId=fixture.firstOwnerId,
+        request=_turn(
+            message="Offer one final optional wording change.",
+            expectedVersion=applied.version,
+            clientRequestId="proposal-history-third-001",
+        ),
+        proposal=_proposal(
+            GuidedStage.EVENT_GOAL,
+            eventMetadata=_eventMetadata(),
+            assistantMessage="Third event proposal left pending before stage advance.",
+        ),
+    )
+    thirdProposalId = third.pendingProposalId or ""
+    advanced = _advance(
+        fixture,
+        workflow.id,
+        fixture.firstOwnerId,
+        expectedVersion=third.version,
+    )
+
+    assert advanced.stage is GuidedStage.SOURCE_METHOD
+    assert advanced.pendingProposal is None
+    assert [(item.id, item.status, item.reason) for item in advanced.archivedProposals][-1] == (
+        thirdProposalId,
+        GuidedArchivedProposalStatus.DISMISSED,
+        GuidedArchivedProposalReason.STAGE_ADVANCED_BY_HUMAN,
+    )
+    assert [item.proposal.assistantMessage for item in advanced.archivedProposals] == [
+        "First event proposal awaiting review.",
+        "Second event proposal awaiting review.",
+        "Third event proposal left pending before stage advance.",
+    ]
+    assert all(item.archivedAt.tzinfo is not None for item in advanced.archivedProposals)
+
+    restartedDatabase = Database(fixture.databasePath)
+    restartedDatabase.initialize()
+    restartedRepository = GuidedWorkflowRepository(restartedDatabase)
+    restartedRepository.initialize()
+    restored = GuidedWorkflowService(restartedRepository).get(
+        workflow.id,
+        fixture.firstOwnerId,
+    )
+    assert restored.archivedProposals == advanced.archivedProposals
+    assert restored.messages == advanced.messages
+
+
+def test_archiving_workflow_dismisses_pending_proposal(tmp_path: Path) -> None:
+    fixture = _workflowFixture(tmp_path)
+    workflow = fixture.service.create(fixture.firstOwnerId, "zh-CN")
+    pending = fixture.service.saveTurn(
+        workflowId=workflow.id,
+        ownerUserId=fixture.firstOwnerId,
+        request=_turn(
+            message="请生成一份待我审核的事件目标候选。",
+            expectedVersion=workflow.version,
+            clientRequestId="proposal-before-workflow-archive-001",
+            language="zh-CN",
+        ),
+        proposal=_proposal(
+            GuidedStage.EVENT_GOAL,
+            eventMetadata=_eventMetadata(),
+            assistantMessage="这份候选仍在等待人工决定。",
+        ),
+    )
+
+    archived = fixture.service.archive(
+        workflow.id,
+        fixture.firstOwnerId,
+        GuidedArchiveRequest(expectedVersion=pending.version),
+    )
+
+    assert archived.status is GuidedWorkflowStatus.ARCHIVED
+    assert archived.pendingProposal is None
+    assert len(archived.archivedProposals) == 1
+    assert archived.archivedProposals[0].id == pending.pendingProposalId
+    assert archived.archivedProposals[0].status is GuidedArchivedProposalStatus.DISMISSED
+    assert (
+        archived.archivedProposals[0].reason
+        is GuidedArchivedProposalReason.WORKFLOW_ARCHIVED_BY_HUMAN
+    )
+
+
+def test_legacy_database_adds_proposal_history_and_backfills_stage_opening(
+    tmp_path: Path,
+) -> None:
+    fixture = _workflowFixture(tmp_path)
+    workflow = fixture.service.create(fixture.firstOwnerId, "zh-CN")
+    pending = fixture.service.saveTurn(
+        workflowId=workflow.id,
+        ownerUserId=fixture.firstOwnerId,
+        request=_turn(
+            message="请先形成事件目标候选。",
+            expectedVersion=workflow.version,
+            clientRequestId="legacy-history-event-proposal-001",
+            language="zh-CN",
+        ),
+        proposal=_proposal(
+            GuidedStage.EVENT_GOAL,
+            eventMetadata=_eventMetadata(),
+            assistantMessage="请审核事件目标候选。",
+        ),
+    )
+    applied = _applyPending(
+        fixture,
+        workflow.id,
+        fixture.firstOwnerId,
+        expectedVersion=pending.version,
+        proposalId=pending.pendingProposalId or "",
+    )
+    advanced = _advance(
+        fixture,
+        workflow.id,
+        fixture.firstOwnerId,
+        expectedVersion=applied.version,
+    )
+    openingId = guidedStageOpeningMessageId(
+        workflow.id,
+        GuidedStage.SOURCE_METHOD,
+    )
+    with sqlite3.connect(fixture.databasePath) as connection:
+        connection.execute("DROP TABLE guided_workflow_proposal_history")
+        connection.execute(
+            "DELETE FROM guided_workflow_messages WHERE id=?",
+            (openingId,),
+        )
+
+    restartedDatabase = Database(fixture.databasePath)
+    restartedDatabase.initialize()
+    restartedRepository = GuidedWorkflowRepository(restartedDatabase)
+    restartedRepository.initialize()
+    restartedService = GuidedWorkflowService(restartedRepository)
+    restored = restartedService.get(workflow.id, fixture.firstOwnerId)
+
+    assert restored.version == advanced.version
+    assert restored.stage is GuidedStage.SOURCE_METHOD
+    assert restored.archivedProposals == ()
+    assert restored.messages[-1].id == openingId
+    assert restored.messages[-1].stage is GuidedStage.SOURCE_METHOD
+    assert restored.messages[-1].content == guidedStageOpening(
+        GuidedStage.SOURCE_METHOD,
+        "zh-CN",
+    )
+
+    sourcePending = restartedService.saveTurn(
+        workflowId=workflow.id,
+        ownerUserId=fixture.firstOwnerId,
+        request=_turn(
+            message="请使用粘贴原文的方式收集来源。",
+            expectedVersion=restored.version,
+            clientRequestId="legacy-history-source-proposal-001",
+            language="zh-CN",
+        ),
+        proposal=_proposal(
+            GuidedStage.SOURCE_METHOD,
+            sourceMethod=GuidedSourceMethod.PASTE,
+            assistantMessage="请审核来源方式候选。",
+        ),
+    )
+    sourceApplied = restartedService.applyProposal(
+        workflow.id,
+        fixture.firstOwnerId,
+        GuidedProposalActionRequest(
+            proposalId=sourcePending.pendingProposalId or "",
+            expectedVersion=sourcePending.version,
+        ),
+    )
+    assert len(sourceApplied.archivedProposals) == 1
+    assert sourceApplied.archivedProposals[0].status is GuidedArchivedProposalStatus.APPLIED
 
 
 def test_workflows_are_strictly_isolated_by_owner(tmp_path: Path) -> None:
@@ -221,6 +501,89 @@ def test_workflows_are_strictly_isolated_by_owner(tmp_path: Path) -> None:
     unchanged = fixture.service.get(firstWorkflow.id, fixture.firstOwnerId)
     assert unchanged.version == 1
     assert unchanged.draft.eventPackBuildId is None
+
+
+def test_legacy_guided_operation_schema_migrates_without_losing_unknown_turn(
+    tmp_path: Path,
+) -> None:
+    fixture = _workflowFixture(tmp_path)
+    workflow = fixture.service.create(fixture.firstOwnerId, "en")
+    timestamp = datetime.now(UTC).isoformat()
+    with sqlite3.connect(fixture.databasePath) as connection:
+        connection.execute("DROP TABLE guided_workflow_turn_recoveries")
+        connection.execute("DROP INDEX idx_guided_turn_operation_version")
+        connection.execute("DROP TABLE guided_workflow_turn_operations")
+        connection.execute(
+            """
+            CREATE TABLE guided_workflow_turn_operations (
+                workflow_id TEXT NOT NULL,
+                owner_user_id TEXT NOT NULL,
+                client_request_id TEXT NOT NULL,
+                request_hash TEXT NOT NULL,
+                expected_version INTEGER NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('PENDING', 'SUCCEEDED', 'UNKNOWN')),
+                claim_token TEXT,
+                response_version INTEGER,
+                response_json TEXT,
+                error_code TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(workflow_id, client_request_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO guided_workflow_turn_operations(
+                workflow_id, owner_user_id, client_request_id, request_hash,
+                expected_version, status, error_code, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 1, 'UNKNOWN', 'MODEL_TIMEOUT', ?, ?)
+            """,
+            (
+                workflow.id,
+                fixture.firstOwnerId,
+                "legacy-unknown-operation-001",
+                "a" * 64,
+                timestamp,
+                timestamp,
+            ),
+        )
+        connection.commit()
+
+    fixture.service.repository.initialize()
+    migrated = fixture.service.listTurnOperations(workflow.id, fixture.firstOwnerId)
+    assert len(migrated) == 1
+    assert migrated[0].status.value == "UNKNOWN"
+    assert migrated[0].errorCode == "MODEL_TIMEOUT"
+    assert migrated[0].cachedProposalAvailable is False
+
+    fixture.service.recoverTurn(
+        workflowId=workflow.id,
+        ownerUserId=fixture.firstOwnerId,
+        clientRequestId="legacy-unknown-operation-001",
+        request=GuidedTurnRecoveryRequest(
+            recoveryRequestId="legacy-abandon-recovery-001",
+            action="ABANDON_AND_AUTHORIZE_RETRY",
+            expectedVersion=1,
+            newClientRequestId="legacy-authorized-retry-002",
+        ),
+    )
+    claim = fixture.service.claimTurn(
+        workflowId=workflow.id,
+        ownerUserId=fixture.firstOwnerId,
+        request=_turn(
+            message="Retry the migrated unknown operation after explicit authorization.",
+            expectedVersion=1,
+            clientRequestId="legacy-authorized-retry-002",
+        ),
+    )
+    assert claim.replayed is False
+    operations = fixture.service.listTurnOperations(workflow.id, fixture.firstOwnerId)
+    assert [operation.status.value for operation in operations] == [
+        "ABANDONED_BY_USER",
+        "PENDING",
+    ]
+    assert operations[1].supersedesClientRequestId == "legacy-unknown-operation-001"
 
 
 def test_ai_proposal_requires_explicit_apply_and_advance_requires_human_review(

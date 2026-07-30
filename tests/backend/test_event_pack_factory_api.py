@@ -30,6 +30,11 @@ def test_factory_api_materializes_reviewable_pack_and_preserves_owner_boundary(
             "search_pro_quark",
         }
         assert catalog.json()["reader"]["billingStatus"] == "UNKNOWN"
+        assert catalog.json()["reader"]["targetFetchAuthority"] == "PROVIDER_DELEGATED"
+        assert catalog.json()["reader"]["applicationDnsValidation"] == "NOT_PERFORMED"
+        assert (
+            catalog.json()["reader"]["redirectValidation"] == "PROVIDER_RESPONSIBILITY_NOT_VERIFIED"
+        )
 
         created = client.post(
             "/api/v1/event-pack-factory/builds",

@@ -89,6 +89,10 @@ const CATALOG: LlmCatalog = {
   provider: 'zhipu', providerName: 'Zhipu AI', baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
   documentationUrl: 'https://docs.bigmodel.cn/', pricingUrl: 'https://open.bigmodel.cn/pricing',
   pricingSnapshotVersion: '2026-07-20', fxSourceUrl: '', officialFxSnapshotCnyPerUsd: 0,
+  pricingSnapshotStatus: 'CURRENT', pricingSnapshotValidUntil: '2026-08-20T00:00:00Z',
+  pricingReviewCadenceDays: 31, capabilitySnapshotVersion: 'capabilities-2026-07-20',
+  capabilitySnapshotStatus: 'CURRENT', capabilitySnapshotValidUntil: '2026-08-20T23:59:59Z',
+  capabilityReviewCadenceDays: 31,
   cnyPerUsdBudgetFloor: 0, costCapSemantics: 'Fail closed.',
   models: [],
 };
@@ -154,6 +158,9 @@ describe('多供应商 AI 配置', () => {
 
     expect(await screen.findByLabelText('Provider')).toHaveValue('zhipu');
     expect(screen.queryByText('Community preview: not verified with a real project API key')).not.toBeInTheDocument();
+    expect(screen.getByText('No real-key end-to-end pass is recorded for this exact model'))
+      .toBeInTheDocument();
+    expect(screen.getByText('Periodic pricing and capability verification')).toBeInTheDocument();
   });
 
   it('保留但禁用缺少官方输出上限的模型，并解释关闭原因', async () => {

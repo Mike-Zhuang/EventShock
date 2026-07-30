@@ -353,6 +353,69 @@ def test_email_registration_reset_and_user_data_isolation(
         )
 
 
+def test_authenticated_user_can_export_and_delete_account_data(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configureProduction(monkeypatch)
+    monkeypatch.setattr(mainModule, "SmtpVerificationMailer", CapturingMailer)
+    bootstrapTestAdmin(tmp_path)
+    userEmail = "privacy-user@example.com"
+    userPassword = "Privacy password 123!"
+
+    with TestClient(createApp(tmp_path), base_url="https://testserver") as client:
+        sent = client.post(
+            "/api/v1/auth/verification-code",
+            json={"email": userEmail, "purpose": "REGISTER", "language": "en"},
+        )
+        assert sent.status_code == 202
+        registered = client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": userEmail,
+                "password": userPassword,
+                "verificationCode": CapturingMailer.messages[-1].code,
+                "language": "en",
+                **legalPayload("en"),
+            },
+        )
+        assert registered.status_code == 201
+        csrfToken = registered.json()["csrfToken"]
+        headers = {"X-CSRF-Token": csrfToken, "Origin": "https://testserver"}
+
+        wrongPassword = client.post(
+            "/api/v1/account/data-export",
+            headers=headers,
+            json={"password": "incorrect"},
+        )
+        exported = client.post(
+            "/api/v1/account/data-export",
+            headers=headers,
+            json={"password": userPassword},
+        )
+        deleted = client.request(
+            "DELETE",
+            "/api/v1/account",
+            headers=headers,
+            json={"password": userPassword, "confirmation": "DELETE"},
+        )
+        sessionAfterDeletion = client.get("/api/v1/auth/session")
+
+    assert wrongPassword.status_code == 401
+    assert exported.status_code == 200
+    assert (
+        exported.headers["content-disposition"]
+        == 'attachment; filename="eventshock-account-data.json"'
+    )
+    assert exported.json()["data"]["account"][0]["email_normalized"] == userEmail
+    assert "password_hash" not in exported.json()["data"]["account"][0]
+    assert userPassword not in exported.text
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] is True
+    assert sessionAfterDeletion.status_code == 200
+    assert sessionAfterDeletion.json()["authenticated"] is False
+
+
 def test_production_authentication_configuration_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

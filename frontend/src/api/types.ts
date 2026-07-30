@@ -107,6 +107,28 @@ export interface AuthSession {
   preferences?: UserPreferences;
 }
 
+export interface AccountDataExport {
+  schemaVersion: string;
+  generatedAt: string;
+  retentionNotice: string;
+  excludedSecrets: string[];
+  data: Record<string, unknown[]>;
+}
+
+export interface AccountDataExportInput {
+  currentPassword: string;
+}
+
+export interface AccountDeletionInput extends AccountDataExportInput {
+  confirmation: 'DELETE';
+}
+
+export interface AccountDeletionReceipt {
+  deleted: true;
+  deletedRecordCount: number;
+  backupRetentionNotice: string;
+}
+
 export interface VerificationCodeReceipt {
   accepted: boolean;
   retryAfterSeconds: number;
@@ -200,10 +222,31 @@ export interface EventClaim {
   publishedAt?: string;
   knownAt?: string;
   confidence?: number;
+  modelReportedConfidence?: number;
+  confidenceMeaning?: string;
+  confidenceComponents?: {
+    textualFidelity?: number;
+    sourceTierStrength?: number;
+    timeBoundaryCertainty?: number;
+  };
   impactChannels?: string[];
+  impactChannelRationale?: ClaimImpactChannelRationale[];
+  channelMappingIsInference?: boolean;
+  extractionQuality?: string;
+  bulkApprovalEligible?: boolean;
+  bulkApprovalExclusionReasons?: string[];
+  bulkApprovalMinimumConfidence?: number;
   editedText?: string;
   isRequired?: boolean;
   claimType?: string;
+}
+
+export interface ClaimImpactChannelRationale {
+  channel: string;
+  reason: string;
+  reasonZh?: string;
+  evidenceType: 'FACT' | 'MECHANISM_HYPOTHESIS' | string;
+  simulatorParameter: string;
 }
 
 export interface EventPackContentFinding {
@@ -212,6 +255,8 @@ export interface EventPackContentFinding {
   severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | string;
   field: string;
   offset: number;
+  riskCategory?: string;
+  recommendedAction?: string;
 }
 
 export interface EventPackContentSourceReview {
@@ -232,6 +277,11 @@ export interface EventPackContentSecurity {
   rawContentRetained?: boolean;
   findings: EventPackContentFinding[];
   sources: EventPackContentSourceReview[];
+  modelInputSummary?: {
+    retainedFieldCount: number;
+    removedFieldCount: number;
+    redactedFieldCount: number;
+  };
 }
 
 export interface EventPack {
@@ -365,6 +415,7 @@ export type FactoryBuildStatus = 'DRAFT' | 'REVIEW_READY';
 export type FactorySourceKind = 'PASTE' | 'SEARCH_RESULT' | 'READER';
 export type FactoryEvidenceRole = 'EVIDENCE' | 'DISCOVERY_ONLY';
 export type FactorySourceReviewStatus = 'PENDING' | 'APPROVED' | 'REJECTED';
+export type FactorySourceSelectionStatus = 'INCLUDED' | 'EXCLUDED';
 export type FactorySourceSecurityDecision = 'ALLOW' | 'REVIEW';
 export type FactorySearchEngineId =
   | 'search_std'
@@ -402,7 +453,11 @@ export interface EventPackFactorySource {
   kind: FactorySourceKind;
   evidenceRole: FactoryEvidenceRole;
   reviewStatus: FactorySourceReviewStatus;
+  selectionStatus: FactorySourceSelectionStatus;
   securityDecision: FactorySourceSecurityDecision;
+  sourceReviewLabel: string;
+  officialHost?: string;
+  securityFindings: EventPackContentFinding[];
   title: string;
   publisher: string;
   url?: string;
@@ -501,8 +556,17 @@ export type GuidedStage =
   | 'READY_TO_SUBMIT'
   | 'COMPLETED';
 
-export type GuidedWorkflowStatus = 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
+export type GuidedWorkflowStatus = 'ACTIVE' | 'COMPLETED' | 'CANCELLED' | 'ARCHIVED';
 export type GuidedSourceMethod = 'PASTE' | 'WEB_SEARCH' | 'COMBINED' | 'MANUAL';
+export type GuidedTurnOperationStatus =
+  | 'PENDING'
+  | 'RESULT_READY'
+  | 'SUCCEEDED'
+  | 'UNKNOWN'
+  | 'ABANDONED_BY_USER';
+export type GuidedTurnRecoveryAction =
+  | 'RETRY_CACHED_COMMIT'
+  | 'ABANDON_AND_AUTHORIZE_RETRY';
 
 export interface GuidedEventMetadata {
   title: string;
@@ -544,6 +608,18 @@ export interface GuidedWorkflowMessage {
   createdAt: string;
 }
 
+/**
+ * 后端归档能力尚在演进，因此该结构仅作为可选读取契约。
+ * 老版本响应不返回该字段时，现有引导流程保持不变。
+ */
+export interface GuidedWorkflowArchivedProposal {
+  id: string;
+  proposal: GuidedWorkflowProposal;
+  status: 'APPLIED' | 'SUPERSEDED' | 'DISMISSED' | string;
+  archivedAt: string;
+  reason?: string;
+}
+
 export interface GuidedWorkflowDraft {
   eventMetadata?: GuidedEventMetadata;
   sourceMethod?: GuidedSourceMethod;
@@ -564,6 +640,7 @@ export interface GuidedWorkflow {
   draft: GuidedWorkflowDraft;
   pendingProposal?: GuidedWorkflowProposal;
   pendingProposalId?: string;
+  archivedProposals?: GuidedWorkflowArchivedProposal[];
   messages: GuidedWorkflowMessage[];
   createdAt: string;
   updatedAt: string;
@@ -576,8 +653,44 @@ export interface GuidedTurnInput {
   clientRequestId: string;
 }
 
+export interface GuidedTurnOperation {
+  schemaVersion: '1.0.0';
+  workflowId: string;
+  clientRequestId: string;
+  expectedVersion: number;
+  status: GuidedTurnOperationStatus;
+  errorCode?: string;
+  requestMessage?: string;
+  language?: 'en' | 'zh-CN';
+  cachedProposalAvailable: boolean;
+  supersedesClientRequestId?: string;
+  authorizedRetryClientRequestId?: string;
+  recoveryOptions: GuidedTurnRecoveryAction[];
+  providerRequestId?: string;
+  httpResponseReceived?: boolean;
+  usageReceived?: boolean;
+  parseCompleted?: boolean;
+  failureStage?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GuidedTurnRecoveryInput {
+  recoveryRequestId: string;
+  action: GuidedTurnRecoveryAction;
+  expectedVersion: number;
+  newClientRequestId?: string;
+}
+
+export type GuidedTurnRecoveryResult =
+  | { kind: 'WORKFLOW'; workflow: GuidedWorkflow }
+  | { kind: 'OPERATION'; operation: GuidedTurnOperation };
+
 export type ModelQualityTier = 'ECONOMY' | 'BALANCED' | 'PREMIUM';
-export type ModelPricingStatus = 'VERIFIED_UPPER_BOUND' | 'UNAVAILABLE_FAIL_CLOSED';
+export type ModelPricingStatus =
+  | 'VERIFIED_UPPER_BOUND'
+  | 'STALE_FAIL_CLOSED'
+  | 'UNAVAILABLE_FAIL_CLOSED';
 export type ProviderIntegrationValidationStatus =
   | 'REAL_PROJECT_KEY_VERIFIED'
   | 'CONTRACT_TESTED_COMMUNITY_PREVIEW';
@@ -625,7 +738,21 @@ export interface LlmModelDescriptor {
   budgetOutputRateUpperPerMillion?: number;
   cachedInputRatePerMillion?: number;
   pricingVerifiedAt?: string;
+  pricingValidUntil?: string;
   pricingNote?: string;
+  validationEvidence?: {
+    knownModel: boolean;
+    officialDocumentationStatus: string;
+    adapterContractStatus: string;
+    liveKeyE2eStatus: string;
+    structuredOutputStatus: string;
+    streamingStatus: string;
+    thinkingJsonStatus: string;
+    usageCostStatus: string;
+    evidenceSourceUrl?: string;
+    verifiedAt?: string;
+    verificationScope: string;
+  };
 }
 
 /** @deprecated 新代码应使用供应商中立的 LlmModelDescriptor。 */
@@ -656,6 +783,13 @@ export interface LlmCatalog {
   documentationUrl: string;
   pricingUrl: string;
   pricingSnapshotVersion: string;
+  pricingSnapshotStatus?: string;
+  pricingSnapshotValidUntil?: string;
+  pricingReviewCadenceDays?: number;
+  capabilitySnapshotVersion?: string;
+  capabilitySnapshotStatus?: string;
+  capabilitySnapshotValidUntil?: string;
+  capabilityReviewCadenceDays?: number;
   fxSourceUrl: string;
   officialFxSnapshotCnyPerUsd: number;
   cnyPerUsdBudgetFloor: number;
@@ -817,6 +951,10 @@ export interface ResultInterpretationStreamErrorPayload {
   retryable: boolean;
   httpStatus: number;
   uncertainBillableAttempts: number;
+  failureStage?: string;
+  repairAttempted?: boolean;
+  repairUsed?: boolean;
+  billingConclusion?: string;
   traceId?: string;
 }
 
@@ -860,6 +998,15 @@ export interface ValidationCheck {
 
 export interface ScenarioValidation {
   valid: boolean;
+  /**
+   * 仿真结构本身是否可运行。该状态与用户请求的认知模式能否按原配置运行分开，
+   * 避免把可显式降级的 HYBRID_LLM 场景误标为“完全有效”。
+   */
+  simulationRunnable: boolean;
+  requestedCognitionRunnable: boolean;
+  effectiveCognitionMode?: 'RULE_ONLY' | 'HYBRID_LLM' | 'UNAVAILABLE' | string;
+  degradationReasons: string[];
+  requiresExplicitRuleFallbackConfirmation: boolean;
   checks: ValidationCheck[];
   estimatedRuntimeSeconds?: number;
   estimatedLlmCalls?: number;
@@ -876,6 +1023,36 @@ export interface ExperimentLogEntry {
   level: 'INFO' | 'WARNING' | 'ERROR' | string;
   message: string;
   seed?: number;
+  code?: string;
+  parameters?: Record<string, unknown>;
+}
+
+export interface CognitionProgress {
+  status?: string;
+  plannedCalls?: number;
+  attemptedCalls?: number;
+  completedCalls?: number;
+  fallbackCount?: number;
+  totalTokens?: number;
+  structuredValidCalls?: number;
+  structuredSuccessRate?: number;
+  structuredSuccessThreshold?: number;
+  structuredSuccessGateStatus?: string;
+  failureCategoryCounts?: Record<string, number>;
+  currentCostUsd?: number;
+  settledCostUsd?: number;
+  activeReservationUsd?: number;
+  modelStage?: string;
+  streamChunkCount?: number;
+  answerChunkCount?: number;
+  reasoningChunkCount?: number;
+  repairAttempted?: boolean;
+  decisionRound?: number;
+  representativeIndex?: number;
+  failureCode?: string;
+  resolvedMode?: string;
+  userRequestedRuleContinuation?: boolean;
+  updatedAt?: string;
 }
 
 export interface LiveMarketSnapshot {
@@ -896,10 +1073,12 @@ export interface ExperimentLiveState {
   phase?: 'COGNITION' | 'BASELINE' | 'INTERVENTION' | 'AGGREGATING' | 'COMPLETED' | string;
   pairIndex?: number;
   currentSeed?: number;
+  lastCompletedSeed?: number;
   baseline?: LiveMarketSnapshot;
   intervention?: LiveMarketSnapshot;
   resumedFromCheckpoint?: boolean;
   checkpointPairs?: number;
+  cognitionProgress?: CognitionProgress;
 }
 
 export interface Experiment {
@@ -915,11 +1094,13 @@ export interface Experiment {
   resultsAvailable?: boolean;
   resultsPreserved?: boolean;
   validForResearchUse?: boolean;
+  cognitionFallbackRequested?: boolean;
   progress: number;
   completedSeeds?: number;
   validSeeds?: number;
   totalSeeds?: number;
   currentSeed?: number;
+  lastCompletedSeed?: number;
   message?: string;
   error?: string;
   scenario?: ScenarioDraft;
@@ -1020,12 +1201,20 @@ export interface StoppingRuleResult {
   mode?: string;
   triggered: boolean;
   reason: string;
+  primaryReason?: string;
+  reasons: string[];
   primaryOutcome?: string;
   completedPairs: number;
   observedCiHalfWidth?: number;
   targetCiHalfWidth?: number;
   minimumPairs?: number;
   maximumPairs?: number;
+  conditionEvaluations: Array<{
+    code: string;
+    evaluationOrder: number;
+    satisfied: boolean;
+    firstSatisfiedAtPair?: number;
+  }>;
   bootstrapInterval95?: {
     estimate?: number;
     lower?: number;
@@ -1049,7 +1238,10 @@ export interface NarrativeReport {
 
 export interface TraceNode {
   id: string;
+  globalSequence?: number;
   step?: number;
+  phase?: string;
+  phaseSequence?: number;
   time?: string;
   kind?: string;
   title: string;
@@ -1063,7 +1255,38 @@ export interface TraceNode {
   scenario?: string;
   seed?: number;
   parentId?: string;
+  sourceLayer?: string;
+  isInterventionDifference?: boolean;
   payload?: Record<string, unknown>;
+}
+
+export interface OrderExecutionSummary {
+  orderId: string;
+  orderTraceId?: string;
+  agentId?: string;
+  side?: string;
+  submissionStep?: number;
+  submissionSequence?: number;
+  timeInForce?: string;
+  limitPriceTicks?: number;
+  limitPrice?: number;
+  requestedQuantity?: number;
+  approvedQuantity?: number;
+  unapprovedQuantity?: number;
+  cumulativeFilledQuantity?: number;
+  remainingQuantity?: number;
+  vwapPriceTicks?: number;
+  vwapPrice?: number;
+  fillCount?: number;
+  tradeIds: string[];
+  tradeTraceIds: string[];
+  riskDecision?: string;
+  finalStatus?: string;
+  terminal?: boolean;
+  closure?: string;
+  scenario?: string;
+  seed?: number;
+  isInterventionDifference?: boolean;
 }
 
 export interface ResultSourceSummary {
@@ -1091,6 +1314,10 @@ export interface ExperimentResults {
   agentFlows: AgentFlowPoint[];
   agentPnl: AgentPnlPoint[];
   traces: TraceNode[];
+  /** 旧版实验结果可能没有聚合订单；新响应由 normalizer 保证返回数组。 */
+  orderExecutionSummary?: OrderExecutionSummary[];
+  /** 由后端语义事实目录稳定排序；前端不得自行重新打分。 */
+  strongestMetricIds?: string[];
   validationStatus?: string;
   primaryMetricId?: string;
   pairedSeries: Record<string, PairedSeedPoint[]>;
@@ -1282,6 +1509,13 @@ export interface CognitionTelemetry {
   cacheHitRate: number;
   fallbackRate: number;
   invalidOutputRate: number;
+  structuredSuccesses: number;
+  structuredSuccessRate: number;
+  structuredSuccessThreshold: number;
+  structuredSuccessGateStatus: string;
+  failureCategoryCounts: Record<string, number>;
+  observationScope: string;
+  observedSince?: string;
 }
 
 export interface SystemMetrics {
@@ -1319,6 +1553,37 @@ export interface SystemMetrics {
     apiP95Milliseconds: number;
     status: string;
   };
+}
+
+export type DeploymentCheckStatus = 'PASS' | 'FAIL' | 'PENDING' | 'UNKNOWN';
+export type DeploymentSyncResult = 'SUCCEEDED' | 'FAILED' | 'PENDING' | 'NOT_RUN' | 'UNKNOWN';
+
+export interface DeploymentRequiredCheck {
+  name: string;
+  status: DeploymentCheckStatus;
+  completedAt?: string;
+}
+
+export interface DeploymentStatus {
+  schemaVersion: string;
+  deployedCommit: string;
+  healthCommit: string;
+  reportedDeployedCommit?: string;
+  githubMainCommit?: string;
+  branch?: string;
+  commitAlignment: string;
+  requiredChecks: DeploymentRequiredCheck[];
+  requiredChecksStatus: DeploymentCheckStatus | 'INCOMPLETE';
+  lastSyncAt?: string;
+  lastSyncResult: DeploymentSyncResult;
+  lastDeployAt?: string;
+  lastFailureAt?: string;
+  lastFailureCode?: string;
+  evidenceObservedAt?: string;
+  statusSource: string;
+  statusFileState: string;
+  statusErrorCode?: string;
+  observedAt: string;
 }
 
 export interface CognitionEvalSummary {
@@ -1415,6 +1680,23 @@ export interface ReleaseGateDefinition {
   failureEffect: string;
 }
 
+export interface ReleaseBlockerSummary {
+  gateId: string;
+  category: string;
+  status: string;
+  owner: string;
+  requiredEvidence: string;
+  evidenceIds: string[];
+  actionTarget: string;
+}
+
+export interface GovernanceUseCaseAxis {
+  axisId: string;
+  label: string;
+  status: string;
+  boundary: string;
+}
+
 export interface ReleaseGateView {
   releaseId: string;
   evaluatedAt?: string;
@@ -1423,6 +1705,9 @@ export interface ReleaseGateView {
   inventoryHash: string;
   humanEvidenceComplete: boolean;
   blockerGateIds: string[];
+  blockerCategoryCounts: Record<string, number>;
+  blockerSummaries: ReleaseBlockerSummary[];
+  useCaseAxes: GovernanceUseCaseAxis[];
   gateResults: ReleaseGateResult[];
   definitions: ReleaseGateDefinition[];
   interpretationBoundary: string;
@@ -1445,9 +1730,11 @@ export interface ApiList<T> {
 }
 
 export interface ClaimReviewInput {
-  status: Exclude<ClaimReviewStatus, 'AI_PROPOSED' | 'FROZEN'>;
+  status: Exclude<ClaimReviewStatus, 'FROZEN'>;
   editedText?: string;
   editedTextZh?: string;
+  editedImpactChannels?: string[];
+  editedImpactChannelRationale?: ClaimImpactChannelRationale[];
 }
 
 export interface BulkClaimApprovalInput {

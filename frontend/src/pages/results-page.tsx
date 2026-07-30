@@ -1,5 +1,5 @@
 import { Button, InlineNotification, Modal, Select, SelectItem, Tag, TextArea } from '@carbon/react';
-import { ArrowRight, Brain, ChartLineUp, Trash, Warning } from '@phosphor-icons/react';
+import { ArrowRight, Brain, ChartLineUp, Copy, Trash, Warning } from '@phosphor-icons/react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bar,
@@ -13,19 +13,39 @@ import {
   Tooltip,
   XAxis,
   YAxis,
+  type TooltipContentProps,
 } from 'recharts';
 import type { Navigate } from '../app';
-import type { InvalidationReasonCode, MetricResult } from '../api/types';
+import type {
+  InvalidationReasonCode,
+  MetricResult,
+  ScenarioDraft,
+  StoppingRuleResult,
+} from '../api/types';
 import { buildHistogram } from '../api/normalize';
-import { EmptyState, ExplainedLabel, LoadingPanel, Notice, PageHeader, StatusBadge } from '../components/common';
+import {
+  EmptyState,
+  ErrorPanel,
+  ExplainedLabel,
+  LoadingPanel,
+  Notice,
+  PageHeader,
+  StatusBadge,
+} from '../components/common';
 import { ExperimentHistoryDisclosure, experimentHistoryLabel } from '../components/experiment-history';
 import { ResultInterpretationAssistant } from '../components/result-interpretation-assistant';
 import { SimulatedChart } from '../components/simulated-chart';
-import { translateAgentType, translateParameter, translateStatus, useI18n } from '../i18n';
+import { translateParameter, translateStatus, useI18n } from '../i18n';
 import { getPageGuide } from '../page-guidance';
 import { getParameterHelp } from '../parameter-help';
 import { useWorkflow } from '../state/workflow-context';
-import { formatInterval, formatMetricValue, safeDate } from '../utils/format';
+import { traceAgentDisplay } from '../trace-display';
+import {
+  formatInterval,
+  formatMetricValue,
+  isoUtcDate,
+  safeDate,
+} from '../utils/format';
 
 const METRIC_CATALOG = [
   { id: 'maxDrawdownPct', labelKey: 'metric.maxDrawdown' as const },
@@ -68,6 +88,15 @@ const EXTENDED_METRIC_LABELS: Record<string, { en: string; zh: string }> = {
   forcedLiquidationVolume: { en: 'Forced-liquidation volume', zh: '强制平仓量' },
   ledgerRejectedOrders: { en: 'Ledger-rejected orders', zh: '账本拒绝订单数' },
   cognitiveOrderCount: { en: 'Cognition-influenced orders', zh: '认知信号影响订单数' },
+  validCognitionDecisionCount: { en: 'Valid cognition decisions', zh: '有效认知决策数' },
+  cognitionSignalConsumedCount: { en: 'Cognition signals consumed', zh: '已消费认知信号数' },
+  validCognitionSignalConsumedCount: { en: 'Valid cognition signals consumed', zh: '已消费有效认知信号数' },
+  cognitionChangedIntentCount: { en: 'Cognition-changed intents', zh: '认知改变意图数' },
+  cognitionInfluencedOrderCount: { en: 'Cognition-influenced orders', zh: '认知影响订单数' },
+  cognitionRiskBlockedCount: { en: 'Cognition actions blocked by risk', zh: '被风控阻止的认知行动数' },
+  cognitionNoActionCount: { en: 'Cognition no-action decisions', zh: '认知不行动决策数' },
+  cognitionEffectRate: { en: 'Cognition intent-effect rate', zh: '认知意图影响率' },
+  cognitionOrderEffectRate: { en: 'Cognition order-effect rate', zh: '认知订单影响率' },
   benchmarkReturnPct: { en: 'Benchmark return', zh: '基准收益率' },
   abnormalReturnPct: { en: 'Abnormal return', zh: '异常收益率' },
   haltCount: { en: 'Trading halts', zh: '停牌次数' },
@@ -85,21 +114,260 @@ function resultMetricLabel(metric: MetricResult, language: 'en' | 'zh-CN', t: Re
   if (canonical) return t(canonical.labelKey);
   const extended = EXTENDED_METRIC_LABELS[metric.id];
   if (extended) return language === 'zh-CN' ? extended.zh : extended.en;
-  return metric.label.replaceAll('_', ' ');
+  return language === 'zh-CN' ? `其他指标（${metric.id}）` : `Other metric (${metric.id})`;
 }
 
 function metricRows(metrics: MetricResult[]): Array<MetricResult & { labelKey?: (typeof METRIC_CATALOG)[number]['labelKey'] }> {
   const byId = new Map(metrics.map((metric) => [metric.id, metric]));
-  const canonicalRows = METRIC_CATALOG.map((definition) => ({
-    id: definition.id,
-    label: byId.get(definition.id)?.label ?? definition.id,
-    labelKey: definition.labelKey,
-    ...byId.get(definition.id),
-  }));
+  const canonicalRows = METRIC_CATALOG.flatMap((definition) => {
+    const metric = byId.get(definition.id);
+    return metric ? [{ ...metric, labelKey: definition.labelKey }] : [];
+  });
   const extraRows = metrics
     .filter((metric) => !METRIC_CATALOG.some((definition) => definition.id === metric.id))
     .map((metric) => ({ ...metric }));
   return [...canonicalRows, ...extraRows];
+}
+
+function intervalExcludesZero(metric: MetricResult): boolean {
+  const low = metric.bootstrapCiLow ?? metric.ciLow;
+  const high = metric.bootstrapCiHigh ?? metric.ciHigh;
+  return low !== undefined && high !== undefined && (low > 0 || high < 0);
+}
+
+type MetricFilter =
+  | 'all'
+  | 'primary'
+  | 'supported'
+  | 'cognition'
+  | 'microstructure'
+  | 'risk';
+
+const COGNITION_METRIC_IDS = new Set([
+  'beliefDispersion',
+  'cognitiveOrderCount',
+  'validCognitionDecisionCount',
+  'cognitionSignalConsumedCount',
+  'validCognitionSignalConsumedCount',
+  'cognitionChangedIntentCount',
+  'cognitionInfluencedOrderCount',
+  'cognitionRiskBlockedCount',
+  'cognitionNoActionCount',
+  'cognitionEffectRate',
+  'cognitionOrderEffectRate',
+]);
+
+const MICROSTRUCTURE_METRIC_IDS = new Set([
+  'maxSpreadBps',
+  'minDepth',
+  'totalVolume',
+  'orderImbalance',
+  'relativeSpreadBps',
+  'effectiveSpreadBps',
+  'depth10Bps',
+  'depth25Bps',
+  'amihudIlliquidity',
+  'kyleImpactProxy',
+  'orderToTradeRatio',
+  'cancellationRate',
+  'fillRate',
+  'marketOrderShare',
+  'averageQueueTime',
+  'liquidityStressIndex',
+]);
+
+const RISK_METRIC_IDS = new Set([
+  'maxDrawdownPct',
+  'realizedVolatilityPct',
+  'recoverySteps',
+  'returnQuantile05Pct',
+  'returnQuantile01Pct',
+  'expectedShortfallPct',
+  'drawdownDurationSteps',
+  'tailLossProbability',
+  'forcedLiquidations',
+  'forcedLiquidationVolume',
+  'ledgerRejectedOrders',
+  'rejectionRate',
+  'agentPnlDispersionCents',
+  'systemEquityChangeCents',
+  'cascadeScore',
+  'haltCount',
+  'haltedSteps',
+]);
+
+function buildSuggestedScenarioDraft(
+  scenario: ScenarioDraft,
+  suggestion: string,
+  language: 'en' | 'zh-CN',
+): ScenarioDraft {
+  const normalized = suggestion.toLowerCase();
+  const explicitSeedCount = normalized.match(/\b(10|25|50|100)\b/)?.[1];
+  const requestsMoreSeeds = /more (matched )?seeds|larger sample|increase.*pairs|更多.*种子|扩大.*样本|增加到/.test(normalized);
+  const seedCount = explicitSeedCount
+    ? Math.min(Number(explicitSeedCount), 50) as ScenarioDraft['seedCount']
+    : requestsMoreSeeds
+      ? scenario.seedCount === 10 ? 25 : 50
+      : scenario.seedCount;
+  const boundedSuggestion = suggestion.trim().slice(0, 420);
+  return {
+    ...scenario,
+    question: language === 'en'
+      ? `Follow-up experiment draft (not run): ${boundedSuggestion}`
+      : scenario.question,
+    questionZh: language === 'zh-CN'
+      ? `后续实验草稿（尚未运行）：${boundedSuggestion}`
+      : scenario.questionZh,
+    seedCount,
+    stoppingRule: scenario.stoppingRule
+      ? {
+          ...scenario.stoppingRule,
+          minimumPairs: Math.min(scenario.stoppingRule.minimumPairs, seedCount),
+          maximumPairs: seedCount,
+        }
+      : undefined,
+    acknowledgedScenarioNotForecast: false,
+    acknowledgedSyntheticAssumptions: false,
+  };
+}
+
+function narrativeGeneratorLabel(code: string | undefined, isZh: boolean): string {
+  const labels: Record<string, { en: string; zh: string }> = {
+    DETERMINISTIC_TEMPLATE: {
+      en: 'Deterministic result summary',
+      zh: '确定性结果摘要',
+    },
+    VALIDATED_STRUCTURED_MODEL: {
+      en: 'Validated structured-model report',
+      zh: '已校验的结构化模型报告',
+    },
+    UNREPORTED: { en: 'Report source not provided', zh: '未提供报告来源' },
+  };
+  if (!code) return isZh ? '运行清单' : 'Run manifest';
+  const label = labels[code];
+  return label ? isZh ? label.zh : label.en : isZh
+    ? '其他已记录摘要'
+    : 'Other recorded summary';
+}
+
+function resultCodeLabel(
+  code: string | undefined,
+  isZh: boolean,
+  kind: 'stoppingMode' | 'stoppingReason' | 'sensitivity' | 'schedule',
+): string {
+  if (!code) return isZh ? '暂无数据' : 'Not available';
+  const catalogs: Record<typeof kind, Record<string, { en: string; zh: string }>> = {
+    stoppingMode: {
+      FIXED_PAIR_COUNT: { en: 'Fixed matched-pair count', zh: '固定匹配对数' },
+      SEQUENTIAL_PRECISION: { en: 'Sequential precision stopping', zh: '序贯精度停止' },
+    },
+    stoppingReason: {
+      MINIMUM_PAIRS_REACHED: { en: 'Minimum matched-pair threshold', zh: '最少匹配对数阈值' },
+      FIXED_PAIR_COUNT_REACHED: { en: 'Reached the fixed matched-pair count', zh: '已达到固定匹配对数' },
+      TARGET_CI_HALF_WIDTH_REACHED: {
+        en: 'Reached the preregistered interval half-width',
+        zh: '已达到预注册区间半宽',
+      },
+      MAXIMUM_PAIRS_REACHED: { en: 'Reached the maximum matched-pair count', zh: '已达到最大匹配对数' },
+    },
+    sensitivity: {
+      STABLE: { en: 'Stable in evaluated checks', zh: '在已执行检查中稳定' },
+      SENSITIVE: { en: 'Sensitive to evaluated assumptions', zh: '对已评估假设敏感' },
+      NOT_EVALUATED: { en: 'Not evaluated', zh: '未评估' },
+    },
+    schedule: {
+      REPRESENTATIVE_FROZEN_PILOT: {
+        en: 'Frozen representative cognition pilot',
+        zh: '冻结代表性认知试运行',
+      },
+      FIXED_INTERVAL: { en: 'Fixed decision interval', zh: '固定决策间隔' },
+    },
+  };
+  const label = catalogs[kind][code];
+  if (label) return isZh ? label.zh : label.en;
+  return isZh ? `其他状态（${code}）` : `Other status (${code})`;
+}
+
+function stoppingReasonSummary(
+  stoppingRule: StoppingRuleResult | undefined,
+  isZh: boolean,
+): string {
+  if (!stoppingRule) return isZh ? '暂无数据' : 'Not available';
+  const reasons = stoppingRule.reasons.length > 0
+    ? stoppingRule.reasons
+    : [stoppingRule.reason];
+  const presetPairsCompleted = stoppingRule.maximumPairs !== undefined
+    && stoppingRule.completedPairs >= stoppingRule.maximumPairs;
+  if (
+    presetPairsCompleted
+    && reasons.includes('MAXIMUM_PAIRS_REACHED')
+    && reasons.includes('TARGET_CI_HALF_WIDTH_REACHED')
+  ) {
+    return isZh
+      ? `完成预设 ${stoppingRule.maximumPairs} 对；目标区间条件同时满足`
+      : `Completed the preset ${stoppingRule.maximumPairs} pairs; the target interval condition was met at the same time`;
+  }
+  return reasons
+    .map((reason) => resultCodeLabel(reason, isZh, 'stoppingReason'))
+    .join(isZh ? '；' : '; ');
+}
+
+interface PairedChartDatum {
+  seed: number;
+  seedLabel: string;
+  baseline: number;
+  intervention: number;
+  delta: number;
+}
+
+function PairedSeedTooltip({
+  active,
+  payload,
+  language,
+  metric,
+}: TooltipContentProps & {
+  language: 'en' | 'zh-CN';
+  metric?: MetricResult;
+}) {
+  const [copied, setCopied] = useState(false);
+  if (!active || !payload?.length) return null;
+  const datum = payload[0]?.payload as Partial<PairedChartDatum> | undefined;
+  if (
+    !datum
+    || typeof datum.seed !== 'number'
+    || typeof datum.seedLabel !== 'string'
+  ) return null;
+  const copySeed = () => {
+    if (!navigator.clipboard) return;
+    void navigator.clipboard.writeText(String(datum.seed)).then(() => {
+      setCopied(true);
+    }).catch(() => {
+      setCopied(false);
+    });
+  };
+  return (
+    <div className="paired-seed-tooltip">
+      <strong>{datum.seedLabel}</strong>
+      <div>
+        <span>{language === 'zh-CN' ? '完整随机种子' : 'Full seed'}</span>
+        <code>{datum.seed}</code>
+        <Button
+          kind="ghost"
+          size="sm"
+          hasIconOnly
+          renderIcon={Copy}
+          iconDescription={language === 'zh-CN' ? '复制完整随机种子' : 'Copy full seed'}
+          onClick={copySeed}
+        />
+        {copied ? <small>{language === 'zh-CN' ? '已复制' : 'Copied'}</small> : null}
+      </div>
+      <dl>
+        <div><dt>{language === 'zh-CN' ? '基准' : 'Baseline'}</dt><dd>{formatMetricValue(datum.baseline, metric?.unit, language, metric?.id)}</dd></div>
+        <div><dt>{language === 'zh-CN' ? '干预' : 'Intervention'}</dt><dd>{formatMetricValue(datum.intervention, metric?.unit, language, metric?.id)}</dd></div>
+        <div><dt>{language === 'zh-CN' ? '差值' : 'Difference'}</dt><dd>{formatMetricValue(datum.delta, metric?.unit, language, metric?.id)}</dd></div>
+      </dl>
+    </div>
+  );
 }
 
 function ChartEmpty() {
@@ -109,6 +377,7 @@ function ChartEmpty() {
 
 export function ResultsPage({ navigate }: { navigate: Navigate }) {
   const { language, t } = useI18n();
+  const isZh = language === 'zh-CN';
   const explained = (key: string, label: string) => (
     <ExplainedLabel label={label} explanation={getParameterHelp(key, language) ?? (language === 'zh-CN' ? '该指标由当前冻结模型与合成路径计算，仅用于情景间比较。' : 'This metric is computed from the frozen model and synthetic paths for scenario comparison only.')} />
   );
@@ -120,6 +389,7 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
     resultsError,
     loadResults,
     selectExperiment,
+    setScenario,
     invalidateActiveExperiment,
   } = useWorkflow();
   const [pathMetric, setPathMetric] = useState<'price' | 'spread' | 'depth'>('price');
@@ -130,12 +400,46 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
   const [invalidationError, setInvalidationError] = useState<string>();
   const [invalidationBusy, setInvalidationBusy] = useState(false);
   const [historyError, setHistoryError] = useState<string>();
+  const [metricFilter, setMetricFilter] = useState<MetricFilter>('all');
+  const [showAllMetrics, setShowAllMetrics] = useState(false);
   const historyRequestGeneration = useRef(0);
   const metrics = useMemo(() => metricRows(results?.metrics ?? []), [results?.metrics]);
   const primaryMetricId = results?.stoppingRule?.primaryOutcome
     ?? results?.analysisDiagnostics?.preregisteredPrimaryOutcome
     ?? results?.primaryMetricId;
   const primaryMetricUnit = results?.metrics.find((metric) => metric.id === primaryMetricId)?.unit;
+  const strongestFindings = useMemo(() => {
+    const metricsById = new Map(metrics.map((metric) => [metric.id, metric]));
+    return (results?.strongestMetricIds ?? []).flatMap((metricId) => {
+      const metric = metricsById.get(metricId);
+      return metric ? [metric] : [];
+    });
+  }, [metrics, results?.strongestMetricIds]);
+  const filteredMetrics = useMemo(() => {
+    if (metricFilter === 'primary') {
+      return metrics.filter((metric) => metric.id === primaryMetricId);
+    }
+    if (metricFilter === 'supported') return metrics.filter(intervalExcludesZero);
+    if (metricFilter === 'cognition') {
+      return metrics.filter((metric) => COGNITION_METRIC_IDS.has(metric.id));
+    }
+    if (metricFilter === 'microstructure') {
+      return metrics.filter((metric) => MICROSTRUCTURE_METRIC_IDS.has(metric.id));
+    }
+    if (metricFilter === 'risk') {
+      return metrics.filter((metric) => RISK_METRIC_IDS.has(metric.id));
+    }
+    return metrics;
+  }, [metricFilter, metrics, primaryMetricId]);
+  const visibleMetrics = showAllMetrics || metricFilter !== 'all'
+    ? filteredMetrics
+    : filteredMetrics.slice(0, 6);
+
+  const createSuggestedExperimentDraft = (suggestion: string) => {
+    if (!activeExperiment?.scenario) return;
+    setScenario(buildSuggestedScenarioDraft(activeExperiment.scenario, suggestion, language));
+    navigate('scenario');
+  };
 
   const openHistoricalExperiment = async (experimentId: string) => {
     const requestGeneration = ++historyRequestGeneration.current;
@@ -232,7 +536,26 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
       <div className="page">
         <PageHeader title={t('results.title')} subtitle={t('results.subtitle')} />
         {historySelector}
-        {resultsError ? <InlineNotification kind="error" lowContrast hideCloseButton title={t('common.errorTitle')} subtitle={t('common.errorFallback')} /> : null}
+        {resultsError ? (
+          <ErrorPanel
+            detail={resultsError}
+            onRetry={activeExperiment.status === 'COMPLETED'
+              ? () => void loadResults()
+              : undefined}
+            savedState={isZh
+              ? '已有实验及结果状态仍以服务器记录为准；本页没有覆盖任何数据。'
+              : 'Existing experiment and result state remains on the server; this page did not overwrite it.'}
+            costState={isZh
+              ? '加载已完成结果不会产生模型调用费用。'
+              : 'Loading a completed result does not create a model-call charge.'}
+            dataSafety={isZh
+              ? '失败仅影响本次读取，冻结输入、运行记录和已保存结果保持不变。'
+              : 'Only this read failed; frozen inputs, run records, and saved results remain unchanged.'}
+            nextStep={isZh
+              ? '先重试读取；仍失败时携带脱敏追踪号提交 Issue。'
+              : 'Retry the read first; if it still fails, file an issue with the redacted trace ID.'}
+          />
+        ) : null}
         <EmptyState
           title={t('results.pendingTitle')}
           body={t('results.pendingBody')}
@@ -253,6 +576,10 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
   } as const;
   const selectedFields = pathFields[pathMetric];
   const pairedSeries = results.pairedSeries[analysisMetricId] ?? [];
+  const pairedChartData = pairedSeries.map((point, index) => ({
+    ...point,
+    seedLabel: isZh ? `种子 ${index + 1}` : `Seed ${index + 1}`,
+  }));
   const selectedMetric = results.metrics.find((metric) => metric.id === analysisMetricId);
   const distribution = buildHistogram(pairedSeries);
   const overviewQuestion = language === 'zh-CN'
@@ -313,6 +640,51 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
         )}
       />
       {historySelector}
+      {strongestFindings.length > 0 ? (
+        <section className="result-section strongest-findings" aria-labelledby="strongest-findings-heading">
+          <div className="section-heading">
+            <h2 id="strongest-findings-heading">
+              {isZh ? '最强支持结果' : 'Strongest supported findings'}
+            </h2>
+            <p>
+              {isZh
+                ? '在配对差值可用且有效样本数大于 0 的指标中，严格沿用后端事实目录的稳定顺序：预注册主要指标、区间是否跨零、方向一致率、配对差值绝对值和指标 ID；前端不重新打分。这不是现实世界因果强度排名。'
+                : 'Among metrics with an available paired difference and positive valid sample count, this uses the backend fact catalog order exactly: preregistered-primary status, whether the interval crosses zero, directional consistency, absolute paired difference, and a metric-ID tie-breaker. The frontend does not rescore it. This is not a ranking of real-world causal strength.'}
+            </p>
+          </div>
+          <ol>
+            {strongestFindings.map((metric) => (
+              <li key={metric.id}>
+                <div>
+                  <strong>{resultMetricLabel(metric, language, t)}</strong>
+                  {metric.id === primaryMetricId ? (
+                    <Tag type="blue" size="sm">{isZh ? '预注册主要指标' : 'Preregistered primary'}</Tag>
+                  ) : null}
+                  <Tag type={intervalExcludesZero(metric) ? 'green' : 'warm-gray'} size="sm">
+                    {intervalExcludesZero(metric)
+                      ? isZh ? '区间未跨零' : 'Interval excludes zero'
+                      : isZh ? '区间跨零或不可用' : 'Interval crosses zero or unavailable'}
+                  </Tag>
+                </div>
+                <p>
+                  <span>{isZh ? '配对差值中位数' : 'Median paired difference'}</span>
+                  <strong>{formatMetricValue(metric.delta, metric.unit, language, metric.id)}</strong>
+                  <span>{isZh ? '区间' : 'Interval'}</span>
+                  <strong>{formatInterval(
+                    metric.bootstrapCiLow ?? metric.ciLow,
+                    metric.bootstrapCiHigh ?? metric.ciHigh,
+                    metric.unit,
+                    language,
+                    metric.id,
+                  )}</strong>
+                  <span>n</span>
+                  <strong>{metric.n ?? t('common.unavailable')}</strong>
+                </p>
+              </li>
+            ))}
+          </ol>
+        </section>
+      ) : null}
       <section className="result-reading-guide" aria-labelledby="result-reading-guide-heading">
         <h2 id="result-reading-guide-heading">{t('results.readingGuideTitle')}</h2>
         <div className="result-reading-guide__grid">
@@ -382,8 +754,7 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
       <section className="result-narrative" aria-labelledby="result-overview-heading">
         <div>
           <Tag type="cool-gray" size="sm">
-            {results.narrativeReport?.generatedBy.replaceAll('_', ' ')
-              ?? (language === 'zh-CN' ? '运行清单' : 'Run manifest')}
+            {narrativeGeneratorLabel(results.narrativeReport?.generatedBy, isZh)}
           </Tag>
           <h2 id="result-overview-heading">
             {results.narrativeReport
@@ -412,7 +783,7 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
                 : t('common.unavailable')}</dd>
             </div>
             <div><dt>{language === 'zh-CN' ? '有效配对' : 'Valid pairs'}</dt><dd>{results.validSeedCount ?? t('common.unavailable')}</dd></div>
-            <div><dt>{language === 'zh-CN' ? '停止规则' : 'Stopping rule'}</dt><dd>{results.stoppingRule?.reason.replaceAll('_', ' ') ?? t('common.unavailable')}</dd></div>
+            <div><dt>{language === 'zh-CN' ? '停止规则' : 'Stopping rule'}</dt><dd>{stoppingReasonSummary(results.stoppingRule, isZh)}</dd></div>
           </dl>
         </div>
         <aside>
@@ -422,31 +793,54 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
               ? results.narrativeReport.interpretationBoundaryZh ?? results.narrativeReport.interpretationBoundary
               : results.narrativeReport.interpretationBoundary
             : t('results.disclaimer')}</p>
-          <code>{results.narrativeReport?.schemaVersion ?? results.validationStatus ?? 'RESULT_MANIFEST'}</code>
         </aside>
       </section>
 
-      <ResultInterpretationAssistant experimentId={results.experimentId} navigate={navigate} />
+      <ResultInterpretationAssistant
+        experimentId={results.experimentId}
+        navigate={navigate}
+        onCreateExperimentDraft={activeExperiment?.scenario
+          ? createSuggestedExperimentDraft
+          : undefined}
+      />
 
       <section className="result-section" aria-labelledby="metrics-heading">
-        <div className="section-heading">
-          <h2 id="metrics-heading">{t('results.metrics')}</h2>
-          <p>{t('results.metricsHelp')}</p>
+        <div className="section-heading section-heading--with-control">
+          <div>
+            <h2 id="metrics-heading">{t('results.metrics')}</h2>
+            <p>{t('results.metricsHelp')}</p>
+          </div>
+          <Select
+            id="result-metric-filter"
+            labelText={isZh ? '筛选指标' : 'Filter metrics'}
+            value={metricFilter}
+            onChange={(event) => {
+              setMetricFilter(event.target.value as typeof metricFilter);
+              setShowAllMetrics(event.target.value !== 'all');
+            }}
+          >
+            <SelectItem value="all" text={isZh ? '全部指标' : 'All metrics'} />
+            <SelectItem value="primary" text={isZh ? '预注册主要指标' : 'Preregistered primary'} />
+            <SelectItem value="supported" text={isZh ? '区间未跨零的变化' : 'Changes whose interval excludes zero'} />
+            <SelectItem value="cognition" text={isZh ? '认知作用' : 'Cognition effects'} />
+            <SelectItem value="microstructure" text={isZh ? '市场微观结构' : 'Market microstructure'} />
+            <SelectItem value="risk" text={isZh ? '风险与账本' : 'Risk and ledger'} />
+          </Select>
         </div>
         <div className="metric-grid">
-          {metrics.map((metric) => (
+          {visibleMetrics.map((metric) => (
             <article key={metric.id} className="metric-cell">
               <div className="metric-cell__heading">
                 <h3>{explained(metric.id, resultMetricLabel(metric, language, t))}</h3>
                 {metric.stable !== undefined ? <StatusBadge status={metric.stable ? 'VALID' : 'INVALID'} /> : null}
               </div>
               <div className="metric-cell__values">
-                <div><span>{explained('baseline', t('common.baseline'))}</span><strong>{formatMetricValue(metric.baseline, metric.unit, language)}</strong></div>
-                <div><span>{explained('intervention', t('common.intervention'))}</span><strong>{formatMetricValue(metric.intervention, metric.unit, language)}</strong></div>
-                <div className="metric-cell__delta"><span>{explained('delta', t('common.delta'))}</span><strong>{formatMetricValue(metric.delta, metric.unit, language)}</strong></div>
+                <div><span>{explained('baseline', t('common.baseline'))}</span><strong>{formatMetricValue(metric.baseline, metric.unit, language, metric.id)}</strong></div>
+                <div><span>{explained('intervention', t('common.intervention'))}</span><strong>{formatMetricValue(metric.intervention, metric.unit, language, metric.id)}</strong></div>
+                <div className="metric-cell__delta"><span>{explained('delta', isZh ? '配对差值中位数' : 'Median paired difference')}</span><strong>{formatMetricValue(metric.delta, metric.unit, language, metric.id)}</strong></div>
               </div>
               <footer>
-                <span>{explained('interval', t('common.interval'))} {formatInterval(metric.ciLow, metric.ciHigh, metric.unit, language)}</span>
+                <span>{explained('interval', t('common.interval'))} {formatInterval(metric.ciLow, metric.ciHigh, metric.unit, language, metric.id)}</span>
                 <span>{explained('sampleSize', t('common.sampleSize'))} {metric.n ?? t('common.unavailable')}</span>
                 {metric.directionConsistencyRate !== undefined ? <span>{explained('directionConsistency', t('results.consistency'))} {formatMetricValue(metric.directionConsistencyRate, 'ratio', language)}</span> : null}
                 <span>{explained('excludedRuns', language === 'zh-CN' ? '排除运行' : 'Excluded runs')} {metric.excludedRuns ?? 0}</span>
@@ -455,7 +849,7 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
                 <details className="metric-diagnostics">
                   <summary>{language === 'zh-CN' ? '配对统计诊断' : 'Paired statistical diagnostics'}</summary>
                   <dl>
-                    <div><dt>{language === 'zh-CN' ? 'Bootstrap 95% 区间' : 'Bootstrap 95% interval'}</dt><dd>{formatInterval(metric.bootstrapCiLow, metric.bootstrapCiHigh, metric.unit, language)}</dd></div>
+                    <div><dt>{language === 'zh-CN' ? 'Bootstrap 95% 区间' : 'Bootstrap 95% interval'}</dt><dd>{formatInterval(metric.bootstrapCiLow, metric.bootstrapCiHigh, metric.unit, language, metric.id)}</dd></div>
                     <div><dt>{language === 'zh-CN' ? '区间包含零' : 'Interval contains zero'}</dt><dd>{metric.bootstrapContainsZero === undefined ? t('common.unavailable') : metric.bootstrapContainsZero ? language === 'zh-CN' ? '是' : 'Yes' : language === 'zh-CN' ? '否' : 'No'}</dd></div>
                     <div><dt>Cohen's dz</dt><dd>{formatMetricValue(metric.cohensDz, undefined, language)}</dd></div>
                     <div><dt>{language === 'zh-CN' ? '配对秩二列相关' : 'Matched rank-biserial'}</dt><dd>{formatMetricValue(metric.matchedRankBiserial, undefined, language)}</dd></div>
@@ -465,12 +859,29 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
                   </dl>
                 </details>
               ) : null}
-              {metric.sensitivityFlag ? <Tag type={metric.sensitivityFlag === 'STABLE' ? 'green' : 'warm-gray'} size="sm">{metric.sensitivityFlag.replaceAll('_', ' ')}</Tag> : null}
+              {metric.sensitivityFlag ? <Tag type={metric.sensitivityFlag === 'STABLE' ? 'green' : 'warm-gray'} size="sm">{resultCodeLabel(metric.sensitivityFlag, isZh, 'sensitivity')}</Tag> : null}
               {metric.interpretation || metric.interpretationZh ? <p className="metric-cell__interpretation">{language === 'zh-CN' ? metric.interpretationZh ?? metric.interpretation : metric.interpretation}</p> : null}
               {metric.limitation || metric.limitationZh ? <p className="metric-cell__limitation">{language === 'zh-CN' ? metric.limitationZh ?? metric.limitation : metric.limitation}</p> : null}
             </article>
           ))}
         </div>
+        {visibleMetrics.length === 0 ? (
+          <p className="empty-inline">
+            {isZh ? '当前结果没有属于该分组的指标。' : 'This result has no metrics in this group.'}
+          </p>
+        ) : null}
+        {metricFilter === 'all' && !showAllMetrics && filteredMetrics.length > visibleMetrics.length ? (
+          <Button kind="ghost" onClick={() => setShowAllMetrics(true)}>
+            {isZh
+              ? `展开其余 ${filteredMetrics.length - visibleMetrics.length} 项指标`
+              : `Show ${filteredMetrics.length - visibleMetrics.length} more metrics`}
+          </Button>
+        ) : null}
+        {metricFilter === 'all' && showAllMetrics && filteredMetrics.length > 6 ? (
+          <Button kind="ghost" onClick={() => setShowAllMetrics(false)}>
+            {isZh ? '收起到首屏重点指标' : 'Collapse to first-screen metrics'}
+          </Button>
+        ) : null}
       </section>
 
       <div className="chart-grid">
@@ -496,17 +907,50 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
             <SimulatedChart label={t('results.simulatedLabel')}>
               <div className="chart-canvas" role="img" aria-label={`${t('results.simulatedLabel')}: ${t('results.paired')}: ${selectedMetric ? resultMetricLabel(selectedMetric, language, t) : analysisMetricId}`}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={pairedSeries} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
+                  <LineChart data={pairedChartData} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
                     <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
-                    <XAxis dataKey="seed" name={t('chart.seed')} tick={{ fill: 'var(--text-secondary)', fontSize: 12 }} />
+                    <XAxis type="category" dataKey="seedLabel" name={t('chart.seed')} tick={{ fill: 'var(--text-secondary)', fontSize: 12 }} />
                     <YAxis tick={{ fill: 'var(--text-secondary)', fontSize: 12 }} width={52} />
-                    <Tooltip contentStyle={{ background: 'var(--surface-raised)', borderColor: 'var(--border-strong)', color: 'var(--text-primary)' }} />
+                    <Tooltip
+                      content={(tooltipProps) => (
+                        <PairedSeedTooltip
+                          {...tooltipProps}
+                          language={language}
+                          metric={selectedMetric}
+                        />
+                      )}
+                    />
                     <Legend />
                     <Line type="monotone" dataKey="baseline" name={t('chart.baseline')} stroke="var(--chart-baseline)" strokeWidth={2} strokeDasharray="7 5" dot={{ r: 3 }} isAnimationActive={false} />
                     <Line type="monotone" dataKey="intervention" name={t('chart.intervention')} stroke="var(--accent)" strokeWidth={2} strokeDasharray="2 4" dot={{ r: 3 }} isAnimationActive={false} />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
+              <details className="chart-seed-key">
+                <summary>{isZh ? '查看短标签对应的完整随机种子' : 'View full seeds for short labels'}</summary>
+                <ol>
+                  {pairedChartData.map((point) => (
+                    <li key={point.seed}>
+                      <strong>{point.seedLabel}</strong>
+                      <code>{point.seed}</code>
+                      <Button
+                        kind="ghost"
+                        size="sm"
+                        hasIconOnly
+                        renderIcon={Copy}
+                        iconDescription={isZh
+                          ? `复制${point.seedLabel}的完整随机种子`
+                          : `Copy the full value for ${point.seedLabel}`}
+                        onClick={() => {
+                          if (navigator.clipboard) {
+                            void navigator.clipboard.writeText(String(point.seed));
+                          }
+                        }}
+                      />
+                    </li>
+                  ))}
+                </ol>
+              </details>
             </SimulatedChart>
           )}
         </section>
@@ -580,7 +1024,7 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
                   <BarChart data={results.agentFlows} layout="vertical" margin={{ top: 8, right: 16, left: 18, bottom: 8 }}>
                     <CartesianGrid stroke="var(--chart-grid)" horizontal={false} />
                     <XAxis type="number" tick={{ fill: 'var(--text-secondary)', fontSize: 12 }} />
-                    <YAxis type="category" dataKey="agentType" tickFormatter={(value: string) => translateAgentType(value, t)} tick={{ fill: 'var(--text-secondary)', fontSize: 12 }} width={110} />
+                    <YAxis type="category" dataKey="agentType" tickFormatter={(value: string) => traceAgentDisplay(value, language).name} tick={{ fill: 'var(--text-secondary)', fontSize: 12 }} width={110} />
                     <Tooltip contentStyle={{ background: 'var(--surface-raised)', borderColor: 'var(--border-strong)', color: 'var(--text-primary)' }} />
                     <ReferenceLine x={0} stroke="var(--border-strong)" />
                     <Bar dataKey="delta" name={t('chart.delta')} fill="var(--accent)" radius={[0, 2, 2, 0]} isAnimationActive={false} />
@@ -599,12 +1043,37 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
             <div><dt>{t('common.baseline')}</dt><dd>{activeExperiment.intervention?.baselineValue ?? results.scenarioDiff?.baselineValue ?? t('common.unavailable')}</dd></div>
             <div><dt>{t('common.intervention')}</dt><dd>{activeExperiment.intervention?.interventionValue ?? results.scenarioDiff?.interventionValue ?? t('common.unavailable')}</dd></div>
             <div><dt>{t('runs.validSeeds')}</dt><dd>{results.validSeedCount ?? t('common.unavailable')}</dd></div>
-            <div><dt>{language === 'zh-CN' ? '停止模式' : 'Stopping mode'}</dt><dd>{results.stoppingRule?.mode?.replaceAll('_', ' ') ?? t('common.unavailable')}</dd></div>
-            <div><dt>{language === 'zh-CN' ? '停止原因' : 'Stopping reason'}</dt><dd>{results.stoppingRule?.reason.replaceAll('_', ' ') ?? t('common.unavailable')}</dd></div>
+            <div><dt>{language === 'zh-CN' ? '停止模式' : 'Stopping mode'}</dt><dd>{resultCodeLabel(results.stoppingRule?.mode, isZh, 'stoppingMode')}</dd></div>
+            <div><dt>{language === 'zh-CN' ? '停止原因' : 'Stopping reason'}</dt><dd>{stoppingReasonSummary(results.stoppingRule, isZh)}</dd></div>
             <div><dt>{language === 'zh-CN' ? '完成配对' : 'Completed pairs'}</dt><dd>{results.stoppingRule?.completedPairs ?? results.validSeedCount ?? t('common.unavailable')}</dd></div>
             <div><dt>{language === 'zh-CN' ? '观察区间半宽' : 'Observed interval half-width'}</dt><dd>{formatMetricValue(results.stoppingRule?.observedCiHalfWidth, primaryMetricUnit, language)}</dd></div>
             <div><dt>{language === 'zh-CN' ? '目标区间半宽' : 'Target interval half-width'}</dt><dd>{formatMetricValue(results.stoppingRule?.targetCiHalfWidth, primaryMetricUnit, language)}</dd></div>
           </dl>
+          {results.stoppingRule?.conditionEvaluations.length ? (
+            <details className="metric-diagnostics">
+              <summary>{isZh ? '停止条件判定顺序' : 'Stopping-condition evaluation order'}</summary>
+              <ol>
+                {[...results.stoppingRule.conditionEvaluations]
+                  .sort((left, right) => left.evaluationOrder - right.evaluationOrder)
+                  .map((condition) => (
+                    <li key={condition.code}>
+                      <span>{condition.evaluationOrder}. {resultCodeLabel(
+                        condition.code,
+                        isZh,
+                        'stoppingReason',
+                      )}</span>
+                      <strong>{condition.satisfied
+                        ? condition.firstSatisfiedAtPair !== undefined
+                          ? isZh
+                            ? `第 ${condition.firstSatisfiedAtPair} 对满足`
+                            : `Met at pair ${condition.firstSatisfiedAtPair}`
+                          : isZh ? '已满足' : 'Met'
+                        : isZh ? '未满足' : 'Not met'}</strong>
+                    </li>
+                  ))}
+              </ol>
+            </details>
+          ) : null}
           <Button
             kind="tertiary"
             renderIcon={ArrowRight}
@@ -626,8 +1095,8 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
         {results.agentPnl.length > 0 ? (
           <div className="result-table-wrap">
             <table className="result-table">
-              <thead><tr><th>{language === 'zh-CN' ? '智能体类型' : 'Agent type'}</th><th>{t('common.baseline')}</th><th>{t('common.intervention')}</th><th>{t('common.delta')}</th><th>{language === 'zh-CN' ? '有效配对' : 'Valid pairs'}</th><th>{language === 'zh-CN' ? '方向一致率' : 'Direction consistency'}</th></tr></thead>
-              <tbody>{results.agentPnl.map((row) => <tr key={row.agentType}><td>{translateAgentType(row.agentType, t)}</td><td>{formatCents(row.baselineEquityChangeCents, language)}</td><td>{formatCents(row.interventionEquityChangeCents, language)}</td><td>{formatCents(row.deltaEquityChangeCents, language)}</td><td>{row.validN ?? t('common.unavailable')}</td><td>{formatMetricValue(row.directionConsistencyRate, 'ratio', language)}</td></tr>)}</tbody>
+              <thead><tr><th>{language === 'zh-CN' ? '智能体类型' : 'Agent type'}</th><th>{t('common.baseline')}</th><th>{t('common.intervention')}</th><th>{isZh ? '配对差值中位数' : 'Median paired difference'}</th><th>{language === 'zh-CN' ? '有效配对' : 'Valid pairs'}</th><th>{language === 'zh-CN' ? '方向一致率' : 'Direction consistency'}</th></tr></thead>
+              <tbody>{results.agentPnl.map((row) => <tr key={row.agentType}><td title={traceAgentDisplay(row.agentType, language).description}>{traceAgentDisplay(row.agentType, language).name}</td><td>{formatCents(row.baselineEquityChangeCents, language)}</td><td>{formatCents(row.interventionEquityChangeCents, language)}</td><td>{formatCents(row.deltaEquityChangeCents, language)}</td><td>{row.validN ?? t('common.unavailable')}</td><td>{formatMetricValue(row.directionConsistencyRate, 'ratio', language)}</td></tr>)}</tbody>
             </table>
           </div>
         ) : <p className="empty-inline">{language === 'zh-CN' ? '本次结果没有按类型汇总的账本损益。' : 'This result does not contain ledger P&L aggregated by agent type.'}</p>}
@@ -654,7 +1123,7 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
                 {results.cognition.costBudget ? <div><dt>{language === 'zh-CN' ? '剩余硬预算' : 'Remaining hard budget'}</dt><dd>${results.cognition.costBudget.remainingUsd.toFixed(6)} USD</dd></div> : null}
                 {results.cognition.costBudget ? <div><dt>{language === 'zh-CN' ? '已结算 / 已阻止调用' : 'Settled / blocked calls'}</dt><dd>{results.cognition.costBudget.settledCalls} / {results.cognition.costBudget.blockedCalls}</dd></div> : null}
                 <div><dt>{language === 'zh-CN' ? '回退次数' : 'Fallback count'}</dt><dd>{results.cognition.fallbackCount}</dd></div>
-                <div><dt>{language === 'zh-CN' ? '决策调度' : 'Decision schedule'}</dt><dd>{results.cognition.decisionScheduleMode?.replaceAll('_', ' ') ?? t('common.unavailable')}</dd></div>
+                <div><dt>{language === 'zh-CN' ? '决策调度' : 'Decision schedule'}</dt><dd>{resultCodeLabel(results.cognition.decisionScheduleMode, isZh, 'schedule')}</dd></div>
                 <div><dt>{language === 'zh-CN' ? '提示词版本' : 'Prompt version'}</dt><dd><code>{results.cognition.promptVersion ?? t('common.unavailable')}</code></dd></div>
                 <div><dt>{language === 'zh-CN' ? '输出契约' : 'Output contract'}</dt><dd><code>{results.cognition.promptSchemaVersion ?? t('common.unavailable')}</code></dd></div>
               </dl>
@@ -802,8 +1271,24 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
           {results.sourceSummary?.title ? (
             <div><dt>{language === 'zh-CN' ? '事件包名称' : 'Event Pack title'}</dt><dd>{language === 'zh-CN' ? results.sourceSummary.titleZh ?? results.sourceSummary.title : results.sourceSummary.title}</dd></div>
           ) : null}
-          <div><dt>{language === 'zh-CN' ? '结果生成时间' : 'Generated at'}</dt><dd>{safeDate(results.generatedAt, language)}</dd></div>
+          <div>
+            <dt>{language === 'zh-CN' ? '结果生成时间' : 'Generated at'}</dt>
+            <dd>
+              {safeDate(results.generatedAt, language)}
+              <details>
+                <summary>{language === 'zh-CN' ? 'UTC 技术时间' : 'Technical UTC timestamp'}</summary>
+                <code>{isoUtcDate(results.generatedAt, language)}</code>
+              </details>
+            </dd>
+          </div>
           <div><dt>{language === 'zh-CN' ? '有效配对' : 'Valid pairs'}</dt><dd>{results.validSeedCount ?? t('common.unavailable')}</dd></div>
+          {results.narrativeReport ? (
+            <>
+              <div><dt>{language === 'zh-CN' ? '摘要类型' : 'Summary type'}</dt><dd>{narrativeGeneratorLabel(results.narrativeReport.generatedBy, isZh)}</dd></div>
+              <div><dt>{language === 'zh-CN' ? '摘要生成器 ID' : 'Summary generator ID'}</dt><dd><code>{results.narrativeReport.generatedBy}</code></dd></div>
+              <div><dt>{language === 'zh-CN' ? '摘要 Schema 版本' : 'Summary schema version'}</dt><dd><code>{results.narrativeReport.schemaVersion}</code></dd></div>
+            </>
+          ) : null}
           {results.sourceSummary ? (
             <div><dt>{language === 'zh-CN' ? '已冻结证据' : 'Frozen evidence'}</dt><dd>{results.sourceSummary.sourceCount} {language === 'zh-CN' ? '个来源' : 'sources'} / {results.sourceSummary.claimCount} {language === 'zh-CN' ? '项主张' : 'claims'}</dd></div>
           ) : null}

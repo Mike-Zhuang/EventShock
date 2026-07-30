@@ -23,8 +23,26 @@ const EVENT_PACK: EventPack = {
   limitationsZh: [],
   sources: [{ id: 'source-one', title: 'Official source', sourceType: 'OFFICIAL' }],
   claims: [
-    { id: 'claim-one', text: 'First candidate claim for review.', status: 'AI_PROPOSED' },
-    { id: 'claim-two', text: 'Second candidate claim for review.', status: 'AI_PROPOSED' },
+    {
+      id: 'claim-one',
+      text: 'First candidate claim for review.',
+      status: 'AI_PROPOSED',
+      sourceIds: ['source-one'],
+      sourceTier: 'OFFICIAL',
+      confidence: 0.91,
+      impactChannels: ['belief'],
+      bulkApprovalEligible: true,
+    },
+    {
+      id: 'claim-two',
+      text: 'Second candidate claim for review.',
+      status: 'AI_PROPOSED',
+      sourceIds: ['source-one'],
+      sourceTier: 'OFFICIAL',
+      confidence: 0.88,
+      impactChannels: ['liquidity'],
+      bulkApprovalEligible: true,
+    },
     { id: 'claim-edited', text: 'Already edited claim.', status: 'EDITED' },
   ],
 };
@@ -54,7 +72,7 @@ describe('Event Pack 批量审核警告', () => {
     const user = userEvent.setup();
     render(<I18nProvider><EventPackPage navigate={vi.fn()} /></I18nProvider>);
 
-    await user.click(screen.getByRole('button', { name: 'Approve all pending (2)' }));
+    await user.click(screen.getByRole('button', { name: 'Approve eligible (2)' }));
 
     expect(approveAllPendingClaims).not.toHaveBeenCalled();
     expect(screen.getByText('This does not replace source verification')).toBeInTheDocument();
@@ -67,5 +85,43 @@ describe('Event Pack 批量审核警告', () => {
       expectedClaimIds: ['claim-one', 'claim-two'],
       rationale: 'User acknowledged the bulk-approval warning in the Event Pack review interface.',
     });
+  });
+
+  it('规则回退候选禁用批量批准，并在审核工具栏提供重新抽取入口', () => {
+    vi.mocked(useWorkflow).mockReturnValue({
+      eventPack: {
+        ...EVENT_PACK,
+        editableExtraction: true,
+        extractionMode: 'RULE_FALLBACK_NO_LLM_CONFIG',
+        claims: [
+          {
+            ...EVENT_PACK.claims[0],
+            impactChannels: ['belief', 'informationLatency'],
+            bulkApprovalEligible: false,
+          },
+          {
+            ...EVENT_PACK.claims[1],
+            bulkApprovalEligible: false,
+          },
+          ...EVENT_PACK.claims.slice(2),
+        ],
+      },
+      eventPackState: 'success',
+      eventPackError: undefined,
+      claimBusyId: undefined,
+      reviewClaim: vi.fn(async () => undefined),
+      approveAllPendingClaims,
+      freezeEventPack: vi.fn(async () => undefined),
+    } as unknown as ReturnType<typeof useWorkflow>);
+
+    render(<I18nProvider><EventPackPage navigate={vi.fn()} /></I18nProvider>);
+
+    expect(screen.getByText('Rule-fallback candidates require individual review'))
+      .toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Approve eligible (0)' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Re-extract candidates' })).toBeInTheDocument();
+    expect(screen.getAllByText('Belief update').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Information latency').length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/How delayed availability may change/).length).toBeGreaterThan(0);
   });
 });

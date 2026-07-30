@@ -23,9 +23,48 @@ import type {
   ScenarioDraft,
   ScenarioValidation,
 } from '../api/types';
+import { downloadFilename } from '../utils/format';
 
 export type RequestState = 'idle' | 'loading' | 'success' | 'error';
 export type ApiConnectionState = 'checking' | 'online' | 'offline';
+
+export type ScenarioValidationOrigin =
+  | {
+      kind: 'saved';
+      scenarioId: string;
+      scenarioName: string;
+      contentHash: string;
+    }
+  | { kind: 'unsaved-draft' };
+
+export type ScenarioValidationBinding = ScenarioValidationOrigin & {
+  draftDigest: string;
+};
+
+function canonicalizeScenarioValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeScenarioValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, canonicalizeScenarioValue(item)]),
+  );
+}
+
+export function scenarioContentSignature(scenario: ScenarioDraft): string {
+  return JSON.stringify(canonicalizeScenarioValue(scenario));
+}
+
+export function scenarioContentDigest(scenario: ScenarioDraft): string {
+  const signature = scenarioContentSignature(scenario);
+  let hash = 2_166_136_261;
+  for (let index = 0; index < signature.length; index += 1) {
+    hash ^= signature.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return `draft-${(hash >>> 0).toString(16).padStart(8, '0')}`;
+}
 
 const DEFAULT_SCENARIO: ScenarioDraft = {
   eventPackId: '',
@@ -109,6 +148,7 @@ interface WorkflowContextValue {
   claimBusyId?: string;
   scenario: ScenarioDraft;
   validation?: ScenarioValidation;
+  validationBinding?: ScenarioValidationBinding;
   validationState: RequestState;
   validationError?: string;
   experiments: Experiment[];
@@ -132,12 +172,13 @@ interface WorkflowContextValue {
   approveAllPendingClaims: (input: BulkClaimApprovalInput) => Promise<void>;
   freezeEventPack: () => Promise<void>;
   setScenario: (scenario: ScenarioDraft) => void;
-  validateScenario: () => Promise<ScenarioValidation>;
+  validateScenario: (origin?: ScenarioValidationOrigin) => Promise<ScenarioValidation>;
   refreshExperiments: () => Promise<void>;
   selectExperiment: (experimentId: string) => Promise<Experiment | undefined>;
   cancelPendingExperimentRequests: () => void;
-  createAndStartExperiment: () => Promise<Experiment>;
+  createAndStartExperiment: (scenarioOverride?: ScenarioDraft) => Promise<Experiment>;
   cancelActiveExperiment: () => Promise<void>;
+  continueActiveCognitionWithRules: () => Promise<void>;
   invalidateActiveExperiment: (reasonCode: InvalidationReasonCode, reason: string) => Promise<void>;
   loadResults: (experimentId?: string) => Promise<ExperimentResults | undefined>;
   exportExperiment: (experimentId: string) => Promise<void>;
@@ -168,6 +209,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   const [claimBusyId, setClaimBusyId] = useState<string>();
   const [scenario, setScenarioState] = useState<ScenarioDraft>(DEFAULT_SCENARIO);
   const [validation, setValidation] = useState<ScenarioValidation>();
+  const [validationBinding, setValidationBinding] = useState<ScenarioValidationBinding>();
   const [validationState, setValidationState] = useState<RequestState>('idle');
   const [validationError, setValidationError] = useState<string>();
   const [experiments, setExperiments] = useState<Experiment[]>([]);
@@ -182,6 +224,15 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   const activeExperimentIdRef = useRef<string | undefined>(undefined);
   const pollTimer = useRef<number | undefined>(undefined);
   const streamAbortController = useRef<AbortController | null>(null);
+  const validationGeneration = useRef(0);
+
+  const clearScenarioValidation = useCallback(() => {
+    validationGeneration.current += 1;
+    setValidation(undefined);
+    setValidationBinding(undefined);
+    setValidationError(undefined);
+    setValidationState('idle');
+  }, []);
 
   const checkHealth = useCallback(async () => {
     setApiConnection('checking');
@@ -286,7 +337,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     resultsRequestGeneration.current += 1;
     setSelectedCase(caseItem);
     setEventPack(undefined);
-    setValidation(undefined);
+    clearScenarioValidation();
     setResults(undefined);
     setResultsState('idle');
     setResultsError(undefined);
@@ -308,7 +359,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       setEventPackState('error');
       setEventPackError(errorMessage(error));
     }
-  }, []);
+  }, [clearScenarioValidation]);
 
   const reviewClaim = useCallback(async (claimId: string, input: ClaimReviewInput) => {
     if (!eventPack) return;
@@ -317,13 +368,14 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     try {
       const nextPack = await api.reviewClaim(eventPack.id, claimId, input);
       setEventPack(nextPack);
+      clearScenarioValidation();
     } catch (error) {
       setEventPackError(errorMessage(error));
       throw error;
     } finally {
       setClaimBusyId(undefined);
     }
-  }, [eventPack]);
+  }, [clearScenarioValidation, eventPack]);
 
   const approveAllPendingClaims = useCallback(async (input: BulkClaimApprovalInput) => {
     if (!eventPack) return;
@@ -332,13 +384,14 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     try {
       const nextPack = await api.approveAllClaims(eventPack.id, input);
       setEventPack(nextPack);
+      clearScenarioValidation();
     } catch (error) {
       setEventPackError(errorMessage(error));
       throw error;
     } finally {
       setClaimBusyId(undefined);
     }
-  }, [eventPack]);
+  }, [clearScenarioValidation, eventPack]);
 
   const createEventPack = useCallback(async (input: EventPackCreateInput) => {
     setEventPackState('loading');
@@ -359,6 +412,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         ...(nextPack.defaultExperiment ?? DEFAULT_SCENARIO),
         eventPackId: nextPack.id,
       }));
+      clearScenarioValidation();
       setEventPackState('success');
       await refreshCases();
       return nextPack;
@@ -367,7 +421,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       setEventPackError(errorMessage(createError));
       throw createError;
     }
-  }, [refreshCases]);
+  }, [clearScenarioValidation, refreshCases]);
 
   const reextractEventPack = useCallback(async (
     sources: EventSourceUpload[],
@@ -387,6 +441,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         acknowledgedContentReview,
       );
       setEventPack(nextPack);
+      clearScenarioValidation();
       setEventPackState('success');
       return nextPack;
     } catch (extractError) {
@@ -394,7 +449,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       setEventPackError(errorMessage(extractError));
       throw extractError;
     }
-  }, [eventPack]);
+  }, [clearScenarioValidation, eventPack]);
 
   const freezeEventPack = useCallback(async () => {
     if (!eventPack) return;
@@ -403,32 +458,43 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     try {
       const nextPack = await api.freezeEventPack(eventPack.id);
       setEventPack(nextPack);
+      clearScenarioValidation();
       setEventPackState('success');
     } catch (error) {
       setEventPackState('error');
       setEventPackError(errorMessage(error));
       throw error;
     }
-  }, [eventPack]);
+  }, [clearScenarioValidation, eventPack]);
 
   const setScenario = useCallback((nextScenario: ScenarioDraft) => {
     setScenarioState(nextScenario);
-    setValidation(undefined);
-    setValidationError(undefined);
-    setValidationState('idle');
-  }, []);
+    clearScenarioValidation();
+  }, [clearScenarioValidation]);
 
-  const validateScenario = useCallback(async () => {
+  const validateScenario = useCallback(async (
+    origin: ScenarioValidationOrigin = { kind: 'unsaved-draft' },
+  ) => {
+    const requestGeneration = ++validationGeneration.current;
+    const draftDigest = scenarioContentDigest(scenario);
+    setValidation(undefined);
+    setValidationBinding(undefined);
     setValidationState('loading');
     setValidationError(undefined);
     try {
       const nextValidation = await api.validateScenario(scenario);
+      if (requestGeneration !== validationGeneration.current) {
+        throw new Error('Scenario changed while validation was in progress.');
+      }
       setValidation(nextValidation);
+      setValidationBinding({ ...origin, draftDigest });
       setValidationState('success');
       return nextValidation;
     } catch (error) {
-      setValidationState('error');
-      setValidationError(errorMessage(error));
+      if (requestGeneration === validationGeneration.current) {
+        setValidationState('error');
+        setValidationError(errorMessage(error));
+      }
       throw error;
     }
   }, [scenario]);
@@ -460,11 +526,14 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     setResultsState((current) => current === 'loading' ? 'idle' : current);
   }, []);
 
-  const createAndStartExperiment = useCallback(async () => {
+  const createAndStartExperiment = useCallback(async (scenarioOverride?: ScenarioDraft) => {
     setExperimentsState('loading');
     setExperimentsError(undefined);
     try {
-      const created = await api.createExperiment(scenario);
+      const effectiveScenario = scenarioOverride
+        ? withScenarioDefaults(scenarioOverride)
+        : scenario;
+      const created = await api.createExperiment(effectiveScenario);
       const started = await api.startExperiment(created.id);
       // 新实验成为活动实验时，必须同时让旧选择与旧结果请求失效，避免把上一场实验的
       // 结果短暂或永久显示在新实验上下文中。
@@ -476,6 +545,12 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       setResults(undefined);
       setResultsState('idle');
       setResultsError(undefined);
+      if (scenarioOverride) {
+        // 显式规则降级必须同步回当前草稿，避免启动后的界面仍把本次实验标成
+        // HYBRID_LLM。后端会再次校验同一份 effectiveScenario。
+        setScenarioState(effectiveScenario);
+        clearScenarioValidation();
+      }
       setExperimentsState('success');
       return started;
     } catch (error) {
@@ -483,7 +558,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       setExperimentsError(errorMessage(error));
       throw error;
     }
-  }, [scenario]);
+  }, [clearScenarioValidation, scenario]);
 
   const cancelActiveExperiment = useCallback(async () => {
     if (!activeExperiment) return;
@@ -491,6 +566,18 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       const cancelled = await api.cancelExperiment(activeExperiment.id);
       setActiveExperiment(cancelled);
       setExperiments((current) => upsertExperiment(current, cancelled));
+    } catch (error) {
+      setExperimentsError(errorMessage(error));
+      throw error;
+    }
+  }, [activeExperiment]);
+
+  const continueActiveCognitionWithRules = useCallback(async () => {
+    if (!activeExperiment) return;
+    try {
+      const updated = await api.continueCognitionWithRules(activeExperiment.id);
+      setActiveExperiment(updated);
+      setExperiments((current) => upsertExperiment(current, updated));
     } catch (error) {
       setExperimentsError(errorMessage(error));
       throw error;
@@ -550,7 +637,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     const objectUrl = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = objectUrl;
-    link.download = `eventshock-${experimentId}.zip`;
+    link.download = downloadFilename(experimentId);
     document.body.append(link);
     link.click();
     link.remove();
@@ -571,6 +658,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     approveAllPendingClaims,
     scenario,
     validation,
+    validationBinding,
     validationState,
     validationError,
     experiments,
@@ -594,6 +682,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     cancelPendingExperimentRequests,
     createAndStartExperiment,
     cancelActiveExperiment,
+    continueActiveCognitionWithRules,
     invalidateActiveExperiment,
     loadResults,
     exportExperiment,
@@ -627,6 +716,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     selectExperiment,
     setScenario,
     validation,
+    validationBinding,
     validationError,
     validationState,
     validateScenario,
@@ -634,6 +724,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     experimentsError,
     experimentsState,
     cancelActiveExperiment,
+    continueActiveCognitionWithRules,
     cancelPendingExperimentRequests,
     invalidateActiveExperiment,
   ]);

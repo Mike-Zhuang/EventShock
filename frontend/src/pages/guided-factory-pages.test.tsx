@@ -1,8 +1,12 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, ApiError } from '../api/client';
-import type { EventPackFactorySnapshot, GuidedWorkflow } from '../api/types';
+import type {
+  EventPackFactorySnapshot,
+  GuidedTurnOperation,
+  GuidedWorkflow,
+} from '../api/types';
 import {
   readFactoryGuidedHandoff,
   synchronizeGuidedHandoffOwner,
@@ -13,6 +17,10 @@ import { EventPackFactoryPage } from './event-pack-factory-page';
 import { GuidedWorkflowPage } from './guided-workflow-page';
 
 const selectCase = vi.fn();
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 vi.mock('../state/workflow-context', () => ({
   useWorkflow: () => ({
@@ -44,6 +52,8 @@ vi.mock('../api/client', () => ({
     searchFactorySources: vi.fn(),
     addFactoryReaderSource: vi.fn(),
     reviewFactorySource: vi.fn(),
+    setFactorySourceIncluded: vi.fn(),
+    permanentlyDeleteFactorySourceText: vi.fn(),
     materializeFactoryBuild: vi.fn(),
     getFactorySourceRawText: vi.fn(),
     updateFactorySourceRawText: vi.fn(),
@@ -54,6 +64,9 @@ vi.mock('../api/client', () => ({
     applyGuidedProposal: vi.fn(),
     advanceGuidedWorkflow: vi.fn(),
     linkGuidedWorkflowArtifacts: vi.fn(),
+    getGuidedTurnOperations: vi.fn(),
+    recoverGuidedTurn: vi.fn(),
+    archiveGuidedWorkflow: vi.fn(),
     getEventPack: vi.fn(),
     getScenario: vi.fn(),
   },
@@ -76,7 +89,10 @@ const snapshot: EventPackFactorySnapshot = {
     kind: 'SEARCH_RESULT',
     evidenceRole: 'DISCOVERY_ONLY',
     reviewStatus: 'APPROVED',
+    selectionStatus: 'INCLUDED',
     securityDecision: 'ALLOW',
+    sourceReviewLabel: 'HOST_NOT_ALLOWLISTED',
+    securityFindings: [],
     title: 'Official index notice',
     publisher: 'Example Exchange',
     url: 'https://example.com/notice',
@@ -138,6 +154,26 @@ const guidedWorkflow: GuidedWorkflow = {
   updatedAt: '2026-07-22T10:01:00Z',
 };
 
+const unknownGuidedOperation: GuidedTurnOperation = {
+  schemaVersion: '1.0.0',
+  workflowId: guidedWorkflow.id,
+  clientRequestId: 'guided-request-unknown',
+  expectedVersion: guidedWorkflow.version,
+  status: 'UNKNOWN',
+  errorCode: 'MODEL_RESPONSE_INVALID',
+  requestMessage: 'Use the official filing cutoff.',
+  language: 'en',
+  cachedProposalAvailable: true,
+  recoveryOptions: ['RETRY_CACHED_COMMIT', 'ABANDON_AND_AUTHORIZE_RETRY'],
+  providerRequestId: 'guided-provider-request',
+  httpResponseReceived: true,
+  usageReceived: true,
+  parseCompleted: true,
+  failureStage: 'DATABASE_COMMIT_PENDING',
+  createdAt: '2026-07-22T10:01:00Z',
+  updatedAt: '2026-07-22T10:02:00Z',
+};
+
 describe('Event Pack Factory page', () => {
   beforeEach(() => {
     window.localStorage.clear();
@@ -175,7 +211,7 @@ describe('Event Pack Factory page', () => {
     expect(screen.getByText(/Full raw text is staged on the server for seven days/)).toBeInTheDocument();
     expect(screen.getByText('Discovery only, not evidence')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Read full page into evidence' })).toBeInTheDocument();
-    expect(screen.getByText(/Reader pricing has not been verified/)).toBeInTheDocument();
+    expect(screen.getByText(/Reader pricing is also unverified/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Delete build and raw text' })).toBeInTheDocument();
     const materialize = screen.getByRole('button', {
       name: 'Generate and open human claim review',
@@ -193,6 +229,40 @@ describe('Event Pack Factory page', () => {
     await waitFor(() => expect(screen.getByRole('heading', {
       name: '3. Review every source',
     })).toHaveFocus());
+  });
+
+  it('treats discovery approval as retrieval permission and keeps exclusion reversible', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getFactoryBuild).mockResolvedValue({
+      ...snapshot,
+      sources: [{ ...snapshot.sources[0], reviewStatus: 'PENDING' }],
+    });
+    vi.mocked(api.setFactorySourceIncluded).mockResolvedValue({
+      build: { ...snapshot.build, revision: snapshot.build.revision + 1 },
+      sources: [],
+      idempotencyReplayed: false,
+    });
+
+    render(
+      <I18nProvider>
+        <EventPackFactoryPage navigate={vi.fn()} />
+      </I18nProvider>,
+    );
+
+    expect(await screen.findByRole('button', { name: 'Allow full-text retrieval' }))
+      .toBeInTheDocument();
+    expect(screen.getByText('Belief update')).toBeInTheDocument();
+    expect(screen.getByText(/change simulated agents’ assessed direction/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Exclude from current evidence set' }));
+    await waitFor(() => expect(api.setFactorySourceIncluded).toHaveBeenCalledWith(
+      snapshot.build.id,
+      snapshot.sources[0].id,
+      snapshot.build.revision,
+      false,
+    ));
+    expect(api.reviewFactorySource).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Permanently delete raw text' })).toBeDisabled();
   });
 
   it('keeps Reader request IDs within the backend schema limit', async () => {
@@ -288,7 +358,10 @@ describe('Event Pack Factory page', () => {
           kind: 'READER',
           evidenceRole: 'EVIDENCE',
           reviewStatus: 'PENDING',
+          selectionStatus: 'INCLUDED',
           securityDecision: 'ALLOW',
+          sourceReviewLabel: 'HOST_NOT_ALLOWLISTED',
+          securityFindings: [],
           title: 'Official index notice',
           publisher: 'Example Exchange',
           url: 'https://example.com/notice',
@@ -492,6 +565,7 @@ describe('guided workflow page', () => {
     synchronizeGuidedHandoffOwner('guided-user-0001');
     vi.mocked(api.getGuidedWorkflows).mockResolvedValue([guidedWorkflow]);
     vi.mocked(api.getGuidedWorkflow).mockResolvedValue(guidedWorkflow);
+    vi.mocked(api.getGuidedTurnOperations).mockResolvedValue([]);
     vi.mocked(api.applyGuidedProposal).mockResolvedValue({
       ...guidedWorkflow,
       version: 3,
@@ -538,6 +612,198 @@ describe('guided workflow page', () => {
     ));
     await waitFor(() => expect(advance).toBeEnabled());
     expect(api.advanceGuidedWorkflow).not.toHaveBeenCalled();
+  });
+
+  it('immediately keeps the submitted user message visible and shows local elapsed progress', async () => {
+    const user = userEvent.setup();
+    let resolveTurn: (value: GuidedWorkflow) => void = () => undefined;
+    vi.mocked(api.sendGuidedTurn).mockReturnValueOnce(new Promise((resolve) => {
+      resolveTurn = resolve;
+    }));
+
+    render(
+      <I18nProvider>
+        <GuidedWorkflowPage navigate={vi.fn()} />
+      </I18nProvider>,
+    );
+
+    const composer = await screen.findByLabelText(
+      'Answer this stage, or request field-level changes',
+    );
+    await user.clear(composer);
+    await user.type(composer, 'Use the official filing cutoff.');
+    await user.click(screen.getByRole('button', { name: 'Send and propose' }));
+
+    expect(screen.getByTestId('guided-local-turn')).toHaveTextContent(
+      'Use the official filing cutoff.',
+    );
+    expect(screen.getByText('Request sent safely')).toBeInTheDocument();
+    expect(screen.getByText(/Actual wait: 0 seconds/)).toBeInTheDocument();
+    expect(composer).toHaveValue('');
+
+    resolveTurn({
+      ...guidedWorkflow,
+      version: guidedWorkflow.version + 1,
+      messages: [
+        ...guidedWorkflow.messages,
+        {
+          id: 'message-user-new',
+          role: 'user',
+          stage: guidedWorkflow.stage,
+          content: 'Use the official filing cutoff.',
+          createdAt: '2026-07-22T10:02:00Z',
+        },
+      ],
+    });
+
+    await waitFor(() => expect(screen.queryByTestId('guided-local-turn')).not.toBeInTheDocument());
+    expect(screen.getAllByText('Use the official filing cutoff.')).toHaveLength(1);
+  });
+
+  it('restores failed turn text to the composer without hiding the failed message', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.sendGuidedTurn).mockRejectedValueOnce(new Error('Temporary gateway failure'));
+
+    render(
+      <I18nProvider>
+        <GuidedWorkflowPage navigate={vi.fn()} />
+      </I18nProvider>,
+    );
+
+    const composer = await screen.findByLabelText(
+      'Answer this stage, or request field-level changes',
+    );
+    await user.clear(composer);
+    await user.type(composer, 'Keep this text after failure.');
+    await user.click(screen.getByRole('button', { name: 'Send and propose' }));
+
+    expect(await screen.findByText('Temporary gateway failure')).toBeInTheDocument();
+    expect(composer).toHaveValue('Keep this text after failure.');
+    expect(screen.getByTestId('guided-local-turn')).toHaveTextContent(
+      'Failed; input restored',
+    );
+  });
+
+  it('shows provider-backed progress instead of guessing only from elapsed time', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(crypto, 'randomUUID').mockReturnValue(
+      '11111111-1111-4111-8111-111111111111',
+    );
+    let resolveTurn: (value: GuidedWorkflow) => void = () => undefined;
+    vi.mocked(api.sendGuidedTurn).mockReturnValueOnce(new Promise((resolve) => {
+      resolveTurn = resolve;
+    }));
+    vi.mocked(api.getGuidedTurnOperations)
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([{
+        ...unknownGuidedOperation,
+        clientRequestId: 'guided-11111111-1111-4111-8111-111111111111',
+        status: 'PENDING',
+        cachedProposalAvailable: false,
+        recoveryOptions: [],
+        failureStage: 'PROVIDER_DISPATCHED',
+      }]);
+
+    render(
+      <I18nProvider>
+        <GuidedWorkflowPage navigate={vi.fn()} />
+      </I18nProvider>,
+    );
+
+    const composer = await screen.findByLabelText(
+      'Answer this stage, or request field-level changes',
+    );
+    await user.type(composer, 'Wait for the model.');
+    await user.click(screen.getByRole('button', { name: 'Send and propose' }));
+
+    expect(await screen.findByText('Model request sent; waiting for the provider'))
+      .toBeInTheDocument();
+    expect(screen.getByText(/Server stage: PROVIDER_DISPATCHED/)).toBeInTheDocument();
+
+    resolveTurn(guidedWorkflow);
+  });
+
+  it('commits a cached unknown result only after explicit confirmation', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getGuidedTurnOperations).mockResolvedValue([unknownGuidedOperation]);
+    vi.mocked(api.recoverGuidedTurn).mockResolvedValue({
+      kind: 'WORKFLOW',
+      workflow: {
+        ...guidedWorkflow,
+        version: guidedWorkflow.version + 1,
+      },
+    });
+
+    render(
+      <I18nProvider>
+        <GuidedWorkflowPage navigate={vi.fn()} />
+      </I18nProvider>,
+    );
+
+    await user.click(await screen.findByRole('button', {
+      name: 'Use cached result; no model call',
+    }));
+    expect(screen.getByRole('heading', { name: 'Commit the cached result?' }))
+      .toBeInTheDocument();
+    expect(api.recoverGuidedTurn).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: 'Confirm' }));
+
+    await waitFor(() => expect(api.recoverGuidedTurn).toHaveBeenCalledWith(
+      guidedWorkflow.id,
+      unknownGuidedOperation.clientRequestId,
+      expect.objectContaining({
+        action: 'RETRY_CACHED_COMMIT',
+        expectedVersion: guidedWorkflow.version,
+      }),
+    ));
+    expect(api.sendGuidedTurn).not.toHaveBeenCalled();
+  });
+
+  it('abandons an unknown result and reuses exactly the server-authorized retry ID', async () => {
+    const user = userEvent.setup();
+    const authorizedRetryId = 'guided-authorized-retry';
+    vi.mocked(api.getGuidedTurnOperations).mockResolvedValue([{
+      ...unknownGuidedOperation,
+      cachedProposalAvailable: false,
+      recoveryOptions: ['ABANDON_AND_AUTHORIZE_RETRY'],
+    }]);
+    vi.mocked(api.recoverGuidedTurn).mockResolvedValue({
+      kind: 'OPERATION',
+      operation: {
+        ...unknownGuidedOperation,
+        status: 'ABANDONED_BY_USER',
+        cachedProposalAvailable: false,
+        recoveryOptions: [],
+        authorizedRetryClientRequestId: authorizedRetryId,
+      },
+    });
+    vi.mocked(api.sendGuidedTurn).mockResolvedValue({
+      ...guidedWorkflow,
+      version: guidedWorkflow.version + 1,
+    });
+
+    render(
+      <I18nProvider>
+        <GuidedWorkflowPage navigate={vi.fn()} />
+      </I18nProvider>,
+    );
+
+    await user.click(await screen.findByRole('button', {
+      name: 'Abandon and authorize one retry',
+    }));
+    expect(screen.getByText(/original call may already have been billed/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Confirm' }));
+
+    await waitFor(() => expect(api.sendGuidedTurn).toHaveBeenCalledWith(
+      guidedWorkflow.id,
+      {
+        message: unknownGuidedOperation.requestMessage,
+        language: 'en',
+        expectedVersion: unknownGuidedOperation.expectedVersion,
+        clientRequestId: authorizedRetryId,
+      },
+    ));
   });
 
   it('hands reviewed metadata to Factory without exposing a pasted artifact-ID field', async () => {

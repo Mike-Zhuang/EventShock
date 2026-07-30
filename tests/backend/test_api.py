@@ -119,6 +119,60 @@ def test_experiment_sse_emits_terminal_public_state_and_closes(tmp_path: Path) -
     assert SESSION_A not in response.text
 
 
+def test_hybrid_cognition_can_continue_with_rules_without_cancelling_experiment(
+    tmp_path: Path,
+) -> None:
+    experimentId = "exp-cognition-rule-continuation"
+    payload = experimentPayload()
+    payload["llmPolicy"] = {
+        "mode": "HYBRID_LLM",
+        "provider": "zhipu",
+        "modelId": "glm-5.2",
+    }
+    with TestClient(createApp(tmp_path)) as client:
+        database = client.app.state.database
+        database.createExperiment(experimentId, SESSION_A, payload, None)
+        database.updateExperiment(
+            experimentId,
+            SESSION_A,
+            status="RUNNING",
+            runtime_json={
+                "phase": "COGNITION",
+                "logs": [],
+                "cognitionProgress": {
+                    "status": "MODEL_CALL_IN_PROGRESS",
+                    "plannedCalls": 12,
+                    "attemptedCalls": 3,
+                    "completedCalls": 2,
+                },
+            },
+        )
+
+        first = client.post(
+            f"/api/v1/experiments/{experimentId}/cognition/continue-with-rules",
+            headers={"X-Session-ID": SESSION_A},
+        )
+        second = client.post(
+            f"/api/v1/experiments/{experimentId}/cognition/continue-with-rules",
+            headers={"X-Session-ID": SESSION_A},
+        )
+        stored = database.getExperiment(experimentId, SESSION_A)
+        audit = client.get(
+            "/api/v1/audit-events",
+            headers={"X-Session-ID": SESSION_A},
+        ).json()["items"]
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["status"] == "RUNNING"
+    assert first.json()["cognitionFallbackRequested"] is True
+    assert first.json()["runtime"]["cognitionProgress"]["status"] == ("RULE_CONTINUATION_REQUESTED")
+    assert stored is not None
+    assert stored["cancelRequested"] is False
+    assert stored["cognitionFallbackRequested"] is True
+    assert sum(item["action"] == "COGNITION_RULE_CONTINUATION_REQUESTED" for item in audit) == 1
+
+
 def test_spa_root_supports_head_without_capturing_api_paths(tmp_path: Path) -> None:
     frontendDist = tmp_path / "frontend-dist"
     frontendDist.mkdir()
@@ -474,11 +528,21 @@ def test_experiment_lifecycle_is_idempotent_and_exports_zip(tmp_path: Path) -> N
         assert "checkpointCorrupted" not in latestStatusPayload
         assert latestStatusPayload["runtime"]["phase"] == "COMPLETED"
         assert latestStatusPayload["runtime"]["checkpointPairs"] == 10
+        assert latestStatusPayload["runtime"]["lastCompletedSeed"] is not None
+        assert latestStatusPayload["runtime"]["currentSeed"] is None
+        assert latestStatusPayload["runtime"]["cognitionProgress"]["status"] == "COMPLETED"
         assert latestStatusPayload["runtime"]["baseline"]["completedSteps"] == 30
         assert latestStatusPayload["runtime"]["intervention"]["completedSteps"] == 30
         assert any(
             "checkpointed" in entry["message"] for entry in latestStatusPayload["runtime"]["logs"]
         )
+        assert {entry.get("code") for entry in latestStatusPayload["runtime"]["logs"]} >= {
+            "COGNITION_PREPARATION_STARTED",
+            "COGNITION_PREPARATION_COMPLETED",
+            "MATCHED_PAIR_COMPLETED",
+            "RESULT_AGGREGATION_STARTED",
+            "EXPERIMENT_COMPLETED",
+        }
 
         resultsResponse = client.get(
             f"/api/v1/experiments/{experimentId}/results",
@@ -493,11 +557,27 @@ def test_experiment_lifecycle_is_idempotent_and_exports_zip(tmp_path: Path) -> N
     assert len(results["pairedRuns"]) == 10
     assert results["scenarioDiff"]["changeCount"] == 1
     assert results["manifest"]["validPairedSeeds"] == 10
+    assert results["manifest"]["engineVersion"] == "eventshock-simulation-0.3.0"
+    assert results["manifest"]["llmExternalModelUsed"] is False
+    assert results["manifest"]["llmProvider"] is None
+    assert results["manifest"]["llmModel"] is None
     assert results["metricSummaries"]["maxSpreadBps"]["delta"]["validN"] == 10
+    assert results["strongestMetricIds"]
+    assert results["strongestMetricIds"][0] == "maxSpreadBps"
+    assert results["orderExecutionSummary"]
     assert exportResponse.status_code == 200
+    assert (
+        exportResponse.headers["content-disposition"]
+        == f'attachment; filename="eventshock-reproducibility-{experimentId}.zip"'
+    )
     with zipfile.ZipFile(io.BytesIO(exportResponse.content)) as archive:
         names = set(archive.namelist())
         exportedEventPack = json.loads(archive.read("event_pack_manifest.json"))
+        exportedManifest = json.loads(archive.read("manifest.json"))
+        cognitionDecisions = json.loads(archive.read("cognitive_decisions.json"))
+        modelVersions = json.loads(archive.read("model_and_prompt_versions.json"))
+        orderExecutionSummary = json.loads(archive.read("order_execution_summary.json"))
+        reproduceReadme = archive.read("README_REPRODUCE.md").decode()
     assert {
         "manifest.json",
         "scenario_baseline.json",
@@ -510,6 +590,7 @@ def test_experiment_lifecycle_is_idempotent_and_exports_zip(tmp_path: Path) -> N
         "source_hashes.csv",
         "cognitive_decisions.json",
         "model_and_prompt_versions.json",
+        "order_execution_summary.json",
         "validation_report.md",
         "parquet/schema_manifest.json",
         "parquet/run_level_metrics.parquet",
@@ -519,6 +600,36 @@ def test_experiment_lifecycle_is_idempotent_and_exports_zip(tmp_path: Path) -> N
         "parquet/trades.parquet",
         "parquet/agent_decisions.parquet",
     }.issubset(names)
+    assert exportedManifest["llmProvider"] is None
+    assert exportedManifest["llmModel"] is None
+    assert exportedManifest["bundleKind"] == "REPRODUCIBILITY_BUNDLE"
+    assert exportedManifest["experimentStatus"] == "COMPLETED"
+    assert modelVersions["externalModelUsed"] is False
+    assert modelVersions["provider"] is None
+    assert modelVersions["requestedProvider"] is None
+    assert modelVersions["requestedModel"] is None
+    assert modelVersions["resolvedModel"] is None
+    assert cognitionDecisions == {
+        "applicability": "NOT_APPLICABLE",
+        "items": [],
+        "mode": "RULE_ONLY",
+        "reason": "no external cognition requested",
+        "schemaVersion": "belief_decision_v1.0.0",
+    }
+    assert orderExecutionSummary["scope"] == "REPRESENTATIVE_MATCHED_SEED_PAIR"
+    assert orderExecutionSummary["items"] == results["orderExecutionSummary"]
+    assert {
+        "requestedQuantity",
+        "approvedQuantity",
+        "cumulativeFilledQuantity",
+        "remainingQuantity",
+        "vwapPrice",
+        "fillCount",
+        "finalStatus",
+        "tradeIds",
+    }.issubset(orderExecutionSummary["items"][0])
+    assert "NOT_APPLICABLE" in reproduceReadme
+    assert "no external cognition requested" in reproduceReadme
     expectedEventPackHash = hashlib.sha256(
         json.dumps(
             exportedEventPack,

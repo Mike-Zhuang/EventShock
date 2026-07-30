@@ -62,9 +62,10 @@ const RunCenterPage = lazy(async () => ({ default: (await import('./pages/run-ce
 const ScenarioBuilderPage = lazy(async () => ({ default: (await import('./pages/scenario-builder-page')).ScenarioBuilderPage }));
 const StudyWorkbenchPage = lazy(async () => ({ default: (await import('./pages/study-workbench-page')).StudyWorkbenchPage }));
 const TraceExplorerPage = lazy(async () => ({ default: (await import('./pages/trace-explorer-page')).TraceExplorerPage }));
+const AccountPrivacyPage = lazy(async () => ({ default: (await import('./pages/account-privacy-page')).AccountPrivacyPage }));
 const AdminPage = lazy(async () => ({ default: (await import('./pages/admin-page')).AdminPage }));
 
-export type ViewId = 'guided' | 'cases' | 'factory' | 'pack' | 'ai' | 'scenario' | 'preflight' | 'runs' | 'results' | 'study' | 'trace' | 'governance' | 'export' | 'admin';
+export type ViewId = 'guided' | 'cases' | 'factory' | 'pack' | 'ai' | 'scenario' | 'preflight' | 'runs' | 'results' | 'study' | 'trace' | 'governance' | 'export' | 'account' | 'admin';
 export const ROUTE_TARGET_IDS = [
   'result-overview-heading',
   'metrics-heading',
@@ -89,7 +90,7 @@ export type Navigate = (view: ViewId, options?: NavigateOptions) => void;
 
 type RouteRestoreState = 'idle' | 'loading' | 'error';
 
-const VIEW_IDS: ViewId[] = ['guided', 'cases', 'factory', 'pack', 'ai', 'scenario', 'preflight', 'runs', 'results', 'study', 'trace', 'governance', 'export', 'admin'];
+const VIEW_IDS: ViewId[] = ['guided', 'cases', 'factory', 'pack', 'ai', 'scenario', 'preflight', 'runs', 'results', 'study', 'trace', 'governance', 'export', 'account', 'admin'];
 const MOBILE_NAVIGATION_ID = 'mobile-primary-navigation';
 const ROUTE_TARGET_VIEWS: Record<RouteTargetId, Extract<ViewId, 'results' | 'trace'>> = {
   'result-overview-heading': 'results',
@@ -432,6 +433,12 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
           { id: 'ai', label: t('nav.ai'), icon: Cpu },
         ],
       },
+      {
+        label: t('nav.groupAccount'),
+        items: [
+          { id: 'account', label: t('nav.account'), icon: UserCircle },
+        ],
+      },
     ];
     if (user?.role === 'ADMIN') {
       sections.push({
@@ -456,6 +463,7 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
     trace: <TraceExplorerPage />,
     governance: <GovernancePage />,
     export: <ExportHistoryPage navigate={navigate} />,
+    account: <AccountPrivacyPage />,
     admin: <AdminPage />,
   };
 

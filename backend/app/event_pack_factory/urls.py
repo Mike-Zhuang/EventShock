@@ -114,6 +114,7 @@ def _asIpAddress(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | 
 
 def _invalidUrl() -> FactoryValidationError:
     return FactoryValidationError(
-        FactoryErrorCode.READER_SOURCE_NOT_ALLOWED,
+        FactoryErrorCode.UNSAFE_SOURCE_URL,
         "Only credential-free public HTTPS URLs on port 443 are allowed.",
+        details={"securityBoundary": "PUBLIC_HTTPS_PORT_443_ONLY"},
     )

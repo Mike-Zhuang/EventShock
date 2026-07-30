@@ -503,7 +503,10 @@ def test_schema_failure_gets_exactly_one_repair_and_usage_is_accumulated() -> No
     result = runGateway(
         handler,
         lambda gateway: gateway.generateStructured(
-            makeRequest(observation),
+            replace(
+                makeRequest(observation),
+                samplingConfig=SamplingConfig(thinking_enabled=True),
+            ),
             BeliefDecision,
             ModelPolicy(base_backoff_seconds=0.0),
         ),
@@ -513,6 +516,8 @@ def test_schema_failure_gets_exactly_one_repair_and_usage_is_accumulated() -> No
     assert requestPayloads[0]["request_id"] == "request-test-001"
     assert requestPayloads[1]["request_id"] != requestPayloads[0]["request_id"]
     assert requestPayloads[1]["request_id"].startswith("repair-")
+    assert requestPayloads[0]["thinking"] == {"type": "enabled"}
+    assert requestPayloads[1]["thinking"] == {"type": "disabled"}
     assert 6 <= len(requestPayloads[1]["request_id"]) <= 64
     assert len(requestPayloads[1]["messages"]) == 4
     assert "SCHEMA_INVALID" in requestPayloads[1]["messages"][-1]["content"]

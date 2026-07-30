@@ -10,6 +10,8 @@ services:
     environment:
       APP_ENV: "${APP_ENV:-production}"
       EVENTSHOCK_DATA_DIR: /data
+      # 只读治理接口固定读取持久卷内的最小部署证据；应用业务代码不写该文件。
+      EVENTSHOCK_DEPLOYMENT_STATUS_FILE: /data/deployment-status.json
       EVENTSHOCK_RELEASE_COMMIT: "${EVENTSHOCK_RELEASE_COMMIT:-development}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       EVENTSHOCK_AUTH_REQUIRED: "${EVENTSHOCK_AUTH_REQUIRED:-true}"

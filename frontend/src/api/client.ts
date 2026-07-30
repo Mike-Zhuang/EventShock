@@ -1,4 +1,6 @@
 import {
+  normalizeAccountDataExport,
+  normalizeAccountDeletionReceipt,
   normalizeAdminActivityPage,
   normalizeAdminUserPage,
   normalizeAuthSession,
@@ -6,6 +8,7 @@ import {
   normalizeCognitionEvalSummary,
   normalizeCognitionEvaluationRun,
   normalizeCognitionTelemetry,
+  normalizeDeploymentStatus,
   normalizeEventPack,
   normalizeExperiment,
   normalizeExperiments,
@@ -18,6 +21,8 @@ import {
   normalizeGovernanceInventory,
   normalizeGuidedWorkflow,
   normalizeGuidedWorkflows,
+  normalizeGuidedTurnOperations,
+  normalizeGuidedTurnRecoveryResult,
   normalizeLlmCatalog,
   normalizeLlmConfig,
   normalizeLlmConnectionTest,
@@ -47,6 +52,10 @@ import {
   normalizeVerificationCodeReceipt,
 } from './normalize';
 import type {
+  AccountDataExport,
+  AccountDataExportInput,
+  AccountDeletionInput,
+  AccountDeletionReceipt,
   AdminActivityPage,
   AdminUserPage,
   AuthSession,
@@ -68,8 +77,12 @@ import type {
   CognitionEvalSummary,
   CognitionEvaluationRun,
   CognitionTelemetry,
+  DeploymentStatus,
   GovernanceInventory,
   GuidedTurnInput,
+  GuidedTurnOperation,
+  GuidedTurnRecoveryInput,
+  GuidedTurnRecoveryResult,
   GuidedWorkflow,
   HealthStatus,
   InvalidationReasonCode,
@@ -135,6 +148,10 @@ export class ApiError extends Error {
   readonly traceId?: string;
   readonly retryable?: boolean;
   readonly uncertainBillableAttempts?: number;
+  readonly failureStage?: string;
+  readonly repairAttempted?: boolean;
+  readonly repairUsed?: boolean;
+  readonly billingConclusion?: string;
 
   constructor(
     message: string,
@@ -142,7 +159,14 @@ export class ApiError extends Error {
     detail?: string,
     code?: string,
     traceId?: string,
-    metadata: { retryable?: boolean; uncertainBillableAttempts?: number } = {},
+    metadata: {
+      retryable?: boolean;
+      uncertainBillableAttempts?: number;
+      failureStage?: string;
+      repairAttempted?: boolean;
+      repairUsed?: boolean;
+      billingConclusion?: string;
+    } = {},
   ) {
     super(message);
     this.name = 'ApiError';
@@ -152,18 +176,30 @@ export class ApiError extends Error {
     this.traceId = traceId;
     this.retryable = metadata.retryable;
     this.uncertainBillableAttempts = metadata.uncertainBillableAttempts;
+    this.failureStage = metadata.failureStage;
+    this.repairAttempted = metadata.repairAttempted;
+    this.repairUsed = metadata.repairUsed;
+    this.billingConclusion = metadata.billingConclusion;
   }
 }
 
 export class ResultInterpretationStreamError extends ApiError {
   readonly retryable: boolean;
   readonly uncertainBillableAttempts: number;
+  readonly failureStage?: string;
+  readonly repairAttempted?: boolean;
+  readonly repairUsed?: boolean;
+  readonly billingConclusion?: string;
 
   constructor(payload: ResultInterpretationStreamErrorPayload) {
-    super(payload.message, payload.httpStatus, payload.message, payload.code, payload.traceId);
+    super(payload.message, payload.httpStatus, payload.message, payload.code, payload.traceId, payload);
     this.name = 'ResultInterpretationStreamError';
     this.retryable = payload.retryable;
     this.uncertainBillableAttempts = payload.uncertainBillableAttempts;
+    this.failureStage = payload.failureStage;
+    this.repairAttempted = payload.repairAttempted;
+    this.repairUsed = payload.repairUsed;
+    this.billingConclusion = payload.billingConclusion;
   }
 }
 
@@ -226,13 +262,34 @@ async function requestJson(path: string, options: RequestOptions = {}): Promise<
         && rawUncertainBillableAttempts >= 0
         ? rawUncertainBillableAttempts
         : undefined;
+      const failureStage = typeof nestedError?.failureStage === 'string'
+        ? nestedError.failureStage
+        : typeof nestedError?.failure_stage === 'string' ? nestedError.failure_stage : undefined;
+      const repairAttempted = typeof nestedError?.repairAttempted === 'boolean'
+        ? nestedError.repairAttempted
+        : typeof nestedError?.repair_attempted === 'boolean' ? nestedError.repair_attempted : undefined;
+      const repairUsed = typeof nestedError?.repairUsed === 'boolean'
+        ? nestedError.repairUsed
+        : typeof nestedError?.repair_used === 'boolean' ? nestedError.repair_used : undefined;
+      const billingConclusion = typeof nestedError?.billingConclusion === 'string'
+        ? nestedError.billingConclusion
+        : typeof nestedError?.billing_conclusion === 'string'
+          ? nestedError.billing_conclusion
+          : undefined;
       throw new ApiError(
         detail ?? `API request failed with status ${response.status}.`,
         response.status,
         detail,
         code,
         traceId,
-        { retryable, uncertainBillableAttempts },
+        {
+          retryable,
+          uncertainBillableAttempts,
+          failureStage,
+          repairAttempted,
+          repairUsed,
+          billingConclusion,
+        },
       );
     }
     return payload;
@@ -287,6 +344,10 @@ async function requestResultInterpretationJson(
         // POST 超时无法确认供应商是否已完成，必须采用保守计费提示。
         uncertainBillableAttempts: error.uncertainBillableAttempts
           ?? (error.status === 408 ? 1 : 0),
+        failureStage: error.failureStage,
+        repairAttempted: error.repairAttempted,
+        repairUsed: error.repairUsed,
+        billingConclusion: error.billingConclusion,
         traceId: error.traceId,
       });
     }
@@ -359,12 +420,30 @@ async function resultInterpretationHttpError(response: Response): Promise<Result
     ? rawUncertainBillableAttempts
     : 0;
   const traceId = typeof errorRecord?.traceId === 'string' ? errorRecord.traceId : undefined;
+  const failureStage = typeof errorRecord?.failureStage === 'string'
+    ? errorRecord.failureStage
+    : typeof errorRecord?.failure_stage === 'string' ? errorRecord.failure_stage : undefined;
+  const repairAttempted = typeof errorRecord?.repairAttempted === 'boolean'
+    ? errorRecord.repairAttempted
+    : typeof errorRecord?.repair_attempted === 'boolean' ? errorRecord.repair_attempted : undefined;
+  const repairUsed = typeof errorRecord?.repairUsed === 'boolean'
+    ? errorRecord.repairUsed
+    : typeof errorRecord?.repair_used === 'boolean' ? errorRecord.repair_used : undefined;
+  const billingConclusion = typeof errorRecord?.billingConclusion === 'string'
+    ? errorRecord.billingConclusion
+    : typeof errorRecord?.billing_conclusion === 'string'
+      ? errorRecord.billing_conclusion
+      : undefined;
   return new ResultInterpretationStreamError({
     code,
     message,
     retryable,
     httpStatus: response.status,
     uncertainBillableAttempts,
+    failureStage,
+    repairAttempted,
+    repairUsed,
+    billingConclusion,
     traceId,
   });
 }
@@ -398,6 +477,26 @@ export const api = {
 
   async logout(): Promise<void> {
     await requestJson('/v1/auth/logout', { method: 'POST' });
+  },
+
+  async exportAccountData(input: AccountDataExportInput): Promise<AccountDataExport> {
+    return normalizeAccountDataExport(await requestJson('/v1/account/data-export', {
+      method: 'POST',
+      body: JSON.stringify({ password: input.currentPassword }),
+      // 此端点用 401 同时表示“当前密码错误”，不能把一次输错密码误判为会话失效。
+      broadcastUnauthorized: false,
+    }));
+  },
+
+  async deleteAccount(input: AccountDeletionInput): Promise<AccountDeletionReceipt> {
+    return normalizeAccountDeletionReceipt(await requestJson('/v1/account', {
+      method: 'DELETE',
+      body: JSON.stringify({
+        password: input.currentPassword,
+        confirmation: input.confirmation,
+      }),
+      broadcastUnauthorized: false,
+    }));
   },
 
   async requestVerificationCode(input: {
@@ -571,6 +670,36 @@ export const api = {
     ));
   },
 
+  async setFactorySourceIncluded(
+    buildId: string,
+    sourceId: string,
+    expectedRevision: number,
+    included: boolean,
+  ): Promise<EventPackFactoryMutation> {
+    return normalizeFactoryMutation(await requestJson(
+      `/v1/event-pack-factory/builds/${encodeURIComponent(buildId)}/sources/${encodeURIComponent(sourceId)}/selection`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ expectedRevision, included }),
+      },
+    ));
+  },
+
+  async permanentlyDeleteFactorySourceText(
+    buildId: string,
+    sourceId: string,
+    expectedRevision: number,
+  ): Promise<EventPackFactoryMutation> {
+    return normalizeFactoryMutation(await requestJson(
+      `/v1/event-pack-factory/builds/${encodeURIComponent(buildId)}/sources/${encodeURIComponent(sourceId)}/raw-text`,
+      {
+        method: 'DELETE',
+        body: JSON.stringify({ expectedRevision, confirmation: 'DELETE_RAW_TEXT' }),
+        cache: 'no-store',
+      },
+    ));
+  },
+
   async materializeFactoryBuild(
     buildId: string,
     expectedRevision: number,
@@ -640,6 +769,41 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(input),
         timeoutMs: 120_000,
+      },
+    ));
+  },
+
+  async getGuidedTurnOperations(workflowId: string): Promise<GuidedTurnOperation[]> {
+    return normalizeGuidedTurnOperations(await requestJson(
+      `/v1/guided-workflows/${encodeURIComponent(workflowId)}/operations`,
+      { cache: 'no-store' },
+    ));
+  },
+
+  async recoverGuidedTurn(
+    workflowId: string,
+    clientRequestId: string,
+    input: GuidedTurnRecoveryInput,
+  ): Promise<GuidedTurnRecoveryResult> {
+    return normalizeGuidedTurnRecoveryResult(await requestJson(
+      `/v1/guided-workflows/${encodeURIComponent(workflowId)}/operations/${encodeURIComponent(clientRequestId)}/recover`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+        cache: 'no-store',
+      },
+    ));
+  },
+
+  async archiveGuidedWorkflow(
+    workflowId: string,
+    expectedVersion: number,
+  ): Promise<GuidedWorkflow> {
+    return normalizeGuidedWorkflow(await requestJson(
+      `/v1/guided-workflows/${encodeURIComponent(workflowId)}/archive`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ expectedVersion }),
       },
     ));
   },
@@ -761,6 +925,12 @@ export const api = {
     return normalizeSystemMetrics(await requestJson('/v1/system/metrics'));
   },
 
+  async getDeploymentStatus(): Promise<DeploymentStatus> {
+    return normalizeDeploymentStatus(
+      await requestJson('/v1/governance/deployment-status'),
+    );
+  },
+
   async runEvaluation(mode: 'CODE_GRADER_SELF_TEST' | 'LIVE_CONFIGURED_MODEL', maximumCases = 3): Promise<CognitionEvaluationRun> {
     return normalizeCognitionEvaluationRun(await requestJson('/v1/evals/run', {
       method: 'POST',
@@ -822,6 +992,8 @@ export const api = {
           reviewStatus: input.status,
           editedText: input.editedText,
           editedTextZh: input.editedTextZh,
+          editedImpactChannels: input.editedImpactChannels,
+          editedImpactChannelRationale: input.editedImpactChannelRationale,
         }),
       },
     ));
@@ -977,6 +1149,13 @@ export const api = {
   async cancelExperiment(experimentId: string): Promise<Experiment> {
     return normalizeExperiment(await requestJson(
       `/v1/experiments/${encodeURIComponent(experimentId)}/cancel`,
+      { method: 'POST' },
+    ));
+  },
+
+  async continueCognitionWithRules(experimentId: string): Promise<Experiment> {
+    return normalizeExperiment(await requestJson(
+      `/v1/experiments/${encodeURIComponent(experimentId)}/cognition/continue-with-rules`,
       { method: 'POST' },
     ));
   },

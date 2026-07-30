@@ -3,7 +3,7 @@ import type { Experiment } from '../api/types';
 import { useI18n } from '../i18n';
 
 export const EXPERIMENT_HISTORY_RETENTION_DAYS = 90;
-export const MAX_EXPERIMENTS_PER_ANONYMOUS_SESSION = 30;
+export const MAX_EXPERIMENTS_PER_ACCOUNT = 30;
 export const MAX_STORED_EXPERIMENTS_SITE_WIDE = 500;
 
 function localizedQuestion(experiment: Experiment, language: 'en' | 'zh-CN'): string {
@@ -40,16 +40,17 @@ export function experimentHistoryLabel(
 
 export function ExperimentHistoryDisclosure() {
   const { language } = useI18n();
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
   return (
     <InlineNotification
       kind="info"
       lowContrast
       hideCloseButton
       className="history-retention-notice"
-      title={language === 'zh-CN' ? '匿名会话历史与留存' : 'Anonymous-session history and retention'}
+      title={language === 'zh-CN' ? '当前账号的实验历史与留存' : 'Current-account experiment history and retention'}
       subtitle={language === 'zh-CN'
-        ? `这里只显示当前匿名浏览器会话的实验。终态实验最多保留 ${EXPERIMENT_HISTORY_RETENTION_DAYS} 天；每个会话最多 ${MAX_EXPERIMENTS_PER_ANONYMOUS_SESSION} 条，全站最多 ${MAX_STORED_EXPERIMENTS_SITE_WIDE} 条并滚动淘汰。需要长期保存时请及时导出。`
-        : `Only experiments from this anonymous browser session are shown. Terminal experiments are retained for up to ${EXPERIMENT_HISTORY_RETENTION_DAYS} days; each session keeps at most ${MAX_EXPERIMENTS_PER_ANONYMOUS_SESSION} records and the site keeps at most ${MAX_STORED_EXPERIMENTS_SITE_WIDE} with rolling eviction. Export promptly for long-term retention.`}
+        ? `这里只显示当前已登录账号拥有的实验。终态实验最多保留 ${EXPERIMENT_HISTORY_RETENTION_DAYS} 天；每个账号最多 ${MAX_EXPERIMENTS_PER_ACCOUNT} 条，全站最多 ${MAX_STORED_EXPERIMENTS_SITE_WIDE} 条并按状态和时间滚动淘汰。页面时间使用 ${timeZone}，导出时间始终使用 UTC。需要长期保存时请及时导出。`
+        : `Only experiments owned by the current signed-in account are shown. Terminal experiments are retained for up to ${EXPERIMENT_HISTORY_RETENTION_DAYS} days; each account keeps at most ${MAX_EXPERIMENTS_PER_ACCOUNT} records and the site keeps at most ${MAX_STORED_EXPERIMENTS_SITE_WIDE} with status-aware rolling eviction. Page times use ${timeZone}; exports always use UTC. Export promptly for long-term retention.`}
     />
   );
 }

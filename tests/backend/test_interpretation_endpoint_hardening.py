@@ -580,6 +580,9 @@ def test_interpretation_stream_converts_unexpected_coordinator_error_to_safe_eve
         "retryable": True,
         "httpStatus": 500,
         "uncertainBillableAttempts": 1,
+        "failureStage": "PREPARING",
+        "repairAttempted": False,
+        "billingConclusion": "BILLING_UNCERTAIN",
         "traceId": errorPayload["traceId"],
     }
     assert isinstance(errorPayload["traceId"], str)

@@ -1,6 +1,7 @@
 import { Button, InlineNotification, Modal, Tag, TextArea } from '@carbon/react';
 import {
   ArrowRight,
+  ArrowCounterClockwise,
   Check,
   FileText,
   Link as LinkIcon,
@@ -16,9 +17,82 @@ import { EmptyState, ErrorPanel, ExplainedLabel, LoadingPanel, PageHeader, Statu
 import { useI18n } from '../i18n';
 import { getPageGuide } from '../page-guidance';
 import { getParameterHelp } from '../parameter-help';
+import { IMPACT_CHANNEL_DEFINITIONS, impactChannelDisplay } from '../impact-channels';
 import { useWorkflow } from '../state/workflow-context';
 import type { EventClaim } from '../api/types';
 import { EventPackUploadModal } from '../components/event-pack-upload-modal';
+
+function extractionModeLabel(mode: string | undefined, language: 'en' | 'zh-CN'): string {
+  if (!mode) return language === 'zh-CN' ? '预先整理的事件包' : 'Pre-curated Event Pack';
+  if (mode === 'RULE_ONLY') {
+    return language === 'zh-CN' ? '确定性规则抽取' : 'Deterministic rule extraction';
+  }
+  if (/RULE_FALLBACK|_ABSTAINED_RULE_FALLBACK|_FALLBACK$/i.test(mode)) {
+    return language === 'zh-CN'
+      ? '低质量规则回退'
+      : 'Lower-quality rule fallback';
+  }
+  return language === 'zh-CN' ? '结构化模型抽取' : 'Structured model extraction';
+}
+
+const BULK_CONFIDENCE_THRESHOLD = 0.75;
+
+function claimBulkExclusionReasons(
+  claim: EventClaim,
+  reviewSourceIds: Set<string>,
+): string[] {
+  if (claim.bulkApprovalExclusionReasons?.length) {
+    return claim.bulkApprovalExclusionReasons;
+  }
+  const reasons: string[] = [];
+  if ((claim.confidence ?? -1) < (claim.bulkApprovalMinimumConfidence ?? BULK_CONFIDENCE_THRESHOLD)) {
+    reasons.push('LOW_CONFIDENCE');
+  }
+  if ((claim.impactChannels?.length ?? 0) > 1) reasons.push('MULTIPLE_IMPACT_CHANNELS');
+  const sourceIds = claim.sourceIds?.length
+    ? claim.sourceIds
+    : claim.sourceId
+      ? [claim.sourceId]
+      : [];
+  if (sourceIds.some((sourceId) => reviewSourceIds.has(sourceId))) {
+    reasons.push('CONTENT_SAFETY_REVIEW');
+  }
+  if ((claim.sourceTier ?? '').toUpperCase() !== 'OFFICIAL') {
+    reasons.push('NON_OFFICIAL_SOURCE');
+  }
+  if (claim.bulkApprovalEligible === false) reasons.push('EXTRACTION_NOT_ELIGIBLE');
+  return [...new Set(reasons)];
+}
+
+function safetyGuidanceLabel(code: string | undefined, language: 'en' | 'zh-CN'): string {
+  const labels: Record<string, { en: string; 'zh-CN': string }> = {
+    REMOVE_ROTATE_AND_RESUBMIT: {
+      en: 'Remove, rotate the credential, then resubmit',
+      'zh-CN': '删除内容、轮换凭据后重新提交',
+    },
+    REMOVE_AND_RESUBMIT: {
+      en: 'Remove the high-risk content and resubmit',
+      'zh-CN': '删除高风险内容后重新提交',
+    },
+    VERIFY_PUBLIC_CONTACT_OR_REDACT: {
+      en: 'Verify it is a public institutional contact, or redact it',
+      'zh-CN': '确认其为公开机构联系方式，否则遮盖',
+    },
+    REDACT_OR_EDIT: {
+      en: 'Redact or edit the field',
+      'zh-CN': '遮盖或编辑该字段',
+    },
+    REVIEW_EDIT_OR_REMOVE: {
+      en: 'Review, edit, or remove the field',
+      'zh-CN': '复核、编辑或删除该字段',
+    },
+  };
+  return code && labels[code]
+    ? labels[code][language]
+    : language === 'zh-CN'
+      ? '复核数据策略并编辑或删除'
+      : 'Review the data policy, then edit or remove';
+}
 
 export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }) {
   const { language, t } = useI18n();
@@ -34,17 +108,50 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
   const [editingClaim, setEditingClaim] = useState<EventClaim>();
   const [editedText, setEditedText] = useState('');
   const [editedTextZh, setEditedTextZh] = useState('');
+  const [editedImpactChannels, setEditedImpactChannels] = useState<string[]>([]);
+  const [editedChannelReasons, setEditedChannelReasons] = useState<Record<string, string>>({});
   const [actionError, setActionError] = useState<string>();
   const [uploadOpen, setUploadOpen] = useState(false);
   const [reextractOpen, setReextractOpen] = useState(false);
   const [bulkApproveOpen, setBulkApproveOpen] = useState(false);
   const [bulkApproveError, setBulkApproveError] = useState<string>();
 
-  const pendingClaimIds = useMemo(
-    () => eventPack?.claims.filter((claim) => claim.status === 'AI_PROPOSED').map((claim) => claim.id) ?? [],
+  const pendingClaims = useMemo(
+    () => eventPack?.claims.filter((claim) => claim.status === 'AI_PROPOSED') ?? [],
     [eventPack],
   );
-  const unresolvedCount = pendingClaimIds.length;
+  const unresolvedCount = pendingClaims.length;
+  const contentReviewSourceIds = useMemo(
+    () => new Set(
+      eventPack?.contentSecurity?.sources
+        .filter((source) => source.decision === 'REVIEW')
+        .map((source) => source.sourceId) ?? [],
+    ),
+    [eventPack],
+  );
+  const bulkReviewSummary = useMemo(() => {
+    const reasonMap = new Map(
+      pendingClaims.map((claim) => [
+        claim.id,
+        claimBulkExclusionReasons(claim, contentReviewSourceIds),
+      ]),
+    );
+    const eligible = pendingClaims.filter((claim) => (reasonMap.get(claim.id)?.length ?? 0) === 0);
+    const count = (reason: string) => [...reasonMap.values()]
+      .filter((reasons) => reasons.includes(reason)).length;
+    return {
+      eligible,
+      lowConfidence: count('LOW_CONFIDENCE'),
+      multiChannel: count('MULTIPLE_IMPACT_CHANNELS'),
+      contentReview: count('CONTENT_SAFETY_REVIEW'),
+      nonOfficial: count('NON_OFFICIAL_SOURCE'),
+      mechanismInferred: pendingClaims.filter((claim) => claim.channelMappingIsInference).length,
+    };
+  }, [contentReviewSourceIds, pendingClaims]);
+  const lowQualityRuleFallback = Boolean(
+    eventPack?.extractionMode
+    && /RULE_FALLBACK|_ABSTAINED_RULE_FALLBACK|_FALLBACK$/i.test(eventPack.extractionMode),
+  );
   const isFrozen = eventPack?.status.toUpperCase() === 'FROZEN' || Boolean(eventPack?.frozenAt);
   const reviewBusy = Boolean(claimBusyId);
 
@@ -57,10 +164,31 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
     }
   };
 
+  const undoClaimReview = async (claimId: string) => {
+    setActionError(undefined);
+    try {
+      await reviewClaim(claimId, { status: 'AI_PROPOSED' });
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   const openEdit = (claim: EventClaim) => {
     setEditingClaim(claim);
     setEditedText(claim.text);
     setEditedTextZh(claim.textZh ?? '');
+    setEditedImpactChannels(claim.impactChannels ?? []);
+    setEditedChannelReasons(Object.fromEntries(
+      (claim.impactChannels ?? []).map((channel) => {
+        const rationale = claim.impactChannelRationale?.find((item) => item.channel === channel);
+        return [
+          channel,
+          language === 'zh-CN'
+            ? rationale?.reasonZh ?? rationale?.reason ?? impactChannelDisplay(channel, language).description
+            : rationale?.reason ?? impactChannelDisplay(channel, language).description,
+        ];
+      }),
+    ));
   };
 
   const submitEdit = async () => {
@@ -71,11 +199,37 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
         status: 'EDITED',
         editedText: editedText.trim(),
         editedTextZh: editedTextZh.trim() || undefined,
+        editedImpactChannels,
+        editedImpactChannelRationale: editedImpactChannels.map((channel) => {
+          const display = impactChannelDisplay(channel, language);
+          return {
+            channel,
+            reason: editedChannelReasons[channel]?.trim() || display.description,
+            reasonZh: language === 'zh-CN'
+              ? editedChannelReasons[channel]?.trim() || display.description
+              : undefined,
+            evidenceType: 'MECHANISM_HYPOTHESIS',
+            simulatorParameter: display.simulatorParameter,
+          };
+        }),
       });
       setEditingClaim(undefined);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error));
     }
+  };
+
+  const toggleEditedChannel = (channel: string) => {
+    setEditedImpactChannels((current) => {
+      if (current.includes(channel)) return current.filter((item) => item !== channel);
+      if (current.length >= 2) return current;
+      const display = impactChannelDisplay(channel, language);
+      setEditedChannelReasons((reasons) => ({
+        ...reasons,
+        [channel]: reasons[channel] ?? display.description,
+      }));
+      return [...current, channel];
+    });
   };
 
   const freeze = async () => {
@@ -88,12 +242,12 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
   };
 
   const approveAll = async () => {
-    if (pendingClaimIds.length === 0) return;
+    if (bulkReviewSummary.eligible.length === 0) return;
     setBulkApproveError(undefined);
     try {
       await approveAllPendingClaims({
         acknowledgedBulkApproval: true,
-        expectedClaimIds: pendingClaimIds,
+        expectedClaimIds: bulkReviewSummary.eligible.map((claim) => claim.id),
         rationale: 'User acknowledged the bulk-approval warning in the Event Pack review interface.',
       });
       setBulkApproveOpen(false);
@@ -140,14 +294,12 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
         guide={getPageGuide('pack', language)}
         actions={(
           <div className="page-header-action-group">
+            <Button kind="ghost" onClick={() => navigate('guided')}>
+              {language === 'zh-CN' ? '返回 AI 引导' : 'Return to AI guide'}
+            </Button>
             <Button kind="tertiary" renderIcon={UploadSimple} onClick={() => setUploadOpen(true)}>
               {language === 'zh-CN' ? '新建 Event Pack' : 'New Event Pack'}
             </Button>
-            {!isFrozen && eventPack.editableExtraction ? (
-              <Button kind="ghost" renderIcon={FileText} disabled={reviewBusy} onClick={() => setReextractOpen(true)}>
-                {language === 'zh-CN' ? '重新抽取' : 'Re-extract'}
-              </Button>
-            ) : null}
             {isFrozen ? (
               <Button renderIcon={ArrowRight} onClick={() => navigate('scenario')}>{t('home.startScenario')}</Button>
             ) : null}
@@ -192,6 +344,38 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
         />
       ) : null}
 
+      <div className="pack-extraction-toolbar" role="region" aria-label={language === 'zh-CN' ? '抽取审核工具栏' : 'Extraction review toolbar'}>
+        <div>
+          <span>{language === 'zh-CN' ? '抽取模式' : 'Extraction mode'}</span>
+          <strong>{extractionModeLabel(eventPack.extractionMode, language)}</strong>
+          <span>{language === 'zh-CN' ? `${unresolvedCount} 项待审核` : `${unresolvedCount} pending`}</span>
+          {lowQualityRuleFallback ? (
+            <Tag type="red" size="sm">
+              {language === 'zh-CN' ? '规则回退 · 必须逐条审核' : 'Rule fallback · individual review required'}
+            </Tag>
+          ) : null}
+        </div>
+        <div className="pack-extraction-toolbar__actions">
+          {eventPack.extractionMode ? (
+            <details>
+              <summary>{language === 'zh-CN' ? '技术详情' : 'Technical details'}</summary>
+              <code>{eventPack.extractionMode}</code>
+            </details>
+          ) : null}
+          {!isFrozen && eventPack.editableExtraction ? (
+            <Button
+              kind="tertiary"
+              size="sm"
+              renderIcon={ArrowCounterClockwise}
+              disabled={reviewBusy}
+              onClick={() => setReextractOpen(true)}
+            >
+              {language === 'zh-CN' ? '重新抽取' : 'Re-extract'}
+            </Button>
+          ) : null}
+        </div>
+      </div>
+
       <section className="pack-summary">
         <div>
           <span>{t('common.sources')}</span>
@@ -211,7 +395,9 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
         </div>
         <div>
           <span>{language === 'zh-CN' ? '抽取模式' : 'Extraction mode'}</span>
-          <strong>{eventPack.extractionMode ?? (language === 'zh-CN' ? '预先整理的事件包' : 'Pre-curated Event Pack')}</strong>
+          <strong className="pack-summary__long-value">
+            {extractionModeLabel(eventPack.extractionMode, language)}
+          </strong>
         </div>
         {eventPack.contentSecurity ? (
           <div>
@@ -229,9 +415,36 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
               ? '这里只显示安全分类与字段位置，不显示命中的原文、凭据或个人信息。'
               : 'Only safe classifications and field locations are shown; matched text, credentials, and personal data are never displayed.'}</p>
           </div>
-          <div className="claim-item__evidence">
-            {[...new Set(eventPack.contentSecurity.findings.map((finding) => finding.code))].map((code) => (
-              <Tag key={code} type="warm-gray" size="sm">{code}</Tag>
+          {eventPack.contentSecurity.modelInputSummary ? (
+            <dl className="pack-security-counts">
+              <div>
+                <dt>{language === 'zh-CN' ? '发送模型前保留字段' : 'Fields retained before model'}</dt>
+                <dd>{eventPack.contentSecurity.modelInputSummary.retainedFieldCount}</dd>
+              </div>
+              <div>
+                <dt>{language === 'zh-CN' ? '发送模型前移除字段' : 'Fields removed before model'}</dt>
+                <dd>{eventPack.contentSecurity.modelInputSummary.removedFieldCount}</dd>
+              </div>
+              <div>
+                <dt>{language === 'zh-CN' ? '发送模型前遮盖字段' : 'Fields redacted before model'}</dt>
+                <dd>{eventPack.contentSecurity.modelInputSummary.redactedFieldCount}</dd>
+              </div>
+            </dl>
+          ) : null}
+          <div className="pack-security-findings">
+            {eventPack.contentSecurity.findings.map((finding, index) => (
+              <article key={`${finding.sourceId ?? 'metadata'}-${finding.field}-${finding.offset}-${index}`}>
+                <div>
+                  <Tag type={finding.severity === 'CRITICAL' || finding.severity === 'HIGH' ? 'red' : 'warm-gray'} size="sm">
+                    {finding.severity}
+                  </Tag>
+                  <strong>{finding.riskCategory ?? finding.code}</strong>
+                </div>
+                <p>
+                  {language === 'zh-CN' ? '位置' : 'Location'}: {finding.sourceId ?? 'event-pack-metadata'} · {finding.field} · {finding.offset}
+                </p>
+                <p>{safetyGuidanceLabel(finding.recommendedAction, language)}</p>
+              </article>
             ))}
             {eventPack.contentSecurity.findingsTruncated ? (
               <span>{language === 'zh-CN' ? '摘要已截断' : 'Summary truncated'}</span>
@@ -271,10 +484,39 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
         </section>
 
         <section className="pack-claims" aria-labelledby="claim-queue-heading">
-          <div className="section-heading">
-            <h2 id="claim-queue-heading">{t('pack.claimQueue')}</h2>
-            <p>{t('pack.claimQueueHelp')}</p>
+          <div className="section-heading section-heading--with-control">
+            <div>
+              <h2 id="claim-queue-heading">{t('pack.claimQueue')}</h2>
+              <p>{t('pack.claimQueueHelp')}</p>
+              <Tag type={lowQualityRuleFallback ? 'warm-gray' : 'cool-gray'} size="sm">
+                {extractionModeLabel(eventPack.extractionMode, language)}
+              </Tag>
+            </div>
+            {!isFrozen && eventPack.editableExtraction ? (
+              <Button
+                kind="ghost"
+                size="sm"
+                renderIcon={FileText}
+                disabled={reviewBusy}
+                onClick={() => setReextractOpen(true)}
+              >
+                {language === 'zh-CN' ? '重新抽取候选' : 'Re-extract candidates'}
+              </Button>
+            ) : null}
           </div>
+          {lowQualityRuleFallback && unresolvedCount > 0 ? (
+            <InlineNotification
+              kind="warning"
+              lowContrast
+              hideCloseButton
+              title={language === 'zh-CN'
+                ? '规则回退候选必须逐条审核'
+                : 'Rule-fallback candidates require individual review'}
+              subtitle={language === 'zh-CN'
+                ? '本次抽取未获得完整的结构化模型结果。为防止碎片化或低忠实度候选被一次性批准，批量批准已禁用；请逐条核对，或从此处重新抽取。'
+                : 'This extraction did not produce a complete structured-model result. Bulk approval is disabled to prevent fragmented or low-fidelity candidates from being accepted together. Review each claim or re-extract here.'}
+            />
+          ) : null}
           {!isFrozen && unresolvedCount > 0 ? (
             <div className="bulk-review-callout">
               <div>
@@ -285,10 +527,17 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
                 kind="danger--tertiary"
                 size="sm"
                 renderIcon={Warning}
-                disabled={reviewBusy}
+                disabled={reviewBusy || bulkReviewSummary.eligible.length === 0}
+                title={bulkReviewSummary.eligible.length === 0
+                  ? language === 'zh-CN'
+                    ? '当前没有满足质量门禁的批量可批准项'
+                    : 'No pending claim currently satisfies the bulk quality gate'
+                  : undefined}
                 onClick={() => { setBulkApproveError(undefined); setBulkApproveOpen(true); }}
               >
-                {language === 'zh-CN' ? `批准全部待审核项（${unresolvedCount}）` : `Approve all pending (${unresolvedCount})`}
+                {language === 'zh-CN'
+                  ? `批准符合条件项（${bulkReviewSummary.eligible.length}）`
+                  : `Approve eligible (${bulkReviewSummary.eligible.length})`}
               </Button>
             </div>
           ) : null}
@@ -305,8 +554,83 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
                       {claim.confidence !== undefined ? <span><ExplainedLabel label={`${Math.round(claim.confidence * 100)}%`} explanation={language === 'zh-CN' ? '这是候选抽取置信度，用于排序人工复核，不表示该主张为真的概率。' : 'Candidate-extraction confidence for prioritizing review; it is not the probability that the claim is true.'} /></span> : null}
                     </div>
                     <p className="claim-item__text">{language === 'zh-CN' ? claim.textZh ?? claim.text : claim.text}</p>
+                    {claim.confidenceComponents ? (
+                      <dl className="claim-confidence-components" aria-label={language === 'zh-CN' ? '抽取置信度组成' : 'Extraction-confidence components'}>
+                        <div>
+                          <dt>{language === 'zh-CN' ? '文本忠实度' : 'Textual fidelity'}</dt>
+                          <dd>{Math.round((claim.confidenceComponents.textualFidelity ?? 0) * 100)}%</dd>
+                        </div>
+                        <div>
+                          <dt>{language === 'zh-CN' ? '来源层级强度' : 'Source-tier strength'}</dt>
+                          <dd>{Math.round((claim.confidenceComponents.sourceTierStrength ?? 0) * 100)}%</dd>
+                        </div>
+                        <div>
+                          <dt>{language === 'zh-CN' ? '时间边界确定性' : 'Time-boundary certainty'}</dt>
+                          <dd>{Math.round((claim.confidenceComponents.timeBoundaryCertainty ?? 0) * 100)}%</dd>
+                        </div>
+                      </dl>
+                    ) : null}
                     {claim.impactChannels && claim.impactChannels.length > 0 ? (
-                      <p className="claim-item__channels">{claim.impactChannels.join(', ')}</p>
+                      <div
+                        className="claim-item__channels"
+                        aria-label={language === 'zh-CN' ? '影响通道' : 'Impact channels'}
+                      >
+                        {claim.impactChannels.map((channel) => {
+                          const display = impactChannelDisplay(channel, language);
+                          const rationale = claim.impactChannelRationale?.find(
+                            (item) => item.channel === channel,
+                          );
+                          return (
+                            <article key={channel} className="claim-channel-card">
+                              <div>
+                                <Tag type="cool-gray" size="sm">{display.name}</Tag>
+                                <Tag type="gray" size="sm">
+                                  {rationale?.evidenceType === 'FACT'
+                                    ? language === 'zh-CN' ? '事实' : 'Fact'
+                                    : language === 'zh-CN' ? '机制假设' : 'Mechanism hypothesis'}
+                                </Tag>
+                              </div>
+                              <p>{language === 'zh-CN'
+                                ? rationale?.reasonZh ?? rationale?.reason ?? display.description
+                                : rationale?.reason ?? display.description}</p>
+                              <dl>
+                                <div>
+                                  <dt>{language === 'zh-CN' ? '对应仿真参数' : 'Simulator parameter'}</dt>
+                                  <dd><code>{rationale?.simulatorParameter ?? display.simulatorParameter}</code></dd>
+                                </div>
+                                <div>
+                                  <dt>{language === 'zh-CN' ? '示例' : 'Example'}</dt>
+                                  <dd>{display.example}</dd>
+                                </div>
+                              </dl>
+                            </article>
+                          );
+                        })}
+                        <details className="claim-channel-unselected">
+                          <summary>{language === 'zh-CN' ? '未选择通道代表什么' : 'What unselected channels mean'}</summary>
+                          <ul>
+                            {IMPACT_CHANNEL_DEFINITIONS
+                              .filter((definition) => !claim.impactChannels?.includes(definition.id))
+                              .map((definition) => {
+                                const display = impactChannelDisplay(definition.id, language);
+                                return <li key={definition.id}><strong>{display.name}：</strong>{display.unselectedMeaning}</li>;
+                              })}
+                          </ul>
+                        </details>
+                      </div>
+                    ) : (
+                      <details className="claim-channel-unselected">
+                        <summary>{language === 'zh-CN' ? '未选择任何影响通道' : 'No impact channel selected'}</summary>
+                        <p>{language === 'zh-CN'
+                          ? '该主张目前只作为来源约束事实保留，不直接驱动任何仿真机制。'
+                          : 'The claim remains a source-bound fact and does not directly drive a simulator mechanism.'}</p>
+                      </details>
+                    )}
+                    {claim.status === 'AI_PROPOSED' && claimBulkExclusionReasons(claim, contentReviewSourceIds).length > 0 ? (
+                      <p className="claim-bulk-exclusion">
+                        {language === 'zh-CN' ? '仅支持逐条审核：' : 'Individual review only: '}
+                        {claimBulkExclusionReasons(claim, contentReviewSourceIds).join(' · ')}
+                      </p>
                     ) : null}
                     <div className="claim-item__evidence" aria-label={language === 'zh-CN' ? '来源关联' : 'Source links'}>
                       {(claim.sourceIds?.length ? claim.sourceIds : claim.sourceId ? [claim.sourceId] : []).map((sourceId) => (
@@ -316,6 +640,17 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
                       {claim.knownAt ? <span>{language === 'zh-CN' ? '可见时间' : 'Known at'} {new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(claim.knownAt))}</span> : null}
                     </div>
                     <div className="claim-item__actions">
+                      {claim.status !== 'AI_PROPOSED' ? (
+                        <Button
+                          kind="ghost"
+                          size="sm"
+                          renderIcon={ArrowCounterClockwise}
+                          disabled={disabled}
+                          onClick={() => void undoClaimReview(claim.id)}
+                        >
+                          {language === 'zh-CN' ? '撤销审核' : 'Undo review'}
+                        </Button>
+                      ) : null}
                       <Button kind="ghost" size="sm" renderIcon={Check} disabled={disabled} onClick={() => void decideClaim(claim.id, 'HUMAN_APPROVED')}>
                         {t('pack.approve')}
                       </Button>
@@ -358,12 +693,16 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
         open={bulkApproveOpen}
         danger
         modalLabel={language === 'zh-CN' ? '人工审核警告' : 'Human-review warning'}
-        modalHeading={language === 'zh-CN' ? `批准全部 ${unresolvedCount} 项待审核主张？` : `Approve all ${unresolvedCount} pending claims?`}
+        modalHeading={language === 'zh-CN'
+          ? `批准 ${bulkReviewSummary.eligible.length} 项符合条件的主张？`
+          : `Approve ${bulkReviewSummary.eligible.length} eligible claim(s)?`}
         primaryButtonText={reviewBusy
           ? language === 'zh-CN' ? '正在批准' : 'Approving'
-          : language === 'zh-CN' ? `我已理解，批准 ${unresolvedCount} 项` : `I understand — approve ${unresolvedCount}`}
+          : language === 'zh-CN'
+            ? `我已理解，批准 ${bulkReviewSummary.eligible.length} 项`
+            : `I understand — approve ${bulkReviewSummary.eligible.length}`}
         secondaryButtonText={t('common.cancel')}
-        primaryButtonDisabled={reviewBusy || unresolvedCount === 0}
+        primaryButtonDisabled={reviewBusy || bulkReviewSummary.eligible.length === 0}
         onRequestClose={() => { if (!reviewBusy) setBulkApproveOpen(false); }}
         onRequestSubmit={() => void approveAll()}
       >
@@ -373,12 +712,20 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
           hideCloseButton
           title={language === 'zh-CN' ? '这不是来源核验的替代品' : 'This does not replace source verification'}
           subtitle={language === 'zh-CN'
-            ? '确认后，当前所有待审核事实、估计与合成假设都会被标为“人工批准”。系统不会替你判断它们是否正确；已有修改、拒绝和批准保持不变，也不会自动冻结事件包。'
-            : 'Every currently pending fact, estimate, and synthetic assumption will be marked human-approved. The system cannot decide whether they are correct. Existing edits, rejections, and approvals remain unchanged, and the Event Pack will not freeze automatically.'}
+            ? '确认后，仅满足质量门禁的候选会被标为“人工批准”。低置信度、多通道、安全复核和非官方来源候选仍留在队列中，必须逐条处理；事件包不会自动冻结。'
+            : 'Only candidates that satisfy the quality gate will be marked human-approved. Low-confidence, multi-channel, safety-review, and non-official candidates remain pending for individual review; the Event Pack will not freeze automatically.'}
         />
         <p className="modal-help">{language === 'zh-CN'
           ? '如果另一标签页已经改变待审核队列，服务器会拒绝本次操作并要求你重新确认。'
           : 'If another tab changed the pending queue, the server will reject this request and require a fresh confirmation.'}</p>
+        <dl className="bulk-review-counts">
+          <div><dt>{language === 'zh-CN' ? '本次批准' : 'Approve now'}</dt><dd>{bulkReviewSummary.eligible.length}</dd></div>
+          <div><dt>{language === 'zh-CN' ? '低置信度排除' : 'Low confidence excluded'}</dt><dd>{bulkReviewSummary.lowConfidence}</dd></div>
+          <div><dt>{language === 'zh-CN' ? '多通道排除' : 'Multi-channel excluded'}</dt><dd>{bulkReviewSummary.multiChannel}</dd></div>
+          <div><dt>{language === 'zh-CN' ? '安全复核排除' : 'Safety REVIEW excluded'}</dt><dd>{bulkReviewSummary.contentReview}</dd></div>
+          <div><dt>{language === 'zh-CN' ? '非官方来源排除' : 'Non-official excluded'}</dt><dd>{bulkReviewSummary.nonOfficial}</dd></div>
+          <div><dt>{language === 'zh-CN' ? '机制映射为推断' : 'Mechanism mapping inferred'}</dt><dd>{bulkReviewSummary.mechanismInferred}</dd></div>
+        </dl>
         {bulkApproveError ? (
           <InlineNotification kind="error" lowContrast hideCloseButton title={t('common.errorTitle')} subtitle={bulkApproveError} />
         ) : null}
@@ -407,6 +754,46 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
           rows={5}
           onChange={(event) => setEditedTextZh(event.target.value)}
         />
+        <fieldset className="claim-channel-editor">
+          <legend>{language === 'zh-CN' ? '影响通道（最多 2 个）' : 'Impact channels (maximum 2)'}</legend>
+          <p>{language === 'zh-CN'
+            ? '通道描述的是仿真机制映射，不是事实为真的概率。'
+            : 'Channels describe simulator-mechanism mappings, not the probability that a fact is true.'}</p>
+          <div className="claim-channel-editor__options">
+            {IMPACT_CHANNEL_DEFINITIONS.map((definition) => {
+              const display = impactChannelDisplay(definition.id, language);
+              const checked = editedImpactChannels.includes(definition.id);
+              return (
+                <label key={definition.id}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    disabled={!checked && editedImpactChannels.length >= 2}
+                    onChange={() => toggleEditedChannel(definition.id)}
+                  />
+                  <span><strong>{display.name}</strong><small>{display.description}</small></span>
+                </label>
+              );
+            })}
+          </div>
+          {editedImpactChannels.map((channel) => {
+            const display = impactChannelDisplay(channel, language);
+            return (
+              <TextArea
+                key={channel}
+                id={`edited-channel-reason-${channel}`}
+                labelText={`${display.name} · ${language === 'zh-CN' ? '映射理由' : 'Mapping rationale'}`}
+                value={editedChannelReasons[channel] ?? ''}
+                rows={3}
+                onChange={(event) => setEditedChannelReasons((current) => ({
+                  ...current,
+                  [channel]: event.target.value,
+                }))}
+                helperText={`${language === 'zh-CN' ? '对应参数' : 'Simulator parameter'}: ${display.simulatorParameter}`}
+              />
+            );
+          })}
+        </fieldset>
       </Modal>
       <EventPackUploadModal open={uploadOpen} onClose={() => setUploadOpen(false)} />
       <EventPackUploadModal open={reextractOpen} onClose={() => setReextractOpen(false)} existingEventPack={eventPack} />

@@ -14,96 +14,40 @@ import { EmptyState, Notice, PageHeader } from '../components/common';
 import { useI18n } from '../i18n';
 import { getPageGuide } from '../page-guidance';
 import { useWorkflow } from '../state/workflow-context';
-import { formatMetricValue, safeDate } from '../utils/format';
-
-function traceKindLabel(kind: string | undefined, t: ReturnType<typeof useI18n>['t']): string {
-  if (!kind) return t('common.details');
-  const keys = {
-    FACT: 'trace.kind.fact',
-    EXTERNAL_FACT: 'trace.kind.fact',
-    FACT_ARRIVED: 'trace.kind.fact',
-    CLARIFICATION_ARRIVED: 'trace.kind.fact',
-    OBSERVATION: 'trace.kind.observation',
-    OBSERVATION_CREATED: 'trace.kind.observation',
-    BELIEF: 'trace.kind.belief',
-    BELIEF_UPDATE: 'trace.kind.belief',
-    BELIEF_UPDATED: 'trace.kind.belief',
-    SOCIAL: 'trace.kind.social',
-    SOCIAL_PROPAGATION: 'trace.kind.social',
-    SOCIAL_PROPAGATED: 'trace.kind.social',
-    INTENT: 'trace.kind.intent',
-    ACTION_PREFERENCE: 'trace.kind.intent',
-    ACTION_INTENT: 'trace.kind.intent',
-    RISK: 'trace.kind.risk',
-    RISK_CHECK: 'trace.kind.risk',
-    ORDER: 'trace.kind.order',
-    ORDER_SUBMITTED: 'trace.kind.order',
-    SYSTEM_ORDER_SUBMITTED: 'trace.kind.order',
-    FILL: 'trace.kind.fill',
-    TRADE_EXECUTED: 'trace.kind.fill',
-    MARKET: 'trace.kind.market',
-    MARKET_STATE: 'trace.kind.market',
-    STOP: 'trace.kind.stop',
-    STOP_LOSS: 'trace.kind.stop',
-    METRIC: 'trace.kind.metric',
-  } as const;
-  const key = keys[kind.toUpperCase() as keyof typeof keys];
-  return key ? t(key) : kind.replaceAll('_', ' ').toLowerCase();
-}
+import {
+  traceAgentDisplay,
+  traceEventDisplay,
+  traceOrderStatusLabel,
+  tracePayloadFieldDisplay,
+  tracePayloadValueDisplay,
+  tracePhaseLabel,
+  traceRiskDecisionLabel,
+  traceScenarioLabel,
+  traceSourceLayerLabel,
+} from '../trace-display';
+import { formatMetricValue, isoUtcDate, safeDate } from '../utils/format';
 
 function traceIcon(kind: string | undefined): ReactNode {
-  switch (kind?.toUpperCase()) {
-    case 'FACT':
-    case 'EXTERNAL_FACT':
+  switch (traceEventDisplay(kind, 'en').category) {
+    case 'fact':
       return <FileText size={20} />;
-    case 'BELIEF':
-    case 'BELIEF_UPDATE':
-    case 'BELIEF_UPDATED':
+    case 'belief':
       return <Brain size={20} />;
-    case 'ORDER':
-    case 'ORDER_SUBMITTED':
-    case 'FILL':
-    case 'TRADE_EXECUTED':
+    case 'order':
+    case 'fill':
       return <ShoppingCart size={20} />;
-    case 'RISK':
-    case 'RISK_CHECK':
+    case 'risk':
       return <CheckCircle size={20} />;
-    case 'STOP':
-    case 'STOP_LOSS':
+    case 'stop':
       return <Warning size={20} />;
     default:
       return <FlowArrow size={20} />;
   }
 }
 
-function tracePayloadValue(
-  key: string,
-  value: unknown,
-  language: 'en' | 'zh-CN',
-): string {
-  if (key === 'source' && typeof value === 'string') {
-    const labels: Record<string, { en: string; zh: string }> = {
-      LLM_BELIEF_SIGNAL: { en: 'LLM belief signal', zh: 'LLM 信念信号' },
-      RULE_FALLBACK_BELIEF_SIGNAL: {
-        en: 'Deterministic rule-fallback belief signal',
-        zh: '确定性规则回退信念信号',
-      },
-      RULE_AGENT: { en: 'Deterministic rule agent', zh: '确定性规则智能体' },
-    };
-    const label = labels[value];
-    if (label) return language === 'zh-CN' ? label.zh : label.en;
-  }
-  if (typeof value === 'boolean') {
-    return value
-      ? language === 'zh-CN' ? '是' : 'Yes'
-      : language === 'zh-CN' ? '否' : 'No';
-  }
-  return typeof value === 'string' ? value : JSON.stringify(value);
-}
-
 export function TraceExplorerPage() {
   const { language, t } = useI18n();
-  const { results } = useWorkflow();
+  const { activeExperiment, results } = useWorkflow();
   const [selectedNode, setSelectedNode] = useState<TraceNode>();
   const [scenarioFilter, setScenarioFilter] = useState('all');
   const [kindFilter, setKindFilter] = useState('all');
@@ -113,7 +57,21 @@ export function TraceExplorerPage() {
   const filteredTraces = useMemo(() => (results?.traces ?? []).filter((node) => (
     (scenarioFilter === 'all' || node.scenario === scenarioFilter)
     && (kindFilter === 'all' || node.kind === kindFilter)
-  )), [kindFilter, results?.traces, scenarioFilter]);
+  )).sort((left, right) => {
+    const scenarioOrder = (scenario: string | undefined) => (
+      scenario?.toLowerCase() === 'baseline' ? 0
+        : scenario?.toLowerCase() === 'intervention' ? 1 : 2
+    );
+    return scenarioOrder(left.scenario) - scenarioOrder(right.scenario)
+      || (left.globalSequence ?? Number.MAX_SAFE_INTEGER)
+        - (right.globalSequence ?? Number.MAX_SAFE_INTEGER)
+      || (left.step ?? Number.MAX_SAFE_INTEGER) - (right.step ?? Number.MAX_SAFE_INTEGER)
+      || (left.phaseSequence ?? Number.MAX_SAFE_INTEGER)
+        - (right.phaseSequence ?? Number.MAX_SAFE_INTEGER)
+      || left.id.localeCompare(right.id);
+  }), [kindFilter, results?.traces, scenarioFilter]);
+  const orderSummaries = results?.orderExecutionSummary ?? [];
+  const tickSize = activeExperiment?.scenario?.market?.tickSize;
 
   useEffect(() => {
     setSelectedNode(filteredTraces[0]);
@@ -144,11 +102,11 @@ export function TraceExplorerPage() {
             <div className="trace-filters">
               <Select id="trace-scenario-filter" labelText={language === 'zh-CN' ? '场景' : 'Scenario'} value={scenarioFilter} onChange={(event) => setScenarioFilter(event.target.value)}>
                 <SelectItem value="all" text={language === 'zh-CN' ? '全部场景' : 'All scenarios'} />
-                {scenarios.map((scenario) => <SelectItem key={scenario} value={scenario} text={scenario} />)}
+                {scenarios.map((scenario) => <SelectItem key={scenario} value={scenario} text={traceScenarioLabel(scenario, language)} />)}
               </Select>
               <Select id="trace-kind-filter" labelText={language === 'zh-CN' ? '事件类型' : 'Event kind'} value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}>
                 <SelectItem value="all" text={language === 'zh-CN' ? '全部类型' : 'All kinds'} />
-                {kinds.map((kind) => <SelectItem key={kind} value={kind} text={traceKindLabel(kind, t)} />)}
+                {kinds.map((kind) => <SelectItem key={kind} value={kind} text={traceEventDisplay(kind, language).label} />)}
               </Select>
             </div>
             <ol>
@@ -156,14 +114,29 @@ export function TraceExplorerPage() {
                 <li key={node.id}>
                   <button
                     type="button"
-                    className={selectedNode?.id === node.id ? 'is-active' : ''}
+                    className={[
+                      selectedNode?.id === node.id ? 'is-active' : '',
+                      node.isInterventionDifference ? 'is-intervention-difference' : '',
+                    ].filter(Boolean).join(' ')}
                     onClick={() => setSelectedNode(node)}
                     aria-current={selectedNode?.id === node.id ? 'step' : undefined}
                   >
                     <span className="trace-node__icon" aria-hidden="true">{traceIcon(node.kind)}</span>
                     <span className="trace-node__body">
-                      <small>{node.time ? safeDate(node.time, language) : node.step !== undefined ? `${t('chart.step')} ${node.step}` : `${index + 1}`}</small>
-                      <strong>{traceKindLabel(node.kind, t)}</strong>
+                      <small>
+                        {node.globalSequence !== undefined ? `#${node.globalSequence} · ` : ''}
+                        {node.time ? safeDate(node.time, language) : node.step !== undefined ? `${t('chart.step')} ${node.step}` : `${index + 1}`}
+                        {node.phase ? ` · ${tracePhaseLabel(node.phase, language)} ${node.phaseSequence ?? ''}` : ''}
+                      </small>
+                      <strong>{traceEventDisplay(node.kind, language).label}</strong>
+                      {node.sourceLayer ? (
+                        <small>
+                          {traceSourceLayerLabel(node.sourceLayer, language)}
+                          {node.isInterventionDifference
+                            ? language === 'zh-CN' ? ' · 与基准不同' : ' · differs from baseline'
+                            : ''}
+                        </small>
+                      ) : null}
                       <span>{language === 'zh-CN' ? node.summaryZh ?? node.summary ?? t('common.noData') : node.summary ?? t('common.noData')}</span>
                     </span>
                     <ArrowRight size={17} aria-hidden="true" />
@@ -177,30 +150,68 @@ export function TraceExplorerPage() {
             {selectedNode ? (
               <>
                 <div className="trace-detail__heading">
-                  <Tag type="blue" size="sm">{traceKindLabel(selectedNode.kind, t)}</Tag>
-                  <h2>{traceKindLabel(selectedNode.kind, t)}</h2>
+                  <Tag type="blue" size="sm">{traceEventDisplay(selectedNode.kind, language).label}</Tag>
+                  {selectedNode.sourceLayer ? (
+                    <Tag type="gray" size="sm">{traceSourceLayerLabel(selectedNode.sourceLayer, language)}</Tag>
+                  ) : null}
+                  {selectedNode.isInterventionDifference ? (
+                    <Tag type="warm-gray" size="sm">
+                      {language === 'zh-CN' ? '干预变化' : 'Intervention difference'}
+                    </Tag>
+                  ) : null}
+                  <h2>{traceEventDisplay(selectedNode.kind, language).label}</h2>
                   {selectedNode.summary ? <p>{language === 'zh-CN' ? selectedNode.summaryZh ?? selectedNode.summary : selectedNode.summary}</p> : null}
                 </div>
                 <dl className="definition-list">
+                  {selectedNode.globalSequence !== undefined ? <div><dt>{language === 'zh-CN' ? '全局序号' : 'Global sequence'}</dt><dd>{selectedNode.globalSequence}</dd></div> : null}
+                  {selectedNode.step !== undefined ? <div><dt>{t('chart.step')}</dt><dd>{selectedNode.step}</dd></div> : null}
+                  {selectedNode.phase ? <div><dt>{language === 'zh-CN' ? '步骤内阶段' : 'Within-step phase'}</dt><dd>{tracePhaseLabel(selectedNode.phase, language)}{selectedNode.phaseSequence !== undefined ? ` · ${language === 'zh-CN' ? '阶段序号' : 'phase sequence'} ${selectedNode.phaseSequence}` : ''}</dd></div> : null}
                   {selectedNode.time ? <div><dt>{t('pack.pointInTime')}</dt><dd>{safeDate(selectedNode.time, language)}</dd></div> : null}
-                  {selectedNode.scenario ? <div><dt>{language === 'zh-CN' ? '场景' : 'Scenario'}</dt><dd>{selectedNode.scenario}</dd></div> : null}
+                  {selectedNode.scenario ? <div><dt>{language === 'zh-CN' ? '场景' : 'Scenario'}</dt><dd>{traceScenarioLabel(selectedNode.scenario, language)}</dd></div> : null}
                   {selectedNode.seed !== undefined ? <div><dt>{t('chart.seed')}</dt><dd>{selectedNode.seed}</dd></div> : null}
                   {selectedNode.parentId ? <div><dt>{language === 'zh-CN' ? '父节点' : 'Parent node'}</dt><dd><code>{selectedNode.parentId}</code></dd></div> : null}
                   {selectedNode.sourceId ? <div><dt>{t('common.sourceId')}</dt><dd><code>{selectedNode.sourceId}</code></dd></div> : null}
-                  {selectedNode.agentId ? <div><dt>{t('common.agentId')}</dt><dd><code>{selectedNode.agentId}</code></dd></div> : null}
+                  {selectedNode.agentId ? (
+                    <div>
+                      <dt>{t('common.agentId')}</dt>
+                      <dd>
+                        <code>{selectedNode.agentId}</code>
+                        {typeof selectedNode.payload?.agentType === 'string' ? (
+                          <span title={traceAgentDisplay(selectedNode.payload.agentType, language).description}>
+                            {traceAgentDisplay(selectedNode.payload.agentType, language).name}
+                          </span>
+                        ) : null}
+                      </dd>
+                    </div>
+                  ) : null}
                   {selectedNode.orderId ? <div><dt>{t('common.orderId')}</dt><dd><code>{selectedNode.orderId}</code></dd></div> : null}
                   {selectedNode.metricContribution !== undefined ? (
                     <div><dt>{t('trace.metricContribution')}</dt><dd>{formatMetricValue(selectedNode.metricContribution, undefined, language)}</dd></div>
                   ) : null}
                   {selectedNode.methodNote ? <div><dt>{t('common.method')}</dt><dd>{selectedNode.methodNote}</dd></div> : null}
                 </dl>
-                {selectedNode.payload && Object.keys(selectedNode.payload).length > 0 ? (
+                {selectedNode.time
+                  || (selectedNode.payload && Object.keys(selectedNode.payload).length > 0) ? (
                   <details className="trace-payload">
-                    <summary>{language === 'zh-CN' ? '查看经过清理的事件负载' : 'Inspect sanitized event payload'}</summary>
+                    <summary>{language === 'zh-CN' ? '技术详情' : 'Technical details'}</summary>
                     <dl className="definition-list definition-list--compact">
-                      {Object.entries(selectedNode.payload).map(([key, value]) => (
-                        <div key={key}><dt>{key}</dt><dd><code>{tracePayloadValue(key, value, language)}</code></dd></div>
-                      ))}
+                      {selectedNode.time ? (
+                        <div>
+                          <dt>{language === 'zh-CN' ? '事件时间（UTC）' : 'Event time (UTC)'}</dt>
+                          <dd><code>{isoUtcDate(selectedNode.time, language)}</code></dd>
+                        </div>
+                      ) : null}
+                      {Object.entries(selectedNode.payload ?? {}).map(([key, value]) => {
+                        const field = tracePayloadFieldDisplay(key, language);
+                        return (
+                          <div key={key}>
+                            <dt title={field.known ? undefined : key}>{field.label}</dt>
+                            <dd>
+                              <code>{tracePayloadValueDisplay(key, value, language, tickSize)}</code>
+                            </dd>
+                          </div>
+                        );
+                      })}
                     </dl>
                   </details>
                 ) : null}
@@ -210,6 +221,66 @@ export function TraceExplorerPage() {
           </section>
         </div>
       )}
+      {orderSummaries.length > 0 ? (
+        <section className="trace-order-summary" aria-labelledby="trace-order-summary-heading">
+          <div className="section-heading">
+            <h2 id="trace-order-summary-heading">
+              {language === 'zh-CN' ? '代表路径订单执行汇总' : 'Representative-path order execution'}
+            </h2>
+            <p>
+              {language === 'zh-CN'
+                ? '同一订单聚合显示请求量、风控批准量、累计成交、剩余数量、成交均价与最终状态。'
+                : 'Each order combines requested, approved, filled, remaining, VWAP, and final-status evidence.'}
+            </p>
+          </div>
+          <div className="result-table-wrap">
+            <table className="result-table">
+              <thead>
+                <tr>
+                  <th>{language === 'zh-CN' ? '顺序 / 场景' : 'Sequence / scenario'}</th>
+                  <th>{language === 'zh-CN' ? '订单' : 'Order'}</th>
+                  <th>{language === 'zh-CN' ? '方向' : 'Side'}</th>
+                  <th>{language === 'zh-CN' ? '请求 / 批准' : 'Requested / approved'}</th>
+                  <th>{language === 'zh-CN' ? '累计成交 / 剩余' : 'Filled / remaining'}</th>
+                  <th>{language === 'zh-CN' ? '均价 / 笔数' : 'VWAP / fills'}</th>
+                  <th>{language === 'zh-CN' ? '风控 / 最终状态' : 'Risk / final status'}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {orderSummaries.map((order) => (
+                  <tr
+                    key={`${order.scenario ?? 'unknown'}-${order.orderId}`}
+                    className={order.isInterventionDifference ? 'is-intervention-difference' : undefined}
+                  >
+                    <td>
+                      #{order.submissionSequence ?? '—'} · {order.scenario
+                        ? traceScenarioLabel(order.scenario, language)
+                        : t('common.unavailable')}
+                      {order.isInterventionDifference
+                        ? language === 'zh-CN' ? ' · 干预变化' : ' · intervention difference'
+                        : ''}
+                    </td>
+                    <td><code>{order.orderId}</code></td>
+                    <td>{tracePayloadValueDisplay('side', order.side, language)}</td>
+                    <td>{order.requestedQuantity ?? '—'} / {order.approvedQuantity ?? '—'}</td>
+                    <td>{order.cumulativeFilledQuantity ?? '—'} / {order.remainingQuantity ?? '—'}</td>
+                    <td>
+                      {order.vwapPrice !== undefined
+                        ? new Intl.NumberFormat(language, { maximumFractionDigits: 4 }).format(order.vwapPrice)
+                        : '—'} / {order.fillCount ?? 0}
+                    </td>
+                    <td>
+                      {traceRiskDecisionLabel(order.riskDecision, language)}
+                      {' · '}
+                      {traceOrderStatusLabel(order.finalStatus, language)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
     </div>
   );
 }

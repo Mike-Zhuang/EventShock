@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Literal
 
@@ -34,6 +36,9 @@ IntegrationValidationStatus = Literal[
 DEFAULT_PROVIDER: ProviderId = "zhipu"
 DEFAULT_MODEL = "glm-5.2"
 CATALOG_VERIFIED_AT = "2026-07-20"
+CAPABILITY_SNAPSHOT_VERSION = "cognition-capabilities-2026-07-20"
+CAPABILITY_SNAPSHOT_VALID_UNTIL = "2026-08-20T23:59:59Z"
+CAPABILITY_REVIEW_CADENCE_DAYS = 31
 APPLICATION_MAX_OUTPUT_TOKENS = 131_072
 PROVIDER_FEEDBACK_ISSUE_URL = (
     "https://github.com/Mike-Zhuang/EventShock/issues/new?template=llm-provider-feedback.yml"
@@ -105,6 +110,61 @@ class ModelDescriptor(StrictFrozenModel):
         """供前端明确区分“官方上限”与用户本次请求的 maxTokens。"""
 
         return self.official_output_limit_tokens or self.max_output_tokens
+
+
+def capabilitySnapshotStatus(
+    *,
+    clock: Callable[[], datetime] | None = None,
+) -> Literal["CURRENT", "STALE_FAIL_CLOSED"]:
+    """能力目录过期后显式关闭“已核验”声明，避免陈旧能力静默放行。"""
+
+    now = clock() if clock is not None else datetime.now(UTC)
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("capability clock must return a timezone-aware datetime")
+    validUntil = datetime.fromisoformat(CAPABILITY_SNAPSHOT_VALID_UNTIL.replace("Z", "+00:00"))
+    return "CURRENT" if now.astimezone(UTC) <= validUntil else "STALE_FAIL_CLOSED"
+
+
+def modelValidationEvidence(
+    provider: ProviderId | str,
+    modelId: str,
+) -> dict[str, object]:
+    """返回逐模型验证矩阵；供应商适配器测试绝不冒充真实 Key 端到端验证。"""
+
+    try:
+        model = getModel(provider, modelId)
+    except ValueError:
+        return {
+            "knownModel": False,
+            "officialDocumentationStatus": "UNVERIFIED",
+            "adapterContractStatus": "NOT_RUN",
+            "liveKeyE2eStatus": "NOT_RUN",
+            "structuredOutputStatus": "UNVERIFIED",
+            "streamingStatus": "UNVERIFIED",
+            "thinkingJsonStatus": "UNVERIFIED",
+            "usageCostStatus": "UNVERIFIED",
+            "evidenceSourceUrl": None,
+            "verifiedAt": None,
+            "verificationScope": "UNKNOWN_MODEL_UNVERIFIED",
+        }
+    snapshotCurrent = capabilitySnapshotStatus() == "CURRENT"
+    documentationStatus = "VERIFIED" if snapshotCurrent else "STALE_FAIL_CLOSED"
+    return {
+        "knownModel": True,
+        "officialDocumentationStatus": documentationStatus,
+        # 这些状态只证明统一网关的 mock/契约路径，不证明该具体型号接受了真实请求。
+        "adapterContractStatus": "PASS",
+        "liveKeyE2eStatus": "NOT_RUN",
+        "structuredOutputStatus": "OFFICIAL_DOCS_AND_LOCAL_SCHEMA_CONTRACT",
+        "streamingStatus": "PROVIDER_ADAPTER_CONTRACT_ONLY",
+        "thinkingJsonStatus": (
+            "PROVIDER_ADAPTER_CONTRACT_ONLY" if model.supports_thinking else "NOT_APPLICABLE"
+        ),
+        "usageCostStatus": "PROVIDER_ADAPTER_CONTRACT_ONLY",
+        "evidenceSourceUrl": model.official_model_url,
+        "verifiedAt": model.verified_at,
+        "verificationScope": "EXACT_MODEL_DOCS_PLUS_PROVIDER_ADAPTER_NO_LIVE_KEY",
+    }
 
 
 PROVIDERS: tuple[ProviderDescriptor, ...] = (

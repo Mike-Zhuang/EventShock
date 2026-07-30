@@ -10,16 +10,29 @@ from typing import TYPE_CHECKING
 
 from backend.app.guided_workflow.models import (
     GuidedAdvanceRequest,
+    GuidedArchiveRequest,
     GuidedLinkRequest,
     GuidedProposalActionRequest,
     GuidedStage,
+    GuidedTurnOperationView,
+    GuidedTurnRecoveryAction,
+    GuidedTurnRecoveryRequest,
     GuidedTurnRequest,
     GuidedWorkflowDraft,
     GuidedWorkflowMessage,
     GuidedWorkflowProposal,
     GuidedWorkflowView,
 )
-from backend.app.guided_workflow.repository import GuidedTurnClaim, GuidedWorkflowRepository
+from backend.app.guided_workflow.repository import (
+    GuidedCachedTurn,
+    GuidedTurnClaim,
+    GuidedWorkflowRepository,
+)
+from backend.app.guided_workflow.stage_openings import (
+    GuidedLanguage,
+    guidedStageOpening,
+    guidedStageOpeningMessageId,
+)
 from backend.app.security import scanTextContent
 
 if TYPE_CHECKING:
@@ -48,23 +61,13 @@ class GuidedWorkflowService:
         self.repository = repository
         self.artifactValidator = artifactValidator
 
-    def create(self, ownerUserId: str, language: str) -> GuidedWorkflowView:
+    def create(self, ownerUserId: str, language: GuidedLanguage) -> GuidedWorkflowView:
         workflowId = f"guided-{uuid.uuid4().hex}"
-        greeting = (
-            "我们会分阶段完成事件目标、来源、主张、事件包、单一干预和运行前检查。"
-            "AI 只能提出草稿；每次应用、审核、冻结和运行都由你明确确认。先用一两句话"
-            "说明你想研究的事件、对象和问题。"
-            if language == "zh-CN"
-            else "We will work through the event goal, sources, claims, Event Pack, one "
-            "intervention, and preflight in bounded stages. AI can only propose drafts; "
-            "you explicitly apply, review, freeze, and run every consequential step. Start "
-            "with one or two sentences describing the event, instrument, and question."
-        )
         return self.repository.create(
             workflowId=workflowId,
             ownerUserId=ownerUserId,
             language=language,
-            greeting=greeting,
+            greeting=guidedStageOpening(GuidedStage.EVENT_GOAL, language),
             now=datetime.now(UTC),
         )
 
@@ -96,6 +99,13 @@ class GuidedWorkflowService:
         if claim.replayed:
             return claim.workflow
         try:
+            self.cacheValidatedProposal(
+                workflowId=workflowId,
+                ownerUserId=ownerUserId,
+                request=request,
+                claim=claim,
+                proposal=proposal,
+            )
             return self.completeTurn(
                 workflowId=workflowId,
                 ownerUserId=ownerUserId,
@@ -130,6 +140,60 @@ class GuidedWorkflowService:
             expectedVersion=request.expectedVersion,
             clientRequestId=request.clientRequestId,
             requestHash=self._requestHash(request),
+            requestMessage=request.message.strip(),
+            language=request.language,
+            now=datetime.now(UTC),
+        )
+
+    def cacheValidatedProposal(
+        self,
+        *,
+        workflowId: str,
+        ownerUserId: str,
+        request: GuidedTurnRequest,
+        claim: GuidedTurnClaim,
+        proposal: GuidedWorkflowProposal,
+    ) -> None:
+        if claim.replayed or claim.claimToken is None:
+            return
+        if proposal.stage is not claim.workflow.stage:
+            raise ValueError("model proposal stage does not match the deterministic workflow")
+        self.repository.cacheValidatedProposal(
+            workflowId=workflowId,
+            ownerUserId=ownerUserId,
+            clientRequestId=request.clientRequestId,
+            requestHash=claim.requestHash,
+            claimToken=claim.claimToken,
+            proposal=proposal,
+            now=datetime.now(UTC),
+        )
+
+    def recordTurnProviderEvidence(
+        self,
+        *,
+        workflowId: str,
+        ownerUserId: str,
+        request: GuidedTurnRequest,
+        claim: GuidedTurnClaim,
+        providerRequestId: str | None,
+        httpResponseReceived: bool | None,
+        usageReceived: bool | None,
+        parseCompleted: bool | None,
+        failureStage: str,
+    ) -> None:
+        if claim.replayed or claim.claimToken is None:
+            return
+        self.repository.recordTurnProviderEvidence(
+            workflowId=workflowId,
+            ownerUserId=ownerUserId,
+            clientRequestId=request.clientRequestId,
+            requestHash=claim.requestHash,
+            claimToken=claim.claimToken,
+            providerRequestId=providerRequestId,
+            httpResponseReceived=httpResponseReceived,
+            usageReceived=usageReceived,
+            parseCompleted=parseCompleted,
+            failureStage=failureStage,
             now=datetime.now(UTC),
         )
 
@@ -209,6 +273,92 @@ class GuidedWorkflowService:
             now=datetime.now(UTC),
         )
 
+    def listTurnOperations(
+        self,
+        workflowId: str,
+        ownerUserId: str,
+    ) -> list[GuidedTurnOperationView]:
+        return self.repository.listTurnOperations(
+            workflowId=workflowId,
+            ownerUserId=ownerUserId,
+        )
+
+    def recoverTurn(
+        self,
+        *,
+        workflowId: str,
+        ownerUserId: str,
+        clientRequestId: str,
+        request: GuidedTurnRecoveryRequest,
+    ) -> GuidedWorkflowView | GuidedTurnOperationView:
+        if request.action is GuidedTurnRecoveryAction.ABANDON_AND_AUTHORIZE_RETRY:
+            return self.repository.abandonAndAuthorizeRetry(
+                workflowId=workflowId,
+                ownerUserId=ownerUserId,
+                clientRequestId=clientRequestId,
+                recoveryRequestId=request.recoveryRequestId,
+                expectedVersion=request.expectedVersion,
+                newClientRequestId=request.newClientRequestId or "",
+                now=datetime.now(UTC),
+            )
+        recovered = self.repository.recoverCachedTurn(
+            workflowId=workflowId,
+            ownerUserId=ownerUserId,
+            clientRequestId=clientRequestId,
+            recoveryRequestId=request.recoveryRequestId,
+            expectedVersion=request.expectedVersion,
+            now=datetime.now(UTC),
+        )
+        if isinstance(recovered, GuidedWorkflowView):
+            return recovered
+        if not isinstance(recovered, GuidedCachedTurn):
+            raise RuntimeError("guided cached-turn recovery returned an invalid state")
+        turnRequest = GuidedTurnRequest(
+            message=recovered.message,
+            language=recovered.language,
+            expectedVersion=request.expectedVersion,
+            clientRequestId=clientRequestId,
+        )
+        try:
+            response = self.completeTurn(
+                workflowId=workflowId,
+                ownerUserId=ownerUserId,
+                request=turnRequest,
+                claim=recovered.claim,
+                proposal=recovered.proposal,
+                recordAudit=True,
+            )
+        except Exception as error:
+            self.markTurnUnknown(
+                workflowId=workflowId,
+                ownerUserId=ownerUserId,
+                request=turnRequest,
+                claim=recovered.claim,
+                errorCode=type(error).__name__,
+            )
+            raise
+        self.repository.completeTurnRecovery(
+            workflowId=workflowId,
+            ownerUserId=ownerUserId,
+            recoveryRequestId=request.recoveryRequestId,
+            response=response,
+            now=datetime.now(UTC),
+        )
+        return response
+
+    def archive(
+        self,
+        workflowId: str,
+        ownerUserId: str,
+        request: GuidedArchiveRequest,
+    ) -> GuidedWorkflowView:
+        return self.repository.archive(
+            workflowId=workflowId,
+            ownerUserId=ownerUserId,
+            expectedVersion=request.expectedVersion,
+            now=datetime.now(UTC),
+        )
+
     def deterministicProposal(
         self,
         *,
@@ -280,12 +430,20 @@ class GuidedWorkflowService:
         nextStage = _NEXT_STAGE.get(current.stage)
         if nextStage is None:
             raise ValueError("the guided workflow cannot advance from its current stage")
+        now = datetime.now(UTC)
         return self.repository.advance(
             workflowId=workflowId,
             ownerUserId=ownerUserId,
             expectedVersion=request.expectedVersion,
             nextStage=nextStage,
-            now=datetime.now(UTC),
+            openingMessage=GuidedWorkflowMessage(
+                id=guidedStageOpeningMessageId(workflowId, nextStage),
+                role="assistant",
+                stage=nextStage,
+                content=guidedStageOpening(nextStage, current.language),
+                createdAt=now,
+            ),
+            now=now,
         )
 
     def linkArtifacts(
