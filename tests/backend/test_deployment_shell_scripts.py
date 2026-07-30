@@ -276,6 +276,8 @@ def testGitHubSyncPublishesFailClosedEvidenceForEveryTerminalBranch() -> None:
     mainBody = script.split("main() {", 1)[1].split('\n}\n\nmain "$@"', 1)[0]
 
     assert "reset_required_check_evidence" in mainBody
+    assert 'deployment_status_has_verified_checks "${targetCommit}"' in mainBody
+    assert "EVIDENCE_REFRESH" in mainBody
     assert '"SUCCEEDED" "${deployedCommit}" "${targetCommit}" "" "false" "true"' in mainBody
     assert '"PENDING" "${deployedCommit}" "${targetCommit}"' in mainBody
     assert '"SUCCEEDED" "${targetCommit}" "${targetCommit}" "" "true"' in mainBody
@@ -286,6 +288,12 @@ def testGitHubSyncPublishesFailClosedEvidenceForEveryTerminalBranch() -> None:
     assert '.status == "PASS"' in script
     assert "$previous.requiredChecks" in script
     assert "reuseVerifiedChecks" in script
+    evidenceCheck = script.split("deployment_status_has_verified_checks() {", 1)[1].split(
+        "\n}\n\nbuild_deployment_status_document() {", 1
+    )[0]
+    assert ".deployedCommit == $expectedCommit" in evidenceCheck
+    assert ".githubMainCommit == $expectedCommit" in evidenceCheck
+    assert 'all(.requiredChecks[]; .status == "PASS")' in evidenceCheck
 
 
 def testGitHubSyncRepairsInfrastructureWithoutQuarantiningKnownGoodCommit() -> None:

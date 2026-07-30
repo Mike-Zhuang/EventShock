@@ -104,6 +104,25 @@ read_deployment_status_document() {
     "${statusPath}" 2>/dev/null || printf '{}\n'
 }
 
+deployment_status_has_verified_checks() {
+  local expectedCommit="$1"
+  local mountpoint document
+  [[ "${expectedCommit}" =~ ^[0-9a-f]{40}$ ]] || return 1
+  mountpoint="$(deployment_status_volume_mountpoint)" || return 1
+  document="$(read_deployment_status_document "${mountpoint}")"
+  jq -e \
+    --arg expectedCommit "${expectedCommit}" \
+    --argjson requiredNames "${REQUIRED_CHECK_NAMES_JSON}" \
+    '
+      .deployedCommit == $expectedCommit
+      and .githubMainCommit == $expectedCommit
+      and ((.requiredChecks? | type) == "array")
+      and ((.requiredChecks | length) == ($requiredNames | length))
+      and (([.requiredChecks[].name] | sort) == ($requiredNames | sort))
+      and all(.requiredChecks[]; .status == "PASS")
+    ' <<<"${document}" >/dev/null
+}
+
 build_deployment_status_document() {
   local previousJson="$1"
   local syncResult="$2"
@@ -747,7 +766,9 @@ main() {
   prepare_mirror
   targetCommit="$(git --git-dir="${MIRROR_DIR}" rev-parse "${DEPLOY_REF}^{commit}")"
   STATUS_TARGET_COMMIT="${targetCommit}"
-  if [[ "${targetCommit}" == "${deployedCommit}" ]] && ((runtimeHealthy == 1)); then
+  if [[ "${targetCommit}" == "${deployedCommit}" ]] \
+    && ((runtimeHealthy == 1)) \
+    && deployment_status_has_verified_checks "${targetCommit}"; then
     if ! write_deployment_status \
       "SUCCEEDED" "${deployedCommit}" "${targetCommit}" "" "false" "true"; then
       STATUS_FAILURE_CODE="DEPLOYMENT_STATUS_WRITE_FAILED"
@@ -757,6 +778,9 @@ main() {
     rm -f -- "${FAILED_STATE_FILE}"
     log "NO_CHANGE: branch, state, current release, container and public health remain at ${targetCommit}"
     exit 0
+  fi
+  if [[ "${targetCommit}" == "${deployedCommit}" ]] && ((runtimeHealthy == 1)); then
+    log "EVIDENCE_REFRESH: runtime is healthy but verified CI evidence is missing or stale"
   fi
   if ((infrastructureBlocked == 1)) && [[ "${targetCommit}" == "${deployedCommit}" ]]; then
     STATUS_FAILURE_CODE="INFRASTRUCTURE_BLOCKED"
