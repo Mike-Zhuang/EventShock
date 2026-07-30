@@ -408,6 +408,38 @@ def test_shared_pipeline_repairs_once_then_caches_validated_result() -> None:
     assert second.usage.totalTokens == 0
 
 
+def test_structured_repair_forces_thinking_off_even_when_initial_request_enabled() -> None:
+    payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        if len(payloads) == 1:
+            invalidResponse = providerResponse("anthropic")
+            invalidResponse["content"][0]["text"] = '{"invalid":true}'
+            return httpx.Response(200, json=invalidResponse, request=request)
+        return httpx.Response(200, json=providerResponse("anthropic"), request=request)
+
+    async def execute() -> object:
+        async with AnthropicRestGateway(transport=httpx.MockTransport(handler)) as gateway:
+            return await gateway.generateStructured(
+                makeRequest(
+                    "anthropic",
+                    "claude-sonnet-5",
+                    samplingConfig=SamplingConfig(
+                        max_tokens=2_048,
+                        thinking_enabled=True,
+                    ),
+                ),
+                EventExtractionResult,
+                ModelPolicy(base_backoff_seconds=0.0, allow_rule_fallback=False),
+            )
+
+    result = asyncio.run(execute())
+    assert result.repairUsed is True
+    assert payloads[0]["thinking"] == {"type": "adaptive"}
+    assert "thinking" not in payloads[1]
+
+
 def test_result_interpretation_advice_is_repaired_during_schema_validation() -> None:
     unsafeAnswer = {
         "schema_version": "result_interpretation_v1.0.0",

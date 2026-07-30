@@ -405,9 +405,16 @@ export function auditResultEvidence(
     (evidenceId) => !inlineSet.has(evidenceId) && !groundingSet.has(evidenceId),
   );
   const allEvidenceIds = uniqueInOrder([...referencedEvidenceIds, ...activityEvidenceIds]);
-  const unknownEvidenceIds = allEvidenceIds.filter((evidenceId) => !isResultEvidenceId(evidenceId));
+  // 额外工具读取属于正常的上下文准备，只在技术详情中披露。只有回答或
+  // grounding 真正引用的证据才参与面向用户的完整性告警。
+  const unknownEvidenceIds = referencedEvidenceIds.filter(
+    (evidenceId) => !isResultEvidenceId(evidenceId),
+  );
   const mismatchedToolEvidenceIds = uniqueInOrder(
     toolActivity.flatMap((activity) => {
+      if (!inlineSet.has(activity.evidenceId) && !groundingSet.has(activity.evidenceId)) {
+        return [];
+      }
       const definition = getResultEvidenceDefinition(activity.evidenceId);
       return definition && definition.tool !== activity.tool ? [activity.evidenceId] : [];
     }),
@@ -418,14 +425,15 @@ export function auditResultEvidence(
     const known = isResultEvidenceId(evidenceId);
     const inline = inlineSet.has(evidenceId);
     const groundingListed = groundingSet.has(evidenceId);
+    const referenced = inline || groundingListed;
     const toolActivityPresent = activities.length > 0;
     // 旧版未知引用没有可比较的当前工具定义；它属于 unknown，而不是工具错配。
     const toolMatchesDefinition = !known
       || activities.every((activity) => activity.tool === getResultEvidenceDefinition(evidenceId)?.tool);
     const issues: ResultEvidenceIntegrityIssue[] = [];
-    if (!known) issues.push('unknown');
-    if (!inline || !groundingListed || !toolActivityPresent) issues.push('missing');
-    if (inline !== groundingListed || !toolMatchesDefinition || unreferencedToolActivity.includes(evidenceId)) {
+    if (referenced && !known) issues.push('unknown');
+    if (referenced && (!inline || !groundingListed || !toolActivityPresent)) issues.push('missing');
+    if (referenced && (inline !== groundingListed || !toolMatchesDefinition)) {
       issues.push('mismatch');
     }
     return {
@@ -450,7 +458,6 @@ export function auditResultEvidence(
   if (
     missingFromGrounding.length > 0
     || missingFromText.length > 0
-    || unreferencedToolActivity.length > 0
     || mismatchedToolEvidenceIds.length > 0
   ) {
     issues.push('mismatch');

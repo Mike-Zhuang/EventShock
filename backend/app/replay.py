@@ -14,7 +14,7 @@ from typing import Any
 
 from backend.app.simulation.engine import runScenario
 
-SUPPORTED_ENGINE_VERSION = "eventshock-simulation-0.2.0"
+SUPPORTED_ENGINE_VERSION = "eventshock-simulation-0.3.0"
 REQUIRED_MEMBERS = frozenset(
     {
         "manifest.json",

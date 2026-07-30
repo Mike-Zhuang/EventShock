@@ -18,10 +18,12 @@ import {
   LockKey,
   SlidersHorizontal,
   Trash,
+  WarningOctagon,
 } from '@phosphor-icons/react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ViewId } from '../app';
 import type {
+  EventPack,
   InterventionParameter,
   LlmCatalog,
   LlmModelDescriptor,
@@ -29,6 +31,7 @@ import type {
   SavedScenario,
   ScenarioDiffResult,
   ScenarioDraft,
+  ScenarioValidation,
 } from '../api/types';
 import { api } from '../api/client';
 import { EmptyState, ExplainedLabel, Notice, PageHeader, ParameterHelp, StatusBadge } from '../components/common';
@@ -39,7 +42,11 @@ import {
 import { translateValidation, useI18n } from '../i18n';
 import { getPageGuide } from '../page-guidance';
 import { getParameterHelp } from '../parameter-help';
-import { useWorkflow } from '../state/workflow-context';
+import {
+  scenarioContentDigest,
+  scenarioContentSignature,
+  useWorkflow,
+} from '../state/workflow-context';
 
 interface InterventionOption {
   parameter: InterventionParameter;
@@ -179,6 +186,70 @@ export function SecondaryOutcomeOption({
   );
 }
 
+export function scenariosHaveSameContent(
+  left: ScenarioDraft,
+  right: ScenarioDraft,
+): boolean {
+  return scenarioContentSignature(left) === scenarioContentSignature(right);
+}
+
+export function findMechanismDisabledCheck(
+  validation: ScenarioValidation | undefined,
+) {
+  return validation?.checks.find(
+    (check) => check.id === 'INTERVENTION_MECHANISM_DISABLED' && !check.passed,
+  );
+}
+
+export function findClarificationClaimId(eventPack: EventPack | undefined): string {
+  return eventPack?.claims.find((claim) => (
+    claim.id.toLowerCase().includes('clarification')
+    || claim.claimType?.toLowerCase().includes('clarification')
+  ))?.id ?? 'claim-clarification';
+}
+
+export function MechanismDisabledRecovery({
+  claimId,
+  onUseMarketMaker,
+  onReviewEvidence,
+}: {
+  claimId: string;
+  onUseMarketMaker: () => void;
+  onReviewEvidence: () => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <section className="scenario-validation-recovery" role="alert">
+      <WarningOctagon size={26} weight="duotone" aria-hidden="true" />
+      <div className="scenario-validation-recovery__body">
+        <h2>{t('scenario.mechanismDisabledTitle')}</h2>
+        <p>{t('scenario.mechanismDisabledBody')}</p>
+        <div className="scenario-validation-recovery__actions">
+          <Button size="sm" onClick={onUseMarketMaker}>
+            {t('scenario.useMarketMaker')}
+          </Button>
+          <Button size="sm" kind="tertiary" onClick={onReviewEvidence}>
+            {t('scenario.reviewClarification')}
+          </Button>
+        </div>
+        <details>
+          <summary>{t('scenario.technicalDetails')}</summary>
+          <dl>
+            <div>
+              <dt>{t('scenario.validationCode')}</dt>
+              <dd><code>INTERVENTION_MECHANISM_DISABLED</code></dd>
+            </div>
+            <div>
+              <dt>{t('scenario.dependentClaim')}</dt>
+              <dd><code>{claimId}</code></dd>
+            </div>
+          </dl>
+        </details>
+      </div>
+    </section>
+  );
+}
+
 export class GuidedScenarioReplacementError extends Error {}
 
 export async function linkSavedScenarioToGuidedWorkflow(
@@ -208,6 +279,7 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
     setScenario,
     validateScenario,
     validation,
+    validationBinding,
     validationState,
     validationError,
   } = useWorkflow();
@@ -226,9 +298,11 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
   const [scenarioAction, setScenarioAction] = useState<'create' | 'update' | 'clone' | 'freeze' | 'delete' | 'diff'>();
   const [scenarioManagementError, setScenarioManagementError] = useState<string>();
   const [savedScenarioDiff, setSavedScenarioDiff] = useState<ScenarioDiffResult>();
+  const [lastSavedScenario, setLastSavedScenario] = useState<SavedScenario>();
   const [guidedHandoff] = useState(readScenarioGuidedHandoff);
   const [guidedLinkComplete, setGuidedLinkComplete] = useState(false);
   const guidedHandoffApplied = useRef(false);
+  const interventionSectionRef = useRef<HTMLElement>(null);
   const isFrozen = eventPack?.status.toUpperCase() === 'FROZEN' || Boolean(eventPack?.frozenAt);
   const selectedOption = OPTIONS.find((option) => option.parameter === scenario.intervention.parameter) ?? OPTIONS[0];
   const market: NonNullable<ScenarioDraft['market']> = scenario.market ?? {
@@ -256,6 +330,27 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
   const selectedLlmModel = selectedLlmProvider?.models.find((item) => item.id === llmPolicy.modelId);
   const selectedLlmModelAvailability = getLlmModelAvailability(selectedLlmModel);
   const selectedSavedScenario = savedScenarios.find((item) => item.id === selectedScenarioId);
+  const draftDigest = useMemo(() => scenarioContentDigest(scenario), [scenario]);
+  const draftMatchesSaved = Boolean(
+    selectedSavedScenario
+    && scenariosHaveSameContent(selectedSavedScenario.config, scenario),
+  );
+  const hasUnsavedContentChanges = !selectedSavedScenario || !draftMatchesSaved;
+  const mechanismDisabledCheck = findMechanismDisabledCheck(validation);
+  const clarificationClaimId = findClarificationClaimId(eventPack);
+
+  useEffect(() => {
+    if (!mechanismDisabledCheck) return;
+    const focusTimer = window.setTimeout(() => {
+      const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+      interventionSectionRef.current?.scrollIntoView({
+        block: 'center',
+        behavior: reducedMotion ? 'auto' : 'smooth',
+      });
+      interventionSectionRef.current?.focus({ preventScroll: true });
+    }, 0);
+    return () => window.clearTimeout(focusTimer);
+  }, [mechanismDisabledCheck]);
 
   const refreshSavedScenarios = async () => {
     setSavedScenariosLoading(true);
@@ -360,8 +455,21 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
   };
 
   const validate = async () => {
-    const result = await validateScenario();
-    if (result.valid) navigate('preflight');
+    try {
+      const result = await validateScenario(
+        selectedSavedScenario && draftMatchesSaved
+          ? {
+              kind: 'saved',
+              scenarioId: selectedSavedScenario.id,
+              scenarioName: selectedSavedScenario.name,
+              contentHash: selectedSavedScenario.contentHash,
+            }
+          : { kind: 'unsaved-draft' },
+      );
+      if (result.valid) navigate('preflight');
+    } catch {
+      // 工作流上下文持有可见错误状态；若验证期间继续编辑，旧响应会被主动丢弃。
+    }
   };
 
   const runScenarioAction = async (
@@ -378,6 +486,7 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
       }
       if (result) {
         const saved = result as SavedScenario;
+        setLastSavedScenario(saved);
         setSelectedScenarioId(saved.id);
         setScenarioName(saved.name);
         setScenario(saved.config);
@@ -402,6 +511,7 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
           }
         }
       } else {
+        setLastSavedScenario(undefined);
         setSelectedScenarioId('');
         setSavedScenarioDiff(undefined);
       }
@@ -414,6 +524,7 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
   };
 
   const selectSavedScenario = (scenarioId: string) => {
+    setLastSavedScenario(undefined);
     setSelectedScenarioId(scenarioId);
     setSavedScenarioDiff(undefined);
     const saved = savedScenarios.find((item) => item.id === scenarioId);
@@ -473,13 +584,29 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
           <Button kind="ghost" size="sm" onClick={() => navigate('pack')}>{t('nav.pack')}</Button>
         </div>
       ) : null}
-      {validationState === 'error' || (validation && !validation.valid) ? (
+      {mechanismDisabledCheck ? (
+        <MechanismDisabledRecovery
+          claimId={clarificationClaimId}
+          onUseMarketMaker={() => selectIntervention(OPTIONS[0])}
+          onReviewEvidence={() => navigate('pack')}
+        />
+      ) : null}
+      {validationState === 'error' || (
+        validation
+        && !validation.valid
+        && validation.checks.some((check) => (
+          !check.passed && check.id !== 'INTERVENTION_MECHANISM_DISABLED'
+        ))
+      ) ? (
         <InlineNotification
           kind="error"
           lowContrast
           hideCloseButton
           title={t('scenario.validationFailed')}
-          subtitle={validation?.checks.filter((check) => !check.passed).map((check) => translateValidation(check.id, check.detail, t)).join(' ') || t('common.errorFallback')}
+          subtitle={validation?.checks
+            .filter((check) => !check.passed && check.id !== 'INTERVENTION_MECHANISM_DISABLED')
+            .map((check) => translateValidation(check.id, check.detail, t))
+            .join(' ') || validationError || t('common.errorFallback')}
         />
       ) : null}
       {scenarioManagementError ? (
@@ -519,8 +646,60 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
             onChange={(event) => setScenarioName(event.target.value)}
           />
         </div>
+        <div className="scenario-draft-status" role="status" aria-live="polite">
+          <div>
+            <span>{t('scenario.localDraft')}</span>
+            <strong>{t('scenario.draftDigest')}</strong>
+            <code>{draftDigest}</code>
+            <small>
+              {t('scenario.contentSummary', {
+                parameter: t(selectedOption.labelKey),
+                baseline: scenario.intervention.baselineValue,
+                intervention: scenario.intervention.interventionValue,
+                seeds: scenario.seedCount,
+                population: scenario.populationSize,
+                steps: scenario.steps,
+              })}
+            </small>
+          </div>
+          <div>
+            <span>{t('scenario.savedVersion')}</span>
+            {selectedSavedScenario ? (
+              <>
+                <strong>{selectedSavedScenario.name}</strong>
+                <code>{selectedSavedScenario.id}</code>
+                <small>{selectedSavedScenario.contentHash.slice(0, 20)}</small>
+              </>
+            ) : (
+              <strong>{t('scenario.noSavedVersion')}</strong>
+            )}
+          </div>
+          <div className={hasUnsavedContentChanges ? 'is-dirty' : 'is-saved'}>
+            <span>{hasUnsavedContentChanges
+              ? t('scenario.unsavedChanges')
+              : t('scenario.matchesSaved')}</span>
+            <strong>{t('scenario.validationBinding')}</strong>
+            <small>
+              {validationBinding?.kind === 'saved'
+                ? t('scenario.validationSaved', {
+                    id: validationBinding.scenarioId,
+                    hash: validationBinding.contentHash.slice(0, 20),
+                  })
+                : validationBinding?.kind === 'unsaved-draft'
+                  ? t('scenario.validationUnsaved', {
+                      digest: validationBinding.draftDigest,
+                    })
+                  : t('scenario.validationNotCurrent')}
+            </small>
+          </div>
+        </div>
+        {selectedSavedScenario?.frozen ? (
+          <p className="scenario-library__version-note">
+            {t('scenario.frozenCopyReason')}
+          </p>
+        ) : null}
         <div className="scenario-library__actions">
-          <Button size="sm" renderIcon={FloppyDisk} disabled={!scenarioName.trim() || scenarioAction !== undefined} onClick={() => void runScenarioAction('create', () => api.createScenario(scenarioName.trim(), scenario))}>{isZh ? '另存为新场景' : 'Save as new'}</Button>
+          <Button size="sm" renderIcon={FloppyDisk} disabled={!scenarioName.trim() || scenarioAction !== undefined} onClick={() => void runScenarioAction('create', () => api.createScenario(scenarioName.trim(), scenario))}>{selectedSavedScenario?.frozen ? t('scenario.saveNewVersion') : isZh ? '另存为新场景' : 'Save as new'}</Button>
           <Button size="sm" kind="tertiary" renderIcon={FloppyDisk} disabled={!selectedSavedScenario || selectedSavedScenario.frozen || !scenarioName.trim() || scenarioAction !== undefined} onClick={() => selectedSavedScenario && void runScenarioAction('update', () => api.updateScenario(selectedSavedScenario.id, scenarioName.trim(), scenario))}>{isZh ? '更新当前场景' : 'Update selected'}</Button>
           <Button size="sm" kind="ghost" renderIcon={Copy} disabled={!selectedSavedScenario || scenarioAction !== undefined} onClick={() => selectedSavedScenario && void runScenarioAction('clone', () => api.cloneScenario(selectedSavedScenario.id))}>{isZh ? '克隆' : 'Clone'}</Button>
           <Button size="sm" kind="ghost" renderIcon={ArrowsLeftRight} disabled={!selectedSavedScenario || scenarioAction !== undefined} onClick={() => selectedSavedScenario && void runScenarioAction('diff', () => api.diffScenarios(selectedSavedScenario.config, scenario))}>{isZh ? '与当前草稿比较' : 'Compare with draft'}</Button>
@@ -531,8 +710,23 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
             if (confirmed) void runScenarioAction('delete', () => api.deleteScenario(selectedSavedScenario.id));
           }}>{isZh ? '删除' : 'Delete'}</Button>
         </div>
+        {lastSavedScenario ? (
+          <p className="scenario-library__save-receipt" role="status">
+            {t('scenario.savedReceipt', {
+              id: lastSavedScenario.id,
+              time: lastSavedScenario.updatedAt
+                ? new Intl.DateTimeFormat(language, {
+                    dateStyle: 'medium',
+                    timeStyle: 'short',
+                  }).format(new Date(lastSavedScenario.updatedAt))
+                : t('common.unavailable'),
+              hash: lastSavedScenario.contentHash.slice(0, 20),
+            })}
+          </p>
+        ) : null}
         {selectedSavedScenario ? (
           <dl className="scenario-library__metadata">
+            <div><dt>{isZh ? '场景 ID' : 'Scenario ID'}</dt><dd><code>{selectedSavedScenario.id}</code></dd></div>
             <div><dt>{isZh ? '状态' : 'Status'}</dt><dd><StatusBadge status={selectedSavedScenario.frozen ? 'FROZEN' : 'DRAFT'} /></dd></div>
             <div><dt>{isZh ? '内容哈希' : 'Content hash'}</dt><dd><code title={selectedSavedScenario.contentHash}>{selectedSavedScenario.contentHash.slice(0, 20)}</code></dd></div>
             <div><dt>{isZh ? '更新时间' : 'Updated'}</dt><dd>{selectedSavedScenario.updatedAt ? new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(selectedSavedScenario.updatedAt)) : t('common.unavailable')}</dd></div>
@@ -772,7 +966,12 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
             </div>
           </section>
 
-          <section id="scenario-step-intervention" className="form-section scenario-step-section">
+          <section
+            ref={interventionSectionRef}
+            id="scenario-step-intervention"
+            className={`form-section scenario-step-section${mechanismDisabledCheck ? ' scenario-step-section--attention' : ''}`}
+            tabIndex={-1}
+          >
             <div className="form-section__heading">
               <span className="step-kicker">06</span>
               <h2>{t('scenario.interventionLabel')}</h2>
@@ -881,7 +1080,7 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
             disabled={!isFrozen || !scenarioIsWithinBounds || validationState === 'loading'}
             onClick={() => void validate()}
           >
-            {validationState === 'loading' ? t('common.loading') : t('scenario.validate')}
+            {validationState === 'loading' ? t('common.loading') : t('scenario.validateDraft')}
           </Button>
         </aside>
       </div>

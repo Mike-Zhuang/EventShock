@@ -173,6 +173,36 @@ describe('result evidence reconciliation', () => {
     ]);
   });
 
+  it('does not raise an integrity warning for extra tool reads that the answer never cites', () => {
+    const cited = [
+      ['result:overview', 'OVERVIEW'],
+      ['result:metric-summary', 'METRIC_SUMMARY'],
+      ['result:paired-deltas', 'PAIRED_DELTAS'],
+      ['result:path-series', 'PATH_SERIES'],
+      ['result:trace', 'TRACE'],
+      ['result:limitations', 'LIMITATIONS'],
+    ] as const;
+    const answer = cited.map(([evidenceId]) => `[${evidenceId}]`).join(' ');
+    const audit = auditResultEvidence(
+      answer,
+      undefined,
+      cited.map(([evidenceId]) => evidenceId),
+      [
+        ...cited.map(([evidenceId, tool]) => activity(evidenceId, tool)),
+        activity('result:manifest', 'MANIFEST'),
+        activity('result:cognition-summary', 'COGNITION_SUMMARY'),
+      ],
+    );
+
+    expect(audit.unreferencedToolActivity).toEqual([
+      'result:manifest',
+      'result:cognition-summary',
+    ]);
+    expect(audit.issues).toEqual([]);
+    expect(audit.citations.find((item) => item.evidenceId === 'result:manifest')?.issues)
+      .toEqual([]);
+  });
+
   it('reports missing and mismatched evidence channels without inventing citations', () => {
     const audit = auditResultEvidence(
       'Inline only [result:overview].',

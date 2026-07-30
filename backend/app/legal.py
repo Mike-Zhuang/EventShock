@@ -17,8 +17,8 @@ from pydantic import BaseModel, ConfigDict
 
 LegalLocale = Literal["en", "zh-CN"]
 
-CURRENT_TERMS_VERSION = "2026-07-22-v1"
-CURRENT_TERMS_EFFECTIVE_DATE = date(2026, 7, 22)
+CURRENT_TERMS_VERSION = "2026-07-29-v2"
+CURRENT_TERMS_EFFECTIVE_DATE = date(2026, 7, 29)
 MINIMUM_ACCOUNT_AGE = 18
 
 
@@ -163,21 +163,30 @@ _EN_SECTIONS = (
         id="privacy",
         title="8. Privacy notice and data handling",
         body=(
-            "The Service stores account email, password hashes, email-verification status, "
+            "An email address is personal information. The Service stores the account email, "
+            "password hashes, email-verification status, "
             "session records, acceptance records, self-selected experience preferences, audit "
             "events, Event Packs, scenarios, experiments, exports, and AI-related conversation "
             "records needed to provide continuity and accountability. Passwords and verification "
-            "codes are not stored in plaintext. Sensitive content should not be submitted.",
+            "codes are not stored in plaintext. The account email is used only for account "
+            "access, verification, security, support, and research-data ownership; it is not "
+            "included in prompts sent to AI or search providers. Sensitive content should not "
+            "be submitted.",
             "Data is used to authenticate users, provide and personalize workflows, run requested "
             "analysis, preserve reproducibility, prevent abuse, diagnose failures, and operate "
             "the Service. Limited data is disclosed to infrastructure and AI/search providers "
             "only when needed for requested functions. The Service does not promise that a "
             "third-party provider will process data in your country.",
             "Authentication cookies and browser storage are used for session security, language, "
-            "theme, temporary API configuration, and workflow continuity. Retention depends on "
-            "operational, research-integrity, security, and legal needs. Account or data requests "
-            "must be directed through an operator-provided private channel; never put sensitive "
-            "information in a public repository issue.",
+            "theme, temporary API configuration, and workflow continuity. An authenticated user "
+            "may export the account data currently held by the primary database or request "
+            "account deletion through the in-product Account and privacy page after re-entering "
+            "the current password. Deletion removes active account-owned records and signs the "
+            "user out, but encrypted or access-controlled backups may retain a copy until their "
+            "scheduled expiry where immediate selective deletion is not technically possible. "
+            "Security, fraud-prevention, or legal records may be retained only where reasonably "
+            "necessary. Other requests must use an operator-provided private channel; never put "
+            "sensitive information in a public repository issue.",
             "Reverse-proxy and traffic-statistics logs may temporarily process network address, "
             "request time, path, status, device or browser user-agent, and similar connection "
             "metadata for security, rate limiting, incident response, and aggregate operations. "
@@ -341,15 +350,20 @@ _ZH_SECTIONS = (
         id="privacy",
         title="8. 隐私告知与数据处理",
         body=(
-            "本服务为连续性与问责需要保存账户邮箱、密码摘要、邮箱验证状态、会话、同意记录、"
+            "邮箱地址属于个人信息。本服务为连续性与问责需要保存账户邮箱、密码摘要、邮箱验证"
+            "状态、会话、同意记录、"
             "自选经验偏好、审计事件、事件包、情景、实验、导出及 AI 相关对话记录。密码和验证"
-            "码不会以明文保存。请勿提交敏感内容。",
+            "码不会以明文保存。账户邮箱仅用于账户访问、验证、安全、支持和研究数据归属，不会"
+            "被放入发送给 AI 或搜索供应商的提示词。请勿提交敏感内容。",
             "数据用于认证、提供和个性化工作流、执行所请求分析、保持可复现性、防止滥用、"
             "诊断故障和运营服务。仅在所请求功能必要时向基础设施、AI 或搜索供应商披露有限"
             "数据；本服务不保证第三方在您所在国家或地区处理数据。",
             "认证 Cookie 与浏览器存储用于会话安全、语言、主题、临时 API 配置及工作流连续性。"
-            "保留期限取决于运营、研究完整性、安全和法律需要。账户或数据请求应通过运营方提供"
-            "的私密渠道提出；切勿在公开仓库 Issue 中提交敏感信息。",
+            "登录用户重新输入当前密码后，可在产品内“账户与隐私”页面导出主数据库当前保存的"
+            "账户数据，或请求删除账户。删除会移除活动数据库中的账户所属记录并退出登录；如"
+            "技术上无法立即从备份中选择性删除，受加密或访问控制保护的备份副本可能保留到计划"
+            "到期。仅在安全、防欺诈或法律义务合理必要时保留有限记录。其他请求应通过运营方"
+            "提供的私密渠道提出；切勿在公开仓库 Issue 中提交敏感信息。",
             "反向代理与流量统计日志可能为安全、限流、事件响应和汇总运营而临时处理网络地址、"
             "请求时间、路径、状态、设备或浏览器 User-Agent 等连接元数据。受管理的访问日志"
             "格式会排除或脱敏认证 Cookie、Authorization 头、CSRF Token、会话标识和 API "
@@ -450,13 +464,18 @@ def _documentWithoutHash(locale: LegalLocale) -> LegalDocument:
             )
         ),
         legalReviewNotice=(
-            "本文件作为您对本服务电子同意的版本化、可审计记录提供，其解释与适用以页面所示"
-            "当前版本为准。如对自身权利或具体情形有疑问，请咨询合格的专业法律人士。"
+            "本文件是项目生成的版本化电子同意草案与审计记录，不是法律意见，也不保证在任何"
+            "司法辖区必然有效或可执行。扩大运营、面向未成年人或处理跨境数据前，必须由熟悉"
+            "适用司法辖区的合格法律人士审阅运营主体、联系方式、适用法律、隐私与教育使用"
+            "安排。如对自身权利或具体情形有疑问，请咨询合格的专业法律人士。"
             if isChinese
-            else "This document is provided as a versioned, auditable record of your electronic "
-            "consent to the Service, interpreted and applied according to the current version "
-            "displayed to you. For questions about your own rights or specific circumstances, "
-            "seek qualified professional legal advice."
+            else "This is a project-generated, versioned consent draft and audit record, not "
+            "legal advice or a guarantee of validity or enforceability in any jurisdiction. "
+            "Before broader operation, use by minors, or cross-border processing, qualified "
+            "counsel familiar with the applicable jurisdictions must review the operator "
+            "identity, contact channel, governing law, privacy disclosures, and educational-use "
+            "arrangements. Seek qualified professional legal advice about your own rights or "
+            "specific circumstances."
         ),
     )
 

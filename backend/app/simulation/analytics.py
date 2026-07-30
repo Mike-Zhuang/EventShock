@@ -26,6 +26,15 @@ METRIC_KEYS = (
     "forcedLiquidationVolume",
     "ledgerRejectedOrders",
     "cognitiveOrderCount",
+    "validCognitionDecisionCount",
+    "cognitionSignalConsumedCount",
+    "validCognitionSignalConsumedCount",
+    "cognitionChangedIntentCount",
+    "cognitionInfluencedOrderCount",
+    "cognitionRiskBlockedCount",
+    "cognitionNoActionCount",
+    "cognitionEffectRate",
+    "cognitionOrderEffectRate",
     "benchmarkReturnPct",
     "abnormalReturnPct",
     "haltCount",
@@ -118,6 +127,11 @@ def aggregatePairedResults(
             for section in RUN_SUMMARY_SECTIONS
         },
         "traces": _selectRepresentativeTraces(baselineRuns, interventionRuns, metricSummaries),
+        "orderExecutionSummary": _selectRepresentativeOrderSummaries(
+            baselineRuns,
+            interventionRuns,
+            metricSummaries,
+        ),
     }
 
 
@@ -480,17 +494,16 @@ def _selectRepresentativeTraces(
     interventionRuns: list[dict[str, Any]],
     metricSummaries: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    targetDelta = metricSummaries["maxSpreadBps"]["delta"]["median"] or 0.0
-    selectedIndex = min(
-        range(len(baselineRuns)),
-        key=lambda index: abs(
-            (
-                interventionRuns[index]["metrics"]["maxSpreadBps"]
-                - baselineRuns[index]["metrics"]["maxSpreadBps"]
-            )
-            - targetDelta
-        ),
+    selectedIndex = _representativeRunIndex(
+        baselineRuns,
+        interventionRuns,
+        metricSummaries,
     )
+    baselineBySequence = {
+        int(trace["globalSequence"]): trace
+        for trace in baselineRuns[selectedIndex]["traces"]
+        if isinstance(trace.get("globalSequence"), int)
+    }
     selectedTraces: list[dict[str, Any]] = []
     for scenarioName, run in (
         ("baseline", baselineRuns[selectedIndex]),
@@ -501,8 +514,120 @@ def _selectRepresentativeTraces(
         deduplicatedTraces = {
             trace["traceId"]: trace for trace in [*initialTraces, *importantTraces]
         }
-        selectedTraces.extend(
-            {**trace, "scenario": scenarioName, "seed": run["seed"]}
-            for trace in list(deduplicatedTraces.values())[:80]
-        )
-    return selectedTraces
+        for trace in list(deduplicatedTraces.values())[:80]:
+            globalSequence = trace.get("globalSequence")
+            baselineTrace = (
+                baselineBySequence.get(globalSequence) if isinstance(globalSequence, int) else None
+            )
+            selectedTraces.append(
+                {
+                    **trace,
+                    "scenario": scenarioName,
+                    "seed": run["seed"],
+                    "isInterventionDifference": (
+                        scenarioName == "intervention"
+                        and _traceDiffersFromBaseline(trace, baselineTrace)
+                    ),
+                }
+            )
+    scenarioOrder = {"baseline": 0, "intervention": 1}
+    return sorted(
+        selectedTraces,
+        key=lambda trace: (
+            scenarioOrder[str(trace["scenario"])],
+            int(trace.get("globalSequence", 0)),
+            str(trace["traceId"]),
+        ),
+    )[:160]
+
+
+def _selectRepresentativeOrderSummaries(
+    baselineRuns: list[dict[str, Any]],
+    interventionRuns: list[dict[str, Any]],
+    metricSummaries: dict[str, Any],
+) -> list[dict[str, Any]]:
+    selectedIndex = _representativeRunIndex(
+        baselineRuns,
+        interventionRuns,
+        metricSummaries,
+    )
+    baselineBySequence = {
+        int(item["submissionSequence"]): item
+        for item in baselineRuns[selectedIndex].get("orderExecutionSummary", [])
+    }
+    summaries: list[dict[str, Any]] = []
+    for scenarioName, run in (
+        ("baseline", baselineRuns[selectedIndex]),
+        ("intervention", interventionRuns[selectedIndex]),
+    ):
+        for item in run.get("orderExecutionSummary", []):
+            submissionSequence = int(item["submissionSequence"])
+            baselineItem = baselineBySequence.get(submissionSequence)
+            summaries.append(
+                {
+                    **item,
+                    "scenario": scenarioName,
+                    "seed": run["seed"],
+                    "isInterventionDifference": (
+                        scenarioName == "intervention"
+                        and _orderSummaryDiffersFromBaseline(item, baselineItem)
+                    ),
+                }
+            )
+    scenarioOrder = {"baseline": 0, "intervention": 1}
+    return sorted(
+        summaries,
+        key=lambda item: (
+            scenarioOrder[str(item["scenario"])],
+            int(item["submissionSequence"]),
+            str(item["orderId"]),
+        ),
+    )
+
+
+def _representativeRunIndex(
+    baselineRuns: list[dict[str, Any]],
+    interventionRuns: list[dict[str, Any]],
+    metricSummaries: dict[str, Any],
+) -> int:
+    targetDelta = metricSummaries["maxSpreadBps"]["delta"]["median"] or 0.0
+    return min(
+        range(len(baselineRuns)),
+        key=lambda index: abs(
+            (
+                interventionRuns[index]["metrics"]["maxSpreadBps"]
+                - baselineRuns[index]["metrics"]["maxSpreadBps"]
+            )
+            - targetDelta
+        ),
+    )
+
+
+def _traceDiffersFromBaseline(
+    interventionTrace: dict[str, Any],
+    baselineTrace: dict[str, Any] | None,
+) -> bool:
+    if baselineTrace is None:
+        return True
+    excludedKeys = {
+        "isInterventionDifference",
+        "parentTraceId",
+        "summary",
+        "summaryZh",
+        "traceId",
+    }
+    return {key: value for key, value in interventionTrace.items() if key not in excludedKeys} != {
+        key: value for key, value in baselineTrace.items() if key not in excludedKeys
+    }
+
+
+def _orderSummaryDiffersFromBaseline(
+    interventionSummary: dict[str, Any],
+    baselineSummary: dict[str, Any] | None,
+) -> bool:
+    if baselineSummary is None:
+        return True
+    excludedKeys = {"isInterventionDifference", "orderTraceId", "tradeTraceIds"}
+    return {
+        key: value for key, value in interventionSummary.items() if key not in excludedKeys
+    } != {key: value for key, value in baselineSummary.items() if key not in excludedKeys}

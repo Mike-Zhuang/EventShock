@@ -40,6 +40,8 @@ from backend.app.auth import (
     normalizeEmail,
 )
 from backend.app.auth.api_models import (
+    AccountDataExportRequest,
+    AccountDeletionRequest,
     AuthLoginRequest,
     AuthPasswordResetRequest,
     AuthRegistrationRequest,
@@ -52,6 +54,8 @@ from backend.app.cognition import (
     CNY_PER_USD_BUDGET_FLOOR,
     FX_SOURCE_URL,
     OFFICIAL_FX_SNAPSHOT_CNY_PER_USD,
+    PRICING_MAX_AGE_DAYS,
+    PRICING_SNAPSHOT_VALID_UNTIL,
     PRICING_SNAPSHOT_VERSION,
     CognitionService,
     CredentialNotConfiguredError,
@@ -61,8 +65,13 @@ from backend.app.cognition import (
     ModelGatewayError,
 )
 from backend.app.cognition.catalog import (
+    CAPABILITY_REVIEW_CADENCE_DAYS,
+    CAPABILITY_SNAPSHOT_VALID_UNTIL,
+    CAPABILITY_SNAPSHOT_VERSION,
     DEFAULT_PROVIDER,
+    capabilitySnapshotStatus,
     listProviders,
+    modelValidationEvidence,
 )
 from backend.app.cognition.catalog import (
     listModels as listCognitionModels,
@@ -72,7 +81,11 @@ from backend.app.cognition.golden_suite import (
     builtInEvalCases,
     codeGraderSelfTestSamples,
 )
-from backend.app.cognition.pricing import getTokenPrice
+from backend.app.cognition.pricing import (
+    getTokenPrice,
+    getTokenPriceSnapshot,
+    pricingSnapshotStatus,
+)
 from backend.app.cognition.streaming import ModelStreamObserver, ModelStreamProgress
 from backend.app.config import loadSettings
 from backend.app.database import (
@@ -99,28 +112,40 @@ from backend.app.event_pack_factory.api_models import (
     FactoryReaderMutationRequest,
     FactoryReviewMutationRequest,
     FactorySearchMutationRequest,
+    FactorySourcePermanentDeleteRequest,
     FactorySourceRawTextUpdateRequest,
+    FactorySourceSelectionMutationRequest,
 )
 from backend.app.event_pack_factory.reader import (
     READER_CAPABILITY,
     ZhipuReaderClient,
 )
+from backend.app.governance.deployment_status import deploymentStatusSnapshot
 from backend.app.governance.redteam import RED_TEAM_CASES, scoreRedTeamSuite
 from backend.app.governance.registry import inventoryHash, inventorySnapshot
 from backend.app.governance.release_gate import P0_GATES, ReleaseContext, evaluateP0Release
 from backend.app.guided_workflow import (
     GuidedAdvanceRequest,
+    GuidedArchiveRequest,
     GuidedCreateRequest,
     GuidedLinkRequest,
     GuidedProposalActionRequest,
+    GuidedTurnOperationView,
+    GuidedTurnRecoveryRequest,
     GuidedTurnRequest,
     GuidedWorkflowConflictError,
     GuidedWorkflowRepository,
     GuidedWorkflowService,
+    GuidedWorkflowView,
 )
 from backend.app.guided_workflow.artifacts import GuidedArtifactValidator
 from backend.app.legal import publicLegalPayload
 from backend.app.observability import RuntimeMetrics
+from backend.app.privacy import (
+    AccountNotFoundError,
+    AccountPrivacyService,
+    LastAdministratorDeletionError,
+)
 from backend.app.rate_limit import RateLimitExceeded, RateLimitRule, SlidingWindowRateLimiter
 from backend.app.scenario_service import ScenarioService
 from backend.app.schemas import (
@@ -175,6 +200,8 @@ LEGAL_GATE_EXEMPT_PATHS = frozenset(
     {
         "/api/v1/auth/legal-acceptance",
         "/api/v1/auth/logout",
+        "/api/v1/account/data-export",
+        "/api/v1/account",
     }
 )
 
@@ -231,7 +258,35 @@ def _modelGatewayStatusCode(error: ModelGatewayError) -> int:
     return 502
 
 
-def _modelGatewayApiError(error: ModelGatewayError) -> ApiError:
+def _modelGatewayApiError(
+    error: ModelGatewayError,
+    *,
+    interpretationFailureDetails: bool = False,
+) -> ApiError:
+    uncertainAttempts = max(0, error.uncertainBillableAttempts)
+    providerAttempts = max(0, error.attempts)
+    details: dict[str, object] = {
+        "retryable": error.retryable,
+        "providerAttempts": providerAttempts,
+        "uncertainBillableAttempts": uncertainAttempts,
+        "repairUsed": error.repairUsed,
+    }
+    if interpretationFailureDetails:
+        details.update(
+            {
+                "repairAttempted": error.repairUsed,
+                "failureStage": "REPAIRING" if error.repairUsed else "PROVIDER_REQUEST",
+                "billingConclusion": (
+                    "BILLING_UNCERTAIN"
+                    if uncertainAttempts > 0
+                    else (
+                        "NO_PROVIDER_ATTEMPT_RECORDED"
+                        if providerAttempts == 0
+                        else "PROVIDER_ATTEMPT_RECORDED_NO_UNCERTAIN_BILLING"
+                    )
+                ),
+            }
+        )
     return ApiError(
         error.code.value,
         _modelGatewayStatusCode(error),
@@ -239,12 +294,7 @@ def _modelGatewayApiError(error: ModelGatewayError) -> ApiError:
             error.code,
             "The model response could not be used safely.",
         ),
-        details={
-            "retryable": error.retryable,
-            "providerAttempts": max(0, error.attempts),
-            "uncertainBillableAttempts": max(0, error.uncertainBillableAttempts),
-            "repairUsed": error.repairUsed,
-        },
+        details=details,
     )
 
 
@@ -293,13 +343,17 @@ def _safeResultInterpretationErrorDetails(error: ApiError) -> dict[str, object]:
     """仅公开结果解释协议定义过的标量错误字段。"""
 
     details: dict[str, object] = {}
-    for fieldName in ("retryable", "repairUsed"):
+    for fieldName in ("retryable", "repairUsed", "repairAttempted"):
         value = error.details.get(fieldName)
         if isinstance(value, bool):
             details[fieldName] = value
     for fieldName in ("providerAttempts", "uncertainBillableAttempts"):
         value = error.details.get(fieldName)
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            details[fieldName] = value
+    for fieldName in ("failureStage", "billingConclusion"):
+        value = error.details.get(fieldName)
+        if isinstance(value, str) and 1 <= len(value) <= 80:
             details[fieldName] = value
     return details
 
@@ -391,7 +445,10 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         # 部署时必须先由一次性管理员引导认领旧数据；认领前绝不执行保留期清理。
         if not any(database.countUnownedRecords().values()):
             database.enforceRetention()
-        cognitionService = CognitionService()
+        cognitionService = CognitionService(
+            telemetryLoader=database.loadCognitionTelemetry,
+            telemetryRecorder=database.recordCognitionTelemetry,
+        )
         eventPackService = EventPackService(
             database,
             settings.projectRoot,
@@ -409,6 +466,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         )
         experimentService = ExperimentService(database, eventPackService, cognitionService)
         studyService = StudyApiService(database)
+        accountPrivacyService = AccountPrivacyService(database)
         appInstance.state.database = database
         appInstance.state.authRepository = authRepository
         appInstance.state.authService = authService
@@ -420,6 +478,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         appInstance.state.scenarioService = scenarioService
         appInstance.state.experimentService = experimentService
         appInstance.state.studyService = studyService
+        appInstance.state.accountPrivacyService = accountPrivacyService
         appInstance.state.guidedWorkflowService = guidedWorkflowService
         appInstance.state.eventPackFactoryService = factoryService
         appInstance.state.resultInterpretationSingleFlight = resultInterpretationSingleFlight
@@ -959,6 +1018,72 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         )
         return preferences.model_dump(mode="json")
 
+    @appInstance.post("/api/v1/account/data-export")
+    async def exportCurrentAccountData(
+        payload: AccountDataExportRequest,
+        request: Request,
+    ) -> Response:
+        authService = _requiredAuthService(request)
+        context = _authContext(request)
+        authService.verifyCurrentPassword(context, payload.password)
+        privacy: AccountPrivacyService = request.app.state.accountPrivacyService
+        try:
+            exported = privacy.exportAccountData(userId=context.userId)
+        except AccountNotFoundError as error:
+            raise ApiError("ACCOUNT_NOT_FOUND", 404, str(error)) from error
+        return JSONResponse(
+            exported,
+            headers={
+                "Content-Disposition": 'attachment; filename="eventshock-account-data.json"',
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @appInstance.delete("/api/v1/account")
+    async def deleteCurrentAccount(
+        payload: AccountDeletionRequest,
+        request: Request,
+    ) -> Response:
+        authService = _requiredAuthService(request)
+        context = _authContext(request)
+        authService.verifyCurrentPassword(context, payload.password)
+        privacy: AccountPrivacyService = request.app.state.accountPrivacyService
+        try:
+            deleted = privacy.deleteAccountData(userId=context.userId)
+        except LastAdministratorDeletionError as error:
+            raise ApiError(
+                "LAST_ADMINISTRATOR_DELETION_FORBIDDEN",
+                409,
+                str(error),
+            ) from error
+        except AccountNotFoundError as error:
+            raise ApiError("ACCOUNT_NOT_FOUND", 404, str(error)) from error
+        cognition: CognitionService = request.app.state.cognitionService
+        cognition.clearConfig(context.authSessionId)
+        singleFlight: ResultInterpretationSingleFlight = (
+            request.app.state.resultInterpretationSingleFlight
+        )
+        await singleFlight.clearPrincipal(context.authSessionId)
+        await singleFlight.clearPrincipal(context.userId)
+        response = JSONResponse(
+            {
+                "deleted": True,
+                "deletedRecordCount": sum(deleted.values()),
+                "backupRetentionNotice": (
+                    "Deleted records may remain in access-controlled host backups until "
+                    "their normal retention period expires."
+                ),
+            }
+        )
+        response.delete_cookie(
+            AUTH_COOKIE_NAME,
+            path="/",
+            secure=settings.authCookieSecure,
+            httponly=True,
+            samesite="lax",
+        )
+        return response
+
     @appInstance.get("/api/v1/guided-workflows")
     async def listGuidedWorkflows(
         request: Request,
@@ -1034,17 +1159,53 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 return claim.workflow.model_dump(mode="json")
             try:
                 if cognition.getConfig(credentialId).configured:
+
+                    def recordGuidedProviderProgress(
+                        stage: str,
+                        evidence: dict[str, Any],
+                    ) -> None:
+                        service.recordTurnProviderEvidence(
+                            workflowId=workflowId,
+                            ownerUserId=ownerUserId,
+                            request=payload,
+                            claim=claim,
+                            providerRequestId=evidence.get("providerRequestId"),
+                            httpResponseReceived=evidence.get("httpResponseReceived"),
+                            usageReceived=evidence.get("usageReceived"),
+                            parseCompleted=evidence.get("parseCompleted"),
+                            failureStage=stage,
+                        )
+
                     proposal = await cognition.proposeGuidedWorkflow(
                         sessionId=credentialId,
                         workflow=claim.workflow,
                         latestUserMessage=payload.message,
                         language=payload.language,
+                        progressObserver=recordGuidedProviderProgress,
                     )
                 else:
                     proposal = service.deterministicProposal(
                         workflow=claim.workflow,
                         language=payload.language,
                     )
+                    service.recordTurnProviderEvidence(
+                        workflowId=workflowId,
+                        ownerUserId=ownerUserId,
+                        request=payload,
+                        claim=claim,
+                        providerRequestId=None,
+                        httpResponseReceived=False,
+                        usageReceived=False,
+                        parseCompleted=True,
+                        failureStage="DETERMINISTIC_PROPOSAL_READY",
+                    )
+                service.cacheValidatedProposal(
+                    workflowId=workflowId,
+                    ownerUserId=ownerUserId,
+                    request=payload,
+                    claim=claim,
+                    proposal=proposal,
+                )
                 updated = service.completeTurn(
                     workflowId=workflowId,
                     ownerUserId=ownerUserId,
@@ -1083,6 +1244,100 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         except ValueError as error:
             raise ApiError("INVALID_GUIDED_WORKFLOW_TURN", 422, str(error)) from error
         return updated.model_dump(mode="json")
+
+    @appInstance.get("/api/v1/guided-workflows/{workflowId}/operations")
+    async def listGuidedWorkflowTurnOperations(
+        workflowId: str,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        service: GuidedWorkflowService = request.app.state.guidedWorkflowService
+        try:
+            operations = service.listTurnOperations(workflowId, _sessionId(sessionId))
+        except LookupError as error:
+            raise ApiError(
+                "GUIDED_WORKFLOW_NOT_FOUND",
+                404,
+                "The guided workflow does not exist.",
+            ) from error
+        return {"items": [operation.model_dump(mode="json") for operation in operations]}
+
+    @appInstance.post("/api/v1/guided-workflows/{workflowId}/operations/{clientRequestId}/recover")
+    async def recoverGuidedWorkflowTurn(
+        workflowId: str,
+        clientRequestId: str,
+        payload: GuidedTurnRecoveryRequest,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        ownerUserId = _sessionId(sessionId)
+        service: GuidedWorkflowService = request.app.state.guidedWorkflowService
+        try:
+            result = service.recoverTurn(
+                workflowId=workflowId,
+                ownerUserId=ownerUserId,
+                clientRequestId=clientRequestId,
+                request=payload,
+            )
+        except LookupError as error:
+            raise ApiError(
+                "GUIDED_TURN_OPERATION_NOT_FOUND",
+                404,
+                "The guided turn operation does not exist.",
+            ) from error
+        except GuidedWorkflowConflictError as error:
+            raise ApiError("GUIDED_WORKFLOW_CONFLICT", 409, str(error)) from error
+        request.app.state.database.appendAuditEvent(
+            ownerUserId,
+            "GUIDED_WORKFLOW",
+            workflowId,
+            "TURN_RECOVERY_DECIDED_BY_HUMAN",
+            {
+                "clientRequestId": clientRequestId,
+                "recoveryRequestId": payload.recoveryRequestId,
+                "action": payload.action.value,
+                "newClientRequestId": payload.newClientRequestId,
+            },
+        )
+        if isinstance(result, GuidedWorkflowView):
+            return {
+                "kind": "WORKFLOW",
+                "workflow": result.model_dump(mode="json"),
+            }
+        if isinstance(result, GuidedTurnOperationView):
+            return {
+                "kind": "OPERATION",
+                "operation": result.model_dump(mode="json"),
+            }
+        raise RuntimeError("guided turn recovery returned an unsupported response")
+
+    @appInstance.post("/api/v1/guided-workflows/{workflowId}/archive")
+    async def archiveGuidedWorkflow(
+        workflowId: str,
+        payload: GuidedArchiveRequest,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        ownerUserId = _sessionId(sessionId)
+        service: GuidedWorkflowService = request.app.state.guidedWorkflowService
+        try:
+            workflow = service.archive(workflowId, ownerUserId, payload)
+        except LookupError as error:
+            raise ApiError(
+                "GUIDED_WORKFLOW_NOT_FOUND",
+                404,
+                "The guided workflow does not exist.",
+            ) from error
+        except GuidedWorkflowConflictError as error:
+            raise ApiError("GUIDED_WORKFLOW_CONFLICT", 409, str(error)) from error
+        request.app.state.database.appendAuditEvent(
+            ownerUserId,
+            "GUIDED_WORKFLOW",
+            workflowId,
+            "ARCHIVED_BY_HUMAN",
+            {"version": workflow.version},
+        )
+        return workflow.model_dump(mode="json")
 
     @appInstance.post("/api/v1/guided-workflows/{workflowId}/apply")
     async def applyGuidedWorkflowProposal(
@@ -1494,6 +1749,70 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             },
         )
 
+    @appInstance.post("/api/v1/event-pack-factory/builds/{buildId}/sources/{sourceId}/selection")
+    async def setEventPackFactorySourceSelection(
+        buildId: str,
+        sourceId: str,
+        payload: FactorySourceSelectionMutationRequest,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        ownerUserId = _sessionId(sessionId)
+        factory: EventPackFactoryService = request.app.state.eventPackFactoryService
+        result = factory.setSourceIncluded(
+            ownerUserId=ownerUserId,
+            buildId=buildId,
+            sourceId=sourceId,
+            expectedRevision=payload.expectedRevision,
+            included=payload.included,
+        )
+        request.app.state.database.appendAuditEvent(
+            ownerUserId,
+            "EVENT_PACK_FACTORY",
+            buildId,
+            (
+                "SOURCE_RESTORED_TO_EVIDENCE_SET"
+                if payload.included
+                else "SOURCE_EXCLUDED_FROM_EVIDENCE_SET"
+            ),
+            {
+                "revision": result.build.revision,
+                "sourceId": sourceId,
+                "rawTextRetained": True,
+            },
+        )
+        return result.model_dump(mode="json")
+
+    @appInstance.delete("/api/v1/event-pack-factory/builds/{buildId}/sources/{sourceId}/raw-text")
+    async def permanentlyDeleteEventPackFactorySourceText(
+        buildId: str,
+        sourceId: str,
+        payload: FactorySourcePermanentDeleteRequest,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        ownerUserId = _sessionId(sessionId)
+        factory: EventPackFactoryService = request.app.state.eventPackFactoryService
+        result = factory.permanentlyDeleteSourceText(
+            ownerUserId=ownerUserId,
+            buildId=buildId,
+            sourceId=sourceId,
+            expectedRevision=payload.expectedRevision,
+        )
+        request.app.state.database.appendAuditEvent(
+            ownerUserId,
+            "EVENT_PACK_FACTORY",
+            buildId,
+            "SOURCE_RAW_TEXT_PERMANENTLY_DELETED",
+            {
+                "revision": result.build.revision,
+                "sourceId": sourceId,
+                "rawTextRetained": False,
+                "explicitConfirmation": True,
+            },
+        )
+        return result.model_dump(mode="json")
+
     @appInstance.post("/api/v1/event-pack-factory/builds/{buildId}/search")
     async def searchEventPackFactorySources(
         buildId: str,
@@ -1833,6 +2152,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
 
         def modelPayload(model: Any) -> dict[str, Any]:
             price = getTokenPrice(model.provider, model.model_id)
+            priceSnapshot = getTokenPriceSnapshot(model.provider, model.model_id)
             return {
                 "provider": model.provider,
                 "id": model.model_id,
@@ -1857,28 +2177,48 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 "officialModelUrl": model.official_model_url,
                 "catalogVerifiedAt": model.verified_at,
                 "pricingStatus": (
-                    "VERIFIED_UPPER_BOUND" if price is not None else "UNAVAILABLE_FAIL_CLOSED"
+                    "VERIFIED_UPPER_BOUND"
+                    if price is not None
+                    else (
+                        "STALE_FAIL_CLOSED"
+                        if priceSnapshot is not None
+                        else "UNAVAILABLE_FAIL_CLOSED"
+                    )
                 ),
-                "billingCurrency": price.currency if price is not None else None,
+                "billingCurrency": (priceSnapshot.currency if priceSnapshot is not None else None),
                 "inputRateUpperPerMillion": (
-                    float(price.listInputPerMillion) if price is not None else None
+                    float(priceSnapshot.listInputPerMillion) if priceSnapshot is not None else None
                 ),
                 "cachedInputRatePerMillion": (
-                    float(price.listCachedInputPerMillion)
-                    if price is not None and price.listCachedInputPerMillion is not None
+                    float(priceSnapshot.listCachedInputPerMillion)
+                    if priceSnapshot is not None
+                    and priceSnapshot.listCachedInputPerMillion is not None
                     else None
                 ),
                 "outputRateUpperPerMillion": (
-                    float(price.listOutputPerMillion) if price is not None else None
+                    float(priceSnapshot.listOutputPerMillion) if priceSnapshot is not None else None
                 ),
                 "budgetInputRateUpperPerMillion": (
-                    float(price.budgetInputUpperBoundPerMillion) if price is not None else None
+                    float(priceSnapshot.budgetInputUpperBoundPerMillion)
+                    if priceSnapshot is not None
+                    else None
                 ),
                 "budgetOutputRateUpperPerMillion": (
-                    float(price.budgetOutputUpperBoundPerMillion) if price is not None else None
+                    float(priceSnapshot.budgetOutputUpperBoundPerMillion)
+                    if priceSnapshot is not None
+                    else None
                 ),
-                "pricingVerifiedAt": price.verifiedAt if price is not None else None,
-                "pricingNote": price.pricingNote if price is not None else None,
+                "pricingVerifiedAt": (
+                    priceSnapshot.verifiedAt if priceSnapshot is not None else None
+                ),
+                "pricingValidUntil": (
+                    priceSnapshot.validUntil if priceSnapshot is not None else None
+                ),
+                "pricingNote": (priceSnapshot.pricingNote if priceSnapshot is not None else None),
+                "validationEvidence": modelValidationEvidence(
+                    model.provider,
+                    model.model_id,
+                ),
             }
 
         providerPayloads: list[dict[str, Any]] = []
@@ -1930,6 +2270,13 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             "documentationUrl": defaultProvider["documentationUrl"],
             "pricingUrl": defaultProvider["pricingUrl"],
             "pricingSnapshotVersion": PRICING_SNAPSHOT_VERSION,
+            "pricingSnapshotStatus": pricingSnapshotStatus(),
+            "pricingSnapshotValidUntil": PRICING_SNAPSHOT_VALID_UNTIL,
+            "pricingReviewCadenceDays": PRICING_MAX_AGE_DAYS,
+            "capabilitySnapshotVersion": CAPABILITY_SNAPSHOT_VERSION,
+            "capabilitySnapshotStatus": capabilitySnapshotStatus(),
+            "capabilitySnapshotValidUntil": CAPABILITY_SNAPSHOT_VALID_UNTIL,
+            "capabilityReviewCadenceDays": CAPABILITY_REVIEW_CADENCE_DAYS,
             "fxSourceUrl": FX_SOURCE_URL,
             "officialFxSnapshotCnyPerUsd": float(OFFICIAL_FX_SNAPSHOT_CNY_PER_USD),
             "cnyPerUsdBudgetFloor": float(CNY_PER_USD_BUDGET_FLOOR),
@@ -2040,6 +2387,8 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             "ok": True,
             "provider": result.provider,
             "model": result.model,
+            "thinkingPreferenceEnabled": result.thinking_preference_enabled,
+            "thinkingEnabled": result.thinking_enabled,
             "structuredOutputValidated": True,
             "responseSchemaVersion": result.schema_version,
             "latencyMs": result.latency_ms,
@@ -2103,6 +2452,8 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                         "cacheHit": modelRun.cache_hit,
                         "fallbackUsed": modelRun.fallback_used,
                         "repairUsed": modelRun.repair_used,
+                        "thinkingPreferenceEnabled": (modelRun.thinking_preference_enabled),
+                        "thinkingEnabled": modelRun.thinking_enabled,
                         "latencyMs": modelRun.latency_ms,
                         "totalTokens": modelRun.total_tokens,
                     }
@@ -2157,12 +2508,16 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         }
 
     @appInstance.get("/api/v1/governance/release-gate")
-    async def getReleaseGate() -> dict[str, Any]:
+    async def getReleaseGate(request: Request) -> dict[str, Any]:
         evaluatedAt = datetime.now(UTC)
+        telemetry = request.app.state.cognitionService.getTelemetry()
         report = evaluateP0Release(
             ReleaseContext(
                 releaseId=f"runtime-readiness-{evaluatedAt:%Y%m%dT%H%M%SZ}",
                 evaluatedAt=evaluatedAt,
+                structuredSuccessCalls=telemetry.calls,
+                structuredSuccessRate=telemetry.structured_success_rate,
+                structuredSuccessThreshold=telemetry.structured_success_threshold,
             )
         )
         return {
@@ -2173,6 +2528,19 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 "it prevents presenting the system as externally validated or production-ready."
             ),
         }
+
+    @appInstance.get("/api/v1/governance/deployment-status")
+    async def getDeploymentStatus() -> JSONResponse:
+        return JSONResponse(
+            content=deploymentStatusSnapshot(
+                releaseCommit=settings.releaseCommit,
+                statusPath=settings.deploymentStatusPath,
+            ),
+            headers={
+                "Cache-Control": "no-store, max-age=0",
+                "Pragma": "no-cache",
+            },
+        )
 
     @appInstance.get("/api/v1/validation/ladder")
     async def getValidationLadder() -> dict[str, Any]:
@@ -2427,6 +2795,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             claims = service.extractCandidateClaims(
                 extractionInput,
                 extraction.maximumClaims,
+                tuple(extraction.requestedImpactChannels),
             )
         return service.saveExtractedClaims(
             eventPackId,
@@ -2663,6 +3032,15 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         service: ExperimentService = request.app.state.experimentService
         return service.cancelExperiment(experimentId, _sessionId(sessionId))
 
+    @appInstance.post("/api/v1/experiments/{experimentId}/cognition/continue-with-rules")
+    async def continueCognitionWithRules(
+        experimentId: str,
+        request: Request,
+        sessionId: str = Depends(requireOwner),
+    ) -> dict[str, Any]:
+        service: ExperimentService = request.app.state.experimentService
+        return service.continueCognitionWithRules(experimentId, _sessionId(sessionId))
+
     @appInstance.post("/api/v1/experiments/{experimentId}/invalidate")
     async def invalidateExperiment(
         experimentId: str,
@@ -2878,7 +3256,8 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                     "reasoningSummaryRequested": (interpretationRequest.reasoningSummaryRequested),
                     "provider": config.provider,
                     "model": config.model,
-                    "thinkingEnabled": config.thinking_enabled,
+                    "thinkingPreferenceEnabled": config.thinking_enabled,
+                    "thinkingEnabled": False,
                     "failureCode": error.code.value,
                     "retryable": error.retryable,
                     "providerAttempts": max(0, error.attempts),
@@ -2890,7 +3269,10 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 },
                 traceId=getattr(request.state, "traceId", None),
             )
-            raise _modelGatewayApiError(error) from error
+            raise _modelGatewayApiError(
+                error,
+                interpretationFailureDetails=True,
+            ) from error
         except ValueError as error:
             raise ApiError(
                 "RESULT_INTERPRETATION_CONTEXT_INVALID",
@@ -2913,6 +3295,9 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                     "retryable": True,
                     # 未知异常可能发生在供应商已接收请求之后，保守提示计费不确定性。
                     "uncertainBillableAttempts": 1,
+                    "repairAttempted": False,
+                    "failureStage": "UNKNOWN_AFTER_DISPATCH",
+                    "billingConclusion": "BILLING_UNCERTAIN",
                 },
             ) from error
 
@@ -2946,6 +3331,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 ],
                 "provider": run.provider,
                 "model": run.model,
+                "thinkingPreferenceEnabled": run.thinking_preference_enabled,
                 "thinkingEnabled": run.thinking_enabled,
                 "streamed": run.streamed,
                 "promptTokens": run.usage.promptTokens,
@@ -2959,6 +3345,9 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 "repairUsed": run.repair_used,
                 "plannerUsed": run.planner_used,
                 "plannerFallbackUsed": run.planner_fallback_used,
+                "semanticValidationStatus": run.semantic_validation_status,
+                "deterministicFallbackUsed": run.deterministic_fallback_used,
+                "semanticViolationCodes": list(run.semantic_violation_codes),
                 "failureCodes": list(run.failure_codes),
                 "promptVersion": run.prompt_version,
                 "latencyMs": run.latency_ms,
@@ -3021,6 +3410,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 "reasoningSummaryRequested": interpretationRequest.reasoningSummaryRequested,
                 "provider": run.provider,
                 "model": run.model,
+                "thinkingPreferenceEnabled": run.thinking_preference_enabled,
                 "thinkingEnabled": run.thinking_enabled,
                 "streamed": run.streamed,
                 "modelCalls": run.model_calls,
@@ -3028,6 +3418,9 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 "uncertainBillableAttempts": run.uncertain_billable_attempts,
                 "repairUsed": run.repair_used,
                 "plannerFallbackUsed": run.planner_fallback_used,
+                "semanticValidationStatus": run.semantic_validation_status,
+                "deterministicFallbackUsed": run.deterministic_fallback_used,
+                "semanticViolationCodes": list(run.semantic_violation_codes),
                 "failureCodes": list(run.failure_codes),
                 "promptTokens": run.usage.promptTokens,
                 "completionTokens": run.usage.completionTokens,
@@ -3269,6 +3662,11 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                     {
                         "schemaVersion": "1.0.0",
                         **_safeResultInterpretationErrorDetails(error),
+                        "failureStage": (
+                            error.details["failureStage"]
+                            if isinstance(error.details.get("failureStage"), str)
+                            else currentStage
+                        ),
                         "code": error.code,
                         "message": error.message,
                         "httpStatus": error.statusCode,
@@ -3293,6 +3691,9 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                         "httpStatus": 500,
                         # 未知错误可能发生在供应商已接收请求之后，不能宣称未计费。
                         "uncertainBillableAttempts": 1,
+                        "repairAttempted": currentStage == "REPAIRING",
+                        "failureStage": currentStage,
+                        "billingConclusion": "BILLING_UNCERTAIN",
                         "traceId": getattr(request.state, "traceId", None),
                     },
                 )
@@ -3488,7 +3889,9 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             content=exportBytes,
             media_type="application/zip",
             headers={
-                "Content-Disposition": f'attachment; filename="eventshock-{experimentId}.zip"'
+                "Content-Disposition": (
+                    f'attachment; filename="eventshock-reproducibility-{experimentId}.zip"'
+                )
             },
         )
 
@@ -3794,6 +4197,30 @@ async def _extractEventClaimsInBatches(
     return claims, mode
 
 
+def _safeContentFindingGuidance(
+    *,
+    code: str,
+    severity: str,
+    officialHost: str | None,
+) -> tuple[str, str]:
+    """只返回分类与动作代码，绝不复述安全扫描命中的原文。"""
+
+    if code in {
+        "PRIVATE_KEY_MATERIAL",
+        "API_KEY_OR_TOKEN",
+        "PASSWORD_VALUE",
+        "URL_EMBEDDED_CREDENTIAL",
+    }:
+        return "SECRET", "REMOVE_ROTATE_AND_RESUBMIT"
+    if severity in {"CRITICAL", "HIGH"}:
+        return "HIGH_RISK_IDENTITY_OR_ACTIVE_CONTENT", "REMOVE_AND_RESUBMIT"
+    if code in {"EMAIL_ADDRESS", "PHONE_NUMBER"} and officialHost:
+        return "PUBLIC_ORGANIZATION_CONTACT", "VERIFY_PUBLIC_CONTACT_OR_REDACT"
+    if code in {"EMAIL_ADDRESS", "PHONE_NUMBER"}:
+        return "CONTACT_INFORMATION", "REDACT_OR_EDIT"
+    return "GENERAL_REVIEW_MATCH", "REVIEW_EDIT_OR_REMOVE"
+
+
 def _scanEventPackSources(
     sources: list[EventSourceInput],
     *,
@@ -3806,8 +4233,14 @@ def _scanEventPackSources(
     safeFindings: list[dict[str, Any]] = []
     decisions: set[ContentPolicyDecision] = set()
     totalFindingCount = 0
+    retainedFieldCount = 0
+    removedFields: set[tuple[str, str]] = set()
+    redactedFields: set[tuple[str, str]] = set()
     metadataSummary: dict[str, Any] | None = None
     if eventPackMetadata is not None:
+        retainedFieldCount += sum(
+            value is not None and str(value).strip() != "" for value in eventPackMetadata.values()
+        )
         metadataResult = scanEventPackContent("", eventPackMetadata, locale="en")
         decisions.add(metadataResult.decision)
         totalFindingCount += len(metadataResult.findings)
@@ -3818,6 +4251,16 @@ def _scanEventPackSources(
         for finding in metadataResult.findings:
             if len(safeFindings) >= 64:
                 break
+            riskCategory, recommendedAction = _safeContentFindingGuidance(
+                code=finding.code,
+                severity=finding.severity.value,
+                officialHost=None,
+            )
+            fieldKey = ("event-pack-metadata", finding.field)
+            if finding.field.lower().endswith("url"):
+                removedFields.add(fieldKey)
+            else:
+                redactedFields.add(fieldKey)
             safeFindings.append(
                 {
                     "sourceId": "event-pack-metadata",
@@ -3825,9 +4268,23 @@ def _scanEventPackSources(
                     "severity": finding.severity.value,
                     "field": finding.field,
                     "offset": finding.offset,
+                    "riskCategory": riskCategory,
+                    "recommendedAction": recommendedAction,
                 }
             )
     for source in sources:
+        retainedFieldCount += sum(
+            value is not None and str(value).strip() != ""
+            for value in (
+                source.rawText,
+                source.title,
+                source.publisher,
+                source.url,
+                source.sourceType,
+                source.publishedAt,
+                source.knownAt,
+            )
+        )
         result = scanEventPackContent(
             source.rawText,
             {
@@ -3855,7 +4312,17 @@ def _scanEventPackSources(
         for finding in result.findings:
             if len(safeFindings) >= 64:
                 break
-            # 不写 redactedExcerpt 或 recommendedAction，进一步缩小日志泄露面。
+            riskCategory, recommendedAction = _safeContentFindingGuidance(
+                code=finding.code,
+                severity=finding.severity.value,
+                officialHost=result.officialHost,
+            )
+            fieldKey = (source.sourceId, finding.field)
+            if finding.field.lower().endswith("url"):
+                removedFields.add(fieldKey)
+            else:
+                redactedFields.add(fieldKey)
+            # 不写 redactedExcerpt；动作使用固定代码，进一步缩小日志泄露面。
             safeFindings.append(
                 {
                     "sourceId": source.sourceId,
@@ -3863,6 +4330,8 @@ def _scanEventPackSources(
                     "severity": finding.severity.value,
                     "field": finding.field,
                     "offset": finding.offset,
+                    "riskCategory": riskCategory,
+                    "recommendedAction": recommendedAction,
                 }
             )
 
@@ -3899,6 +4368,11 @@ def _scanEventPackSources(
         "sources": sourceSummaries,
         "eventPackMetadata": metadataSummary,
         "rawContentRetained": False,
+        "modelInputSummary": {
+            "retainedFieldCount": max(0, retainedFieldCount - len(removedFields)),
+            "removedFieldCount": len(removedFields),
+            "redactedFieldCount": len(redactedFields - removedFields),
+        },
     }
 
 
@@ -3964,6 +4438,18 @@ def _rateLimitRules(request: Request) -> list[RateLimitRule]:
                 RateLimitRule(key=f"auth-code:ip:{clientIp}", limit=60, windowSeconds=3600)
             )
         return rules
+    if path in {"/api/v1/account", "/api/v1/account/data-export"}:
+        context = getattr(request.state, "authContext", None)
+        principal = (
+            context.userId if isinstance(context, AuthContext) else f"unavailable:{clientIp}"
+        )
+        return [
+            RateLimitRule(
+                key=f"account-sensitive:{principal}",
+                limit=5,
+                windowSeconds=3600,
+            )
+        ]
     isExperimentCreate = path == "/api/v1/experiments"
     isStudyRun = path == "/api/v1/studies/run"
     isResultInterpretation = bool(
@@ -3993,9 +4479,11 @@ def _rateLimitRules(request: Request) -> list[RateLimitRule]:
                 r"/api/v1/event-pack-factory/builds",
                 r"/api/v1/event-pack-factory/builds/[^/]+",
                 r"/api/v1/event-pack-factory/builds/[^/]+/(?:paste|search|reader|materialize)",
-                r"/api/v1/event-pack-factory/builds/[^/]+/sources/[^/]+/(?:review|raw-text)",
+                r"/api/v1/event-pack-factory/builds/[^/]+/sources/[^/]+/"
+                r"(?:review|raw-text|selection)",
                 r"/api/v1/guided-workflows",
-                r"/api/v1/guided-workflows/[^/]+/(?:turn|apply|advance|links)",
+                r"/api/v1/guided-workflows/[^/]+/(?:turn|apply|advance|links|archive)",
+                r"/api/v1/guided-workflows/[^/]+/operations/[^/]+/recover",
                 r"/api/v1/scenarios(?:/[^/]+(?:/(?:clone|freeze))?)?",
                 r"/api/v1/llm/(?:config|test)",
                 r"/api/v1/evals/run",

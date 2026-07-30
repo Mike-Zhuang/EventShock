@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from backend.app.auth.models import (
@@ -71,3 +73,13 @@ class UserStatusRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: UserStatus
+
+
+class AccountDataExportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    password: str = Field(min_length=1, max_length=128)
+
+
+class AccountDeletionRequest(AccountDataExportRequest):
+    confirmation: Literal["DELETE"]

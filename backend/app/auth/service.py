@@ -390,6 +390,26 @@ class AuthService:
         self.repository.touchSession(session.context.authSessionId, now)
         return session.context
 
+    def verifyCurrentPassword(self, requester: AuthContext, password: str) -> None:
+        """敏感账号操作前重新验证当前密码，不创建新会话。"""
+
+        userRow = self.repository.getUserAuthenticationRecord(requester.userId)
+        encodedHash = (
+            str(userRow["password_hash"]) if userRow is not None else self._dummyPasswordHash
+        )
+        if userRow is None or not verifyPassword(password, encodedHash):
+            self.repository.recordActivity(
+                userId=requester.userId if userRow is not None else None,
+                action="SENSITIVE_ACCOUNT_REAUTH",
+                status="FAILED",
+            )
+            raise AuthenticationError("current password is incorrect")
+        self.repository.recordActivity(
+            userId=requester.userId,
+            action="SENSITIVE_ACCOUNT_REAUTH",
+            status="SUCCEEDED",
+        )
+
     def logout(self, *, token: str) -> str | None:
         if not token:
             return None

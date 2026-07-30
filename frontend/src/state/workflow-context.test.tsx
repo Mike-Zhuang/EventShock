@@ -1,7 +1,12 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../api/client';
-import type { EventPack, Experiment, ExperimentResults } from '../api/types';
+import type {
+  EventPack,
+  Experiment,
+  ExperimentResults,
+  ScenarioValidation,
+} from '../api/types';
 import { useWorkflow, WorkflowProvider } from './workflow-context';
 
 vi.mock('../api/client', () => ({
@@ -13,6 +18,7 @@ vi.mock('../api/client', () => ({
     getResults: vi.fn(),
     getEventPack: vi.fn(),
     approveAllClaims: vi.fn(),
+    validateScenario: vi.fn(),
     createExperiment: vi.fn(),
     startExperiment: vi.fn(),
     streamExperiment: vi.fn(async () => undefined),
@@ -47,6 +53,18 @@ function completedExperiment(id: string): Experiment {
   };
 }
 
+function validScenarioValidation(): ScenarioValidation {
+  return {
+    valid: true,
+    simulationRunnable: true,
+    requestedCognitionRunnable: true,
+    effectiveCognitionMode: 'RULE_ONLY',
+    degradationReasons: [],
+    requiresExplicitRuleFallbackConfirmation: false,
+    checks: [],
+  };
+}
+
 function reviewPack(status: 'AI_PROPOSED' | 'HUMAN_APPROVED'): EventPack {
   return {
     id: 'pack-review',
@@ -63,6 +81,78 @@ function reviewPack(status: 'AI_PROPOSED' | 'HUMAN_APPROVED'): EventPack {
 describe('工作流实验与结果归属', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('binds validation to the exact draft and discards a response that finishes after editing', async () => {
+    let workflow!: ReturnType<typeof useWorkflow>;
+    let resolveValidation!: (validation: ScenarioValidation) => void;
+    const delayedValidation = new Promise<ScenarioValidation>((resolve) => {
+      resolveValidation = resolve;
+    });
+    vi.mocked(api.validateScenario).mockReturnValue(delayedValidation);
+
+    function Harness() {
+      workflow = useWorkflow();
+      return (
+        <output data-testid="validation-state">
+          {workflow.validationState}
+          {'|'}
+          {workflow.validation?.valid === true ? 'valid' : 'none'}
+          {'|'}
+          {workflow.validationBinding?.kind ?? 'unbound'}
+        </output>
+      );
+    }
+
+    render(<WorkflowProvider><Harness /></WorkflowProvider>);
+    await waitFor(() => expect(api.getExperiments).toHaveBeenCalled());
+
+    let validationRequest!: Promise<ScenarioValidation>;
+    act(() => {
+      validationRequest = workflow.validateScenario({
+        kind: 'saved',
+        scenarioId: 'scenario-one',
+        scenarioName: 'Saved scenario',
+        contentHash: 'a'.repeat(64),
+      });
+    });
+    expect(screen.getByTestId('validation-state')).toHaveTextContent('loading|none|unbound');
+
+    act(() => {
+      workflow.setScenario({ ...workflow.scenario, steps: workflow.scenario.steps + 1 });
+    });
+    expect(screen.getByTestId('validation-state')).toHaveTextContent('idle|none|unbound');
+
+    await act(async () => {
+      resolveValidation(validScenarioValidation());
+      await expect(validationRequest).rejects.toThrow(/changed while validation/i);
+    });
+    expect(screen.getByTestId('validation-state')).toHaveTextContent('idle|none|unbound');
+  });
+
+  it('records whether a successful validation belongs to an unsaved draft', async () => {
+    let workflow!: ReturnType<typeof useWorkflow>;
+    vi.mocked(api.validateScenario).mockResolvedValue(validScenarioValidation());
+
+    function Harness() {
+      workflow = useWorkflow();
+      return (
+        <output data-testid="validation-binding">
+          {workflow.validationBinding?.kind ?? 'unbound'}
+          {'|'}
+          {workflow.validationBinding?.draftDigest ?? 'none'}
+        </output>
+      );
+    }
+
+    render(<WorkflowProvider><Harness /></WorkflowProvider>);
+    await waitFor(() => expect(api.getExperiments).toHaveBeenCalled());
+    await act(async () => {
+      await workflow.validateScenario({ kind: 'unsaved-draft' });
+    });
+
+    expect(screen.getByTestId('validation-binding'))
+      .toHaveTextContent(/^unsaved-draft\|draft-[0-9a-f]{8}$/);
   });
 
   it('启动新实验后清除旧结果，并忽略旧实验迟到的结果响应', async () => {

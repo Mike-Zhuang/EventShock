@@ -7,12 +7,14 @@ import {
 import {
   ArrowClockwise,
   ArrowRight,
+  Archive,
   CheckCircle,
   ClipboardText,
   Factory,
   PaperPlaneTilt,
   Plus,
   Robot,
+  Warning,
   User,
 } from '@phosphor-icons/react';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
@@ -20,17 +22,22 @@ import type { Navigate } from '../app';
 import { api, ApiError } from '../api/client';
 import type {
   GuidedStage,
+  GuidedTurnOperation,
+  GuidedTurnRecoveryAction,
   GuidedWorkflow,
   GuidedWorkflowProposal,
 } from '../api/types';
 import { EmptyState, ErrorPanel, LoadingPanel, PageHeader, StatusBadge } from '../components/common';
 import { SafeMarkdown } from '../components/safe-markdown';
 import {
+  readGuidedReturnContext,
   writeFactoryGuidedHandoff,
+  writeGuidedReturnContext,
   writeScenarioGuidedHandoff,
 } from '../guided-handoff';
 import { useI18n } from '../i18n';
 import { useWorkflow } from '../state/workflow-context';
+import { safeDate } from '../utils/format';
 
 const STAGES: GuidedStage[] = [
   'EVENT_GOAL',
@@ -60,6 +67,63 @@ const STAGE_LABELS: Record<GuidedStage, { en: string; zh: string }> = {
   COMPLETED: { en: 'Completed', zh: '已完成' },
 };
 
+const RESPONSIBILITY_FLOW = [
+  {
+    key: 'goal',
+    owner: 'AI',
+    title: { en: 'Frame the event and one intervention', zh: '梳理事件目标与单一干预' },
+    detail: {
+      en: 'AI proposes bounded metadata, source methods, search queries, and intervention fields. You review before applying.',
+      zh: 'AI 提出受限的事件元数据、来源方式、检索词和干预字段；你核对后才应用。',
+    },
+  },
+  {
+    key: 'source',
+    owner: 'HUMAN',
+    title: { en: 'Authorize and review source evidence', zh: '授权并审核来源证据' },
+    detail: {
+      en: 'This opens the dedicated workspace because lawful use, full-text fidelity, and source authorization require a human decision.',
+      zh: '这里必须跳到专业页，因为合法使用、全文忠实度和证据授权必须由人判断。',
+    },
+  },
+  {
+    key: 'claim',
+    owner: 'HUMAN',
+    title: { en: 'Decide every retained claim', zh: '逐项决定保留的主张' },
+    detail: {
+      en: 'Approve, edit, or reject each claim. AI cannot replace the accountable evidence judgment.',
+      zh: '逐项批准、编辑或拒绝主张；AI 不能替代需要承担责任的证据判断。',
+    },
+  },
+  {
+    key: 'freeze',
+    owner: 'HUMAN',
+    title: { en: 'Freeze reproducible inputs', zh: '冻结可复现输入' },
+    detail: {
+      en: 'Freezing the Event Pack and scenario locks the exact inputs used for reproducibility, so it remains an explicit human action.',
+      zh: '冻结 Event Pack 和情景会锁定复现实验所需的精确输入，因此始终是明确的人类操作。',
+    },
+  },
+  {
+    key: 'preflight',
+    owner: 'HUMAN',
+    title: { en: 'Review preflight and start', zh: '核对运行前检查并启动' },
+    detail: {
+      en: 'Starting may create provider fees and carries interpretation responsibility. Review the cost boundary and limitations before submission.',
+      zh: '启动可能产生供应商费用，也伴随解释责任；提交前必须核对费用边界和局限。',
+    },
+  },
+  {
+    key: 'continue',
+    owner: 'SYSTEM',
+    title: { en: 'Return and continue from verified state', zh: '返回并从已核验状态继续' },
+    detail: {
+      en: 'On return, the guide reloads the linked server artifacts and resumes the next stage without asking you to describe completed work again.',
+      zh: '返回后，引导会重读服务器上的真实关联对象并继续下一阶段，不要求你重复描述已完成工作。',
+    },
+  },
+] as const;
+
 function stageLabel(stage: GuidedStage, isZh: boolean): string {
   return isZh ? STAGE_LABELS[stage].zh : STAGE_LABELS[stage].en;
 }
@@ -67,6 +131,76 @@ function stageLabel(stage: GuidedStage, isZh: boolean): string {
 interface GuidedAdvanceBlocker {
   message: string;
   targetId: string;
+}
+
+interface LocalGuidedTurn {
+  id: string;
+  content: string;
+  createdAt: string;
+  startedAtMs: number;
+  stage: GuidedStage;
+  status: 'sending' | 'failed' | 'delivered';
+}
+
+interface GuidedRecoveryIntent {
+  operation: GuidedTurnOperation;
+  action: GuidedTurnRecoveryAction;
+}
+
+function guidedOperationStatus(
+  status: GuidedTurnOperation['status'],
+  isZh: boolean,
+): string {
+  const labels: Record<GuidedTurnOperation['status'], { en: string; zh: string }> = {
+    PENDING: { en: 'Request in progress', zh: '请求处理中' },
+    RESULT_READY: { en: 'Validated result cached', zh: '已缓存校验结果' },
+    SUCCEEDED: { en: 'Committed', zh: '已完成提交' },
+    UNKNOWN: { en: 'Outcome requires a decision', zh: '结果未知，需人工决定' },
+    ABANDONED_BY_USER: { en: 'Abandoned by user', zh: '已由用户放弃' },
+  };
+  return isZh ? labels[status].zh : labels[status].en;
+}
+
+function localTurnProgress(
+  elapsedSeconds: number,
+  isZh: boolean,
+  operation?: GuidedTurnOperation,
+): string {
+  const stage = operation?.failureStage;
+  if (stage === 'BEFORE_PROVIDER_DISPATCH') {
+    return isZh
+      ? '正在执行安全检查并准备受约束上下文'
+      : 'Running safety checks and preparing bounded context';
+  }
+  if (stage === 'PROVIDER_DISPATCHED') {
+    return isZh ? '模型请求已发出，正在等待供应商响应' : 'Model request sent; waiting for the provider';
+  }
+  if (stage === 'PROVIDER_RESPONSE_VALIDATED') {
+    return isZh ? '模型已返回，正在校验并保存候选' : 'Model returned; validating and saving the candidate';
+  }
+  if (stage === 'DETERMINISTIC_PROPOSAL_READY') {
+    return isZh ? '规则候选已生成，正在保存' : 'Rule-based candidate generated; saving it';
+  }
+  if (stage === 'DATABASE_COMMIT_PENDING') {
+    return isZh ? '候选已通过校验，正在提交数据库' : 'Candidate validated; committing it to the database';
+  }
+  if (stage === 'PROVIDER_RESPONSE_FAILED') {
+    return isZh
+      ? '供应商响应未能通过，正在记录可恢复状态'
+      : 'Provider response failed; recording a recoverable state';
+  }
+  if (elapsedSeconds < 2) {
+    return isZh ? '请求已安全发送' : 'Request sent safely';
+  }
+  if (elapsedSeconds < 8) {
+    return isZh ? '正在理解当前阶段与修改要求' : 'Reading the current stage and requested changes';
+  }
+  if (elapsedSeconds < 20) {
+    return isZh ? '正在等待服务器校验结构化候选' : 'Waiting for the server to validate a structured candidate';
+  }
+  return isZh
+    ? '服务器仍在处理；请保留本页，系统不会重复发送'
+    : 'The server is still processing. Keep this page open; the request will not be resent';
 }
 
 function focusGuidedTarget(targetId: string): void {
@@ -201,7 +335,7 @@ function ProposalDetails({
           <div><dt>{isZh ? '标题' : 'Title'}</dt><dd>{isZh ? metadata.titleZh ?? metadata.title : metadata.title}</dd></div>
           <div><dt>{isZh ? '研究问题' : 'Research question'}</dt><dd>{metadata.researchQuestion}</dd></div>
           <div><dt>{isZh ? '证券代码' : 'Instrument'}</dt><dd><code>{metadata.instrument}</code></dd></div>
-          <div><dt>{isZh ? '时点边界' : 'Point-in-time cutoff'}</dt><dd>{new Intl.DateTimeFormat(isZh ? 'zh-CN' : 'en', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(metadata.asOf))}</dd></div>
+          <div><dt>{isZh ? '时点边界' : 'Point-in-time cutoff'}</dt><dd>{safeDate(metadata.asOf, isZh ? 'zh-CN' : 'en')}</dd></div>
           <div className="guided-proposal__wide"><dt>{isZh ? '摘要' : 'Summary'}</dt><dd>{isZh ? metadata.summaryZh ?? metadata.summary : metadata.summary}</dd></div>
         </dl>
       ) : null}
@@ -245,6 +379,12 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
   const [busyAction, setBusyAction] = useState<string>();
   const [error, setError] = useState<string>();
   const [advanceError, setAdvanceError] = useState<GuidedAdvanceBlocker>();
+  const [localTurn, setLocalTurn] = useState<LocalGuidedTurn>();
+  const [turnElapsedSeconds, setTurnElapsedSeconds] = useState(0);
+  const [turnOperations, setTurnOperations] = useState<GuidedTurnOperation[]>([]);
+  const [operationError, setOperationError] = useState<string>();
+  const [recoveryIntent, setRecoveryIntent] = useState<GuidedRecoveryIntent>();
+  const [archiveRequested, setArchiveRequested] = useState(false);
 
   const load = async () => {
     setState('loading');
@@ -252,7 +392,9 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
     try {
       const next = await api.getGuidedWorkflows();
       setWorkflows(next);
-      if (next.length > 0) setWorkflow(await api.getGuidedWorkflow(next[0].id));
+      const returnContext = readGuidedReturnContext();
+      const selected = next.find((item) => item.id === returnContext?.workflowId) ?? next[0];
+      if (selected) setWorkflow(await api.getGuidedWorkflow(selected.id));
       setState('ready');
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : String(loadError));
@@ -263,6 +405,79 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
   useEffect(() => {
     void load();
   }, []);
+
+  useEffect(() => {
+    if (!workflow) {
+      setTurnOperations([]);
+      return;
+    }
+    let active = true;
+    const loadOperations = async () => {
+      try {
+        const next = await api.getGuidedTurnOperations(workflow.id);
+        if (active) {
+          setTurnOperations(next);
+          setOperationError(undefined);
+        }
+      } catch (loadError) {
+        if (active) {
+          setOperationError(loadError instanceof Error ? loadError.message : String(loadError));
+        }
+      }
+    };
+    void loadOperations();
+    return () => {
+      active = false;
+    };
+  }, [workflow?.id, workflow?.updatedAt]);
+
+  useEffect(() => {
+    if (!localTurn || localTurn.status !== 'sending') {
+      setTurnElapsedSeconds(0);
+      return undefined;
+    }
+    const updateElapsed = () => {
+      setTurnElapsedSeconds(Math.max(
+        0,
+        Math.floor((Date.now() - localTurn.startedAtMs) / 1_000),
+      ));
+    };
+    updateElapsed();
+    const timer = window.setInterval(updateElapsed, 1_000);
+    return () => window.clearInterval(timer);
+  }, [localTurn]);
+
+  useEffect(() => {
+    if (!workflow || !localTurn || localTurn.status !== 'sending') return undefined;
+    let active = true;
+    const refreshOperation = async () => {
+      try {
+        const next = await api.getGuidedTurnOperations(workflow.id);
+        if (active) {
+          setTurnOperations(next);
+          setOperationError(undefined);
+        }
+      } catch (loadError) {
+        if (active) {
+          setOperationError(loadError instanceof Error ? loadError.message : String(loadError));
+        }
+      }
+    };
+    void refreshOperation();
+    const timer = window.setInterval(() => void refreshOperation(), 1_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [localTurn?.id, localTurn?.status, workflow?.id]);
+
+  useEffect(() => {
+    if (!localTurn || !workflow) return;
+    const persisted = workflow.messages.some(
+      (item) => item.role === 'user' && item.content === localTurn.content,
+    );
+    if (persisted) setLocalTurn(undefined);
+  }, [localTurn, workflow]);
 
   const setCurrent = (next: GuidedWorkflow) => {
     setWorkflow(next);
@@ -316,13 +531,123 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
     event.preventDefault();
     if (!workflow || !message.trim()) return;
     const content = message.trim();
-    setMessage('');
-    await run('turn', () => api.sendGuidedTurn(workflow.id, {
-      message: content,
-      language,
-      expectedVersion: workflow.version,
-      clientRequestId: `guided-${crypto.randomUUID()}`,
-    }));
+    const clientRequestId = `guided-${crypto.randomUUID()}`;
+    await submitGuidedTurn(content, clientRequestId, workflow.version, true);
+  };
+
+  const submitGuidedTurn = async (
+    content: string,
+    clientRequestId: string,
+    expectedVersion: number,
+    clearComposer: boolean,
+  ) => {
+    if (!workflow) return;
+    const startedAtMs = Date.now();
+    const optimisticTurn: LocalGuidedTurn = {
+      id: clientRequestId,
+      content,
+      createdAt: new Date(startedAtMs).toISOString(),
+      startedAtMs,
+      stage: workflow.stage,
+      status: 'sending',
+    };
+    setLocalTurn(optimisticTurn);
+    if (clearComposer) setMessage('');
+    setBusyAction('turn');
+    setError(undefined);
+    setAdvanceError(undefined);
+    try {
+      const next = await api.sendGuidedTurn(workflow.id, {
+        message: content,
+        language,
+        expectedVersion,
+        clientRequestId,
+      });
+      setCurrent(next);
+      const persisted = next.messages.some(
+        (item) => item.role === 'user' && item.content === content,
+      );
+      setLocalTurn(persisted ? undefined : { ...optimisticTurn, status: 'delivered' });
+    } catch (operationError) {
+      setMessage(content);
+      setLocalTurn({ ...optimisticTurn, status: 'failed' });
+      setError(operationError instanceof Error ? operationError.message : String(operationError));
+    } finally {
+      setBusyAction(undefined);
+    }
+  };
+
+  const decideRecovery = async () => {
+    if (!workflow || !recoveryIntent) return;
+    const { operation, action } = recoveryIntent;
+    setBusyAction('recover');
+    setError(undefined);
+    try {
+      const newClientRequestId = action === 'ABANDON_AND_AUTHORIZE_RETRY'
+        ? `guided-${crypto.randomUUID()}`
+        : undefined;
+      const result = await api.recoverGuidedTurn(
+        workflow.id,
+        operation.clientRequestId,
+        {
+          recoveryRequestId: `recovery-${crypto.randomUUID()}`,
+          action,
+          expectedVersion: operation.expectedVersion,
+          newClientRequestId,
+        },
+      );
+      setRecoveryIntent(undefined);
+      if (result.kind === 'WORKFLOW') {
+        setCurrent(result.workflow);
+        return;
+      }
+      setTurnOperations((current) => current.map((item) => (
+        item.clientRequestId === result.operation.clientRequestId
+          ? result.operation
+          : item
+      )));
+      if (
+        action === 'ABANDON_AND_AUTHORIZE_RETRY'
+        && result.operation.authorizedRetryClientRequestId
+        && result.operation.requestMessage
+      ) {
+        setBusyAction(undefined);
+        await submitGuidedTurn(
+          result.operation.requestMessage,
+          result.operation.authorizedRetryClientRequestId,
+          result.operation.expectedVersion,
+          false,
+        );
+      } else if (action === 'ABANDON_AND_AUTHORIZE_RETRY') {
+        setMessage(result.operation.requestMessage ?? operation.requestMessage ?? '');
+        setError(isZh
+          ? '原请求已安全放弃，但旧记录没有可恢复的正文。请核对输入框后手动重新发送。'
+          : 'The original request was safely abandoned, but its text is unavailable. Review the composer before sending again.');
+      }
+    } catch (recoveryError) {
+      setError(recoveryError instanceof Error ? recoveryError.message : String(recoveryError));
+    } finally {
+      setBusyAction(undefined);
+    }
+  };
+
+  const archiveWorkflow = async () => {
+    if (!workflow) return;
+    setBusyAction('archive');
+    setError(undefined);
+    try {
+      await api.archiveGuidedWorkflow(workflow.id, workflow.version);
+      const remaining = await api.getGuidedWorkflows();
+      setWorkflows(remaining);
+      setWorkflow(remaining.length > 0
+        ? await api.getGuidedWorkflow(remaining[0].id)
+        : undefined);
+      setArchiveRequested(false);
+    } catch (archiveError) {
+      setError(archiveError instanceof Error ? archiveError.message : String(archiveError));
+    } finally {
+      setBusyAction(undefined);
+    }
   };
 
   const applyProposal = () => {
@@ -351,6 +676,9 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
 
   const currentStageIndex = workflow ? STAGES.indexOf(workflow.stage) : 0;
   const pendingProposal = workflow?.pendingProposal;
+  const currentTurnOperation = localTurn
+    ? turnOperations.find((operation) => operation.clientRequestId === localTurn.id)
+    : undefined;
   const needsExternalReview = workflow && [
     'SOURCE_REVIEW',
     'CLAIM_REVIEW',
@@ -398,6 +726,8 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
     setBusyAction('handoff');
     setError(undefined);
     try {
+      // 专业页只持有返回指针；真实完成状态仍在返回时从服务器重新读取。
+      writeGuidedReturnContext(workflow);
       if (stageAction.view === 'factory') {
         writeFactoryGuidedHandoff(workflow);
       } else if (stageAction.view === 'pack') {
@@ -449,6 +779,41 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
         )}
       />
 
+      <section
+        className="guided-responsibility-map"
+        aria-labelledby="guided-responsibility-map-heading"
+      >
+        <div className="section-heading">
+          <h2 id="guided-responsibility-map-heading">
+            {isZh ? 'AI 与人工职责全流程' : 'End-to-end AI and human responsibilities'}
+          </h2>
+          <p>{isZh
+            ? '引导负责提出和衔接草稿；涉及证据授权、主张判断、冻结、费用与提交责任的步骤必须在专业页由人完成。'
+            : 'Guidance proposes and connects drafts. Evidence authorization, claim judgment, freezing, cost review, and submission accountability remain human actions in dedicated workspaces.'}</p>
+        </div>
+        <ol>
+          {RESPONSIBILITY_FLOW.map((item, index) => (
+            <li key={item.key}>
+              <span aria-hidden="true">{index + 1}</span>
+              <div>
+                <Tag
+                  size="sm"
+                  type={item.owner === 'AI' ? 'blue' : item.owner === 'HUMAN' ? 'purple' : 'cool-gray'}
+                >
+                  {item.owner === 'AI'
+                    ? isZh ? 'AI 提议' : 'AI proposes'
+                    : item.owner === 'HUMAN'
+                      ? isZh ? '人工负责' : 'Human accountable'
+                      : isZh ? '系统续接' : 'System resumes'}
+                </Tag>
+                <strong>{isZh ? item.title.zh : item.title.en}</strong>
+                <p>{isZh ? item.detail.zh : item.detail.en}</p>
+              </div>
+            </li>
+          ))}
+        </ol>
+      </section>
+
       {error && !advanceError ? (
         <InlineNotification
           kind="error"
@@ -487,7 +852,42 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
                   </option>
                 ))}
               </select>
+              <Button
+                kind="ghost"
+                size="sm"
+                renderIcon={Archive}
+                disabled={Boolean(busyAction)}
+                onClick={() => setArchiveRequested(true)}
+              >
+                {isZh ? '归档当前引导' : 'Archive this workflow'}
+              </Button>
             </div>
+            {archiveRequested ? (
+              <div className="guided-inline-decision" role="alert">
+                <strong>{isZh ? '归档后将从列表隐藏' : 'This workflow will leave the active list'}</strong>
+                <p>{isZh
+                  ? '服务器会保留审计记录，不会删除已创建的 Event Pack、情景或实验。'
+                  : 'Audit records remain, and linked Event Packs, scenarios, and experiments are not deleted.'}</p>
+                <div>
+                  <Button
+                    size="sm"
+                    kind="danger"
+                    disabled={Boolean(busyAction)}
+                    onClick={() => void archiveWorkflow()}
+                  >
+                    {isZh ? '确认归档' : 'Confirm archive'}
+                  </Button>
+                  <Button
+                    size="sm"
+                    kind="ghost"
+                    disabled={Boolean(busyAction)}
+                    onClick={() => setArchiveRequested(false)}
+                  >
+                    {isZh ? '取消' : 'Cancel'}
+                  </Button>
+                </div>
+              </div>
+            ) : null}
             <ol className="guided-stages">
               {STAGES.map((stage, index) => (
                 <li
@@ -531,14 +931,212 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
                   <header>
                     {item.role === 'assistant' ? <Robot size={18} aria-hidden="true" /> : <User size={18} aria-hidden="true" />}
                     <strong>{item.role === 'assistant' ? (isZh ? '引导助手' : 'Guided assistant') : (isZh ? '你' : 'You')}</strong>
-                    <time dateTime={item.createdAt}>{new Intl.DateTimeFormat(language, { hour: '2-digit', minute: '2-digit' }).format(new Date(item.createdAt))}</time>
+                    <time dateTime={item.createdAt}>{safeDate(item.createdAt, language)}</time>
                   </header>
                   {item.role === 'assistant'
                     ? <SafeMarkdown content={item.content} />
                     : <p>{item.content}</p>}
                 </article>
               ))}
+              {localTurn ? (
+                <article
+                  key={localTurn.id}
+                  className={`guided-message guided-message--user guided-message--${localTurn.status}`}
+                  data-testid="guided-local-turn"
+                >
+                  <header>
+                    <User size={18} aria-hidden="true" />
+                    <strong>{isZh ? '你' : 'You'}</strong>
+                    <time dateTime={localTurn.createdAt}>
+                      {safeDate(localTurn.createdAt, language)}
+                    </time>
+                    <Tag
+                      type={localTurn.status === 'failed' ? 'red' : 'cool-gray'}
+                      size="sm"
+                    >
+                      {localTurn.status === 'failed'
+                        ? isZh ? '发送失败，输入已恢复' : 'Failed; input restored'
+                        : localTurn.status === 'delivered'
+                          ? isZh ? '已发送，等待同步' : 'Sent; awaiting sync'
+                          : isZh ? '发送中' : 'Sending'}
+                    </Tag>
+                  </header>
+                  <p>{localTurn.content}</p>
+                </article>
+              ) : null}
             </div>
+
+            {localTurn?.status === 'sending' ? (
+              <div className="guided-turn-progress" role="status" aria-live="polite">
+                <ArrowClockwise size={18} aria-hidden="true" />
+                <div>
+                  <strong>{localTurnProgress(
+                    turnElapsedSeconds,
+                    isZh,
+                    currentTurnOperation,
+                  )}</strong>
+                  <span>
+                    {isZh
+                      ? `服务器阶段：${currentTurnOperation?.failureStage ?? '等待操作登记'} · 已真实等待 ${turnElapsedSeconds} 秒`
+                      : `Server stage: ${currentTurnOperation?.failureStage ?? 'awaiting operation record'} · Actual wait: ${turnElapsedSeconds} seconds`}
+                  </span>
+                </div>
+              </div>
+            ) : null}
+
+            {turnOperations.some((item) => item.status === 'UNKNOWN') ? (
+              <section className="guided-operation-recovery" aria-labelledby="guided-recovery-heading">
+                <header>
+                  <Warning size={22} weight="fill" aria-hidden="true" />
+                  <div>
+                    <h3 id="guided-recovery-heading">
+                      {isZh ? '有一次模型调用需要你决定如何恢复' : 'A model call needs a recovery decision'}
+                    </h3>
+                    <p>{isZh
+                      ? '系统不会自动重试未知调用，避免重复计费。先查看证据，再选择使用缓存结果或明确放弃并授权一次新调用。'
+                      : 'Unknown calls are never retried automatically, preventing duplicate charges. Review the evidence, then reuse a cached result or explicitly authorize one new call.'}</p>
+                  </div>
+                </header>
+                {turnOperations.filter((item) => item.status === 'UNKNOWN').map((operation) => (
+                  <article key={operation.clientRequestId}>
+                    <div className="guided-operation-recovery__summary">
+                      <div>
+                        <strong>{guidedOperationStatus(operation.status, isZh)}</strong>
+                        <span>{safeDate(operation.updatedAt, language)}</span>
+                      </div>
+                      <Tag type="red" size="sm">{operation.errorCode ?? 'UNKNOWN'}</Tag>
+                    </div>
+                    {operation.requestMessage ? <p>{operation.requestMessage}</p> : null}
+                    <dl>
+                      <div>
+                        <dt>{isZh ? '供应商请求' : 'Provider request'}</dt>
+                        <dd>{operation.providerRequestId ?? (isZh ? '未记录' : 'Not recorded')}</dd>
+                      </div>
+                      <div>
+                        <dt>{isZh ? '最后确认阶段' : 'Last confirmed stage'}</dt>
+                        <dd>{operation.failureStage ?? (isZh ? '未知' : 'Unknown')}</dd>
+                      </div>
+                      <div>
+                        <dt>{isZh ? '收到 HTTP 响应' : 'HTTP response received'}</dt>
+                        <dd>{operation.httpResponseReceived === undefined
+                          ? isZh ? '无法确认' : 'Unconfirmed'
+                          : operation.httpResponseReceived
+                            ? isZh ? '是' : 'Yes'
+                            : isZh ? '否' : 'No'}</dd>
+                      </div>
+                      <div>
+                        <dt>{isZh ? '已缓存可校验候选' : 'Validated candidate cached'}</dt>
+                        <dd>{operation.cachedProposalAvailable
+                          ? isZh ? '是' : 'Yes'
+                          : isZh ? '否' : 'No'}</dd>
+                      </div>
+                    </dl>
+                    <div className="guided-operation-recovery__actions">
+                      {operation.recoveryOptions.includes('RETRY_CACHED_COMMIT') ? (
+                        <Button
+                          size="sm"
+                          disabled={Boolean(busyAction)}
+                          onClick={() => setRecoveryIntent({
+                            operation,
+                            action: 'RETRY_CACHED_COMMIT',
+                          })}
+                        >
+                          {isZh ? '使用缓存结果，不调用模型' : 'Use cached result; no model call'}
+                        </Button>
+                      ) : null}
+                      {operation.recoveryOptions.includes('ABANDON_AND_AUTHORIZE_RETRY') ? (
+                        <Button
+                          size="sm"
+                          kind="danger--tertiary"
+                          disabled={Boolean(busyAction)}
+                          onClick={() => setRecoveryIntent({
+                            operation,
+                            action: 'ABANDON_AND_AUTHORIZE_RETRY',
+                          })}
+                        >
+                          {isZh ? '放弃未知结果并授权重试一次' : 'Abandon and authorize one retry'}
+                        </Button>
+                      ) : null}
+                    </div>
+                  </article>
+                ))}
+              </section>
+            ) : null}
+
+            {recoveryIntent ? (
+              <section className="guided-recovery-confirmation" role="alert">
+                <Warning size={22} weight="fill" aria-hidden="true" />
+                <div>
+                  <h3>{recoveryIntent.action === 'RETRY_CACHED_COMMIT'
+                    ? isZh ? '确认提交缓存结果？' : 'Commit the cached result?'
+                    : isZh ? '确认放弃并产生一次新模型调用？' : 'Abandon and create one new model call?'}</h3>
+                  <p>{recoveryIntent.action === 'RETRY_CACHED_COMMIT'
+                    ? isZh
+                      ? '该操作只提交服务器已校验并缓存的候选，不会请求供应商，也不会新增模型费用。'
+                      : 'This commits the validated candidate already cached by the server. It does not contact the provider or add model cost.'
+                    : isZh
+                      ? '原调用可能已经计费。确认后系统会永久标记原结果为已放弃，并仅授权一个有审计关联的新请求 ID。'
+                      : 'The original call may already have been billed. Confirmation permanently abandons it and authorizes exactly one linked request ID.'}</p>
+                  <div>
+                    <Button
+                      size="sm"
+                      kind={recoveryIntent.action === 'RETRY_CACHED_COMMIT' ? 'primary' : 'danger'}
+                      disabled={Boolean(busyAction)}
+                      onClick={() => void decideRecovery()}
+                    >
+                      {isZh ? '确认执行' : 'Confirm'}
+                    </Button>
+                    <Button
+                      size="sm"
+                      kind="ghost"
+                      disabled={Boolean(busyAction)}
+                      onClick={() => setRecoveryIntent(undefined)}
+                    >
+                      {isZh ? '取消' : 'Cancel'}
+                    </Button>
+                  </div>
+                </div>
+              </section>
+            ) : null}
+
+            {operationError ? (
+              <InlineNotification
+                kind="warning"
+                lowContrast
+                hideCloseButton
+                title={isZh ? '操作审计记录暂时无法加载' : 'Operation audit history is unavailable'}
+                subtitle={operationError}
+              />
+            ) : null}
+
+            {turnOperations.length > 0 ? (
+              <details className="guided-operation-history">
+                <summary>
+                  {isZh
+                    ? `模型调用与恢复记录（${turnOperations.length}）`
+                    : `Model call and recovery history (${turnOperations.length})`}
+                </summary>
+                <ol>
+                  {turnOperations.map((operation) => (
+                    <li key={operation.clientRequestId}>
+                      <div>
+                        <strong>{guidedOperationStatus(operation.status, isZh)}</strong>
+                        <time dateTime={operation.updatedAt}>
+                          {safeDate(operation.updatedAt, language)}
+                        </time>
+                      </div>
+                      <code>{operation.clientRequestId}</code>
+                      {operation.supersedesClientRequestId ? (
+                        <span>
+                          {isZh ? '替代调用：' : 'Supersedes: '}
+                          <code>{operation.supersedesClientRequestId}</code>
+                        </span>
+                      ) : null}
+                    </li>
+                  ))}
+                </ol>
+              </details>
+            ) : null}
 
             {pendingProposal ? (
               <section
@@ -591,6 +1189,30 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
               </div>
             ) : null}
 
+            {workflow.archivedProposals && workflow.archivedProposals.length > 0 ? (
+              <details className="guided-proposal-archive">
+                <summary>
+                  {isZh
+                    ? `查看已归档候选（${workflow.archivedProposals.length}）`
+                    : `View archived candidates (${workflow.archivedProposals.length})`}
+                </summary>
+                <ol>
+                  {workflow.archivedProposals.map((archived) => (
+                    <li key={archived.id}>
+                      <div>
+                        <strong>{stageLabel(archived.proposal.stage, isZh)}</strong>
+                        <StatusBadge status={archived.status} />
+                      </div>
+                      <p>{archived.proposal.assistantMessage}</p>
+                      <time dateTime={archived.archivedAt}>
+                        {safeDate(archived.archivedAt, language)}
+                      </time>
+                    </li>
+                  ))}
+                </ol>
+              </details>
+            ) : null}
+
             {workflow.status === 'ACTIVE' ? (
               <form className="guided-composer" onSubmit={(event) => void sendMessage(event)}>
                 <TextArea
@@ -612,7 +1234,13 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
                   renderIcon={PaperPlaneTilt}
                   disabled={Boolean(busyAction) || !message.trim()}
                 >
-                  {busyAction === 'turn' ? (isZh ? '正在生成候选' : 'Generating candidate') : (isZh ? '发送并生成候选' : 'Send and propose')}
+                  {busyAction === 'turn'
+                    ? `${localTurnProgress(
+                      turnElapsedSeconds,
+                      isZh,
+                      currentTurnOperation,
+                    )} · ${turnElapsedSeconds}s`
+                    : isZh ? '发送并生成候选' : 'Send and propose'}
                 </Button>
               </form>
             ) : null}

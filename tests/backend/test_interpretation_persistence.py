@@ -64,6 +64,9 @@ def _assistantMessage(messageId: str, language: str = "zh-CN") -> dict:
         "repairUsed": False,
         "plannerUsed": True,
         "plannerFallbackUsed": False,
+        "semanticValidationStatus": "PASSED",
+        "deterministicFallbackUsed": False,
+        "semanticViolationCodes": [],
         "failureCodes": [],
         "promptVersion": "result-interpreter-v1",
         "latencyMs": 123.4,
@@ -114,6 +117,29 @@ def test_completed_exchange_round_trip_survives_process_restart(tmp_path: Path) 
     assert recovered == saved
     assert recovered is not None
     assert recovered["assistantMessage"]["answer"].startswith("干预组")
+    assert recovered["assistantMessage"]["semanticValidationStatus"] == "PASSED"
+
+
+def test_legacy_exchange_without_semantic_metadata_remains_readable(tmp_path: Path) -> None:
+    database = Database(tmp_path / "eventshock.db")
+    database.initialize()
+    _createCompletedExperiment(database, "exp-result-one", "usr-owner-one")
+    legacyMessage = _assistantMessage("message-request-one")
+    legacyMessage.pop("semanticValidationStatus")
+    legacyMessage.pop("deterministicFallbackUsed")
+    legacyMessage.pop("semanticViolationCodes")
+
+    saved, created = _saveExchange(database, assistantMessage=legacyMessage)
+    recovered = database.getResultInterpretationExchangeByRequest(
+        ownerUserId="usr-owner-one",
+        experimentId="exp-result-one",
+        clientRequestId="request-one",
+        requestHash="a" * 64,
+    )
+
+    assert created is True
+    assert recovered == saved
+    assert "semanticValidationStatus" not in recovered["assistantMessage"]
 
 
 def test_exchange_idempotency_replays_final_and_hash_conflict_is_rejected(

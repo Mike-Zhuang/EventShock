@@ -2,11 +2,13 @@ import type {
   GuidedEventMetadata,
   GuidedIntervention,
   GuidedSourceMethod,
+  GuidedStage,
   GuidedWorkflow,
 } from './api/types';
 
 export const FACTORY_GUIDED_HANDOFF_KEY = 'eventshock:guided-factory-handoff:v1';
 export const SCENARIO_GUIDED_HANDOFF_KEY = 'eventshock:guided-scenario-handoff:v1';
+export const GUIDED_RETURN_CONTEXT_KEY = 'eventshock:guided-return-context:v1';
 const GUIDED_HANDOFF_OWNER_KEY = 'eventshock:guided-handoff-owner:v1';
 
 const HANDOFF_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
@@ -15,6 +17,19 @@ const SOURCE_METHODS = new Set<GuidedSourceMethod>([
   'WEB_SEARCH',
   'COMBINED',
   'MANUAL',
+]);
+const GUIDED_STAGES = new Set<GuidedStage>([
+  'EVENT_GOAL',
+  'SOURCE_METHOD',
+  'SOURCE_REVIEW',
+  'CLAIM_REVIEW',
+  'PACK_METADATA_REVIEW',
+  'PACK_FREEZE_REVIEW',
+  'SCENARIO_INTERVENTION',
+  'SCENARIO_REVIEW',
+  'PREFLIGHT',
+  'READY_TO_SUBMIT',
+  'COMPLETED',
 ]);
 const INTERVENTION_PARAMETERS = new Set<GuidedIntervention['parameter']>([
   'marketMakerCapacity',
@@ -53,6 +68,14 @@ export interface ScenarioGuidedHandoff {
   eventPackId: string;
   eventMetadata: GuidedEventMetadata;
   intervention: GuidedIntervention;
+}
+
+export interface GuidedReturnContext {
+  schemaVersion: '1.0.0';
+  ownerUserId: string;
+  workflowId: string;
+  stage: GuidedStage;
+  createdAt: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -136,6 +159,10 @@ function removeOwnerHandoffs(ownerUserId: string): void {
     SCENARIO_GUIDED_HANDOFF_KEY,
     ownerUserId,
   ));
+  window.sessionStorage.removeItem(guidedHandoffStorageKey(
+    GUIDED_RETURN_CONTEXT_KEY,
+    ownerUserId,
+  ));
 }
 
 /**
@@ -146,6 +173,7 @@ export function synchronizeGuidedHandoffOwner(ownerUserId?: string): void {
   const previousOwnerUserId = currentOwnerUserId();
   window.sessionStorage.removeItem(FACTORY_GUIDED_HANDOFF_KEY);
   window.sessionStorage.removeItem(SCENARIO_GUIDED_HANDOFF_KEY);
+  window.sessionStorage.removeItem(GUIDED_RETURN_CONTEXT_KEY);
   if (previousOwnerUserId && previousOwnerUserId !== ownerUserId) {
     removeOwnerHandoffs(previousOwnerUserId);
   }
@@ -283,4 +311,33 @@ export function clearScenarioGuidedHandoff(): void {
       ownerUserId,
     ));
   }
+}
+
+export function writeGuidedReturnContext(workflow: GuidedWorkflow): void {
+  const ownerUserId = currentOwnerUserId();
+  if (!ownerUserId) {
+    throw new Error('An authenticated user is required before creating a guided return context.');
+  }
+  writeSessionValue(GUIDED_RETURN_CONTEXT_KEY, {
+    schemaVersion: '1.0.0',
+    ownerUserId,
+    workflowId: workflow.id,
+    stage: workflow.stage,
+    createdAt: new Date().toISOString(),
+  } satisfies GuidedReturnContext);
+}
+
+export function readGuidedReturnContext(): GuidedReturnContext | undefined {
+  return readSessionValue(
+    GUIDED_RETURN_CONTEXT_KEY,
+    (value): value is GuidedReturnContext => {
+      if (!isRecord(value)) return false;
+      return value.schemaVersion === '1.0.0'
+        && value.ownerUserId === currentOwnerUserId()
+        && isBoundedString(value.workflowId, 8, 128)
+        && typeof value.stage === 'string'
+        && GUIDED_STAGES.has(value.stage as GuidedStage)
+        && isCurrent(value.createdAt);
+    },
+  );
 }

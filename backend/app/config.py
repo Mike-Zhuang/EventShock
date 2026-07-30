@@ -15,6 +15,7 @@ class Settings:
     frontendDist: Path
     appEnv: str
     releaseCommit: str
+    deploymentStatusPath: Path | None
     authenticationRequired: bool
     authCookieSecure: bool
     authSecret: str | None = field(repr=False)
@@ -45,6 +46,7 @@ def loadSettings(dataDir: Path | None = None) -> Settings:
         frontendDist=projectRoot / "frontend" / "dist",
         appEnv=appEnv,
         releaseCommit=os.environ.get("EVENTSHOCK_RELEASE_COMMIT", "development")[:64],
+        deploymentStatusPath=_optionalPath("EVENTSHOCK_DEPLOYMENT_STATUS_FILE"),
         # 正式环境不可通过误配关闭登录或 Secure Cookie；开关只服务本地测试。
         authenticationRequired=production
         or _environmentFlag("EVENTSHOCK_AUTH_REQUIRED", default=False),
@@ -73,6 +75,11 @@ def _environmentFlag(name: str, *, default: bool) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"{name} must be a boolean value")
+
+
+def _optionalPath(name: str) -> Path | None:
+    value = os.environ.get(name)
+    return Path(value).expanduser() if value else None
 
 
 def _secretValue(valueName: str, fileName: str) -> str | None:

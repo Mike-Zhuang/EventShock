@@ -87,6 +87,75 @@ def test_same_seed_replay_is_byte_stable() -> None:
     assert firstRun["invariants"]["netCashChangeCents"] == 0
 
 
+def test_trace_ordering_and_order_execution_summary_are_explicit() -> None:
+    baselineRun = runCapacity(42, 1.0)
+    interventionRun = runCapacity(42, 0.4)
+
+    globalSequences = [trace["globalSequence"] for trace in baselineRun["traces"]]
+    assert globalSequences == sorted(globalSequences)
+    assert len(globalSequences) == len(set(globalSequences))
+    phaseSequences: dict[tuple[int, str], list[int]] = {}
+    for trace in baselineRun["traces"]:
+        assert {
+            "agentId",
+            "parentTraceId",
+            "globalSequence",
+            "phase",
+            "phaseSequence",
+            "sourceLayer",
+            "isInterventionDifference",
+        }.issubset(trace)
+        phaseSequences.setdefault((trace["step"], trace["phase"]), []).append(
+            trace["phaseSequence"]
+        )
+    assert all(values == sorted(values) for values in phaseSequences.values())
+
+    configurationTrace = baselineRun["traces"][0]
+    assert configurationTrace["eventType"] == "SCENARIO_CONFIGURATION_APPLIED"
+    assert configurationTrace["sourceLayer"] == "SCENARIO_MECHANISM"
+    registeredInterventionTrace = baselineRun["traces"][1]
+    assert registeredInterventionTrace["eventType"] == "REGISTERED_INTERVENTION_APPLIED"
+    assert registeredInterventionTrace["sourceLayer"] == "REGISTERED_INTERVENTION"
+    assert registeredInterventionTrace["payload"] == {
+        "parameter": "marketMakerCapacity",
+        "value": 1.0,
+    }
+
+    summaries = baselineRun["orderExecutionSummary"]
+    assert summaries
+    assert len(summaries) <= 484
+    assert any(item["fillCount"] > 0 for item in summaries)
+    for item in summaries:
+        assert item["approvedQuantity"] == (
+            item["cumulativeFilledQuantity"] + item["remainingQuantity"]
+        )
+        assert item["fillCount"] == len(item["tradeIds"])
+        assert item["fillCount"] == len(item["tradeTraceIds"])
+        if item["fillCount"] == 0:
+            assert item["vwapPriceTicks"] is None
+            assert item["vwapPrice"] is None
+        else:
+            assert item["vwapPriceTicks"] is not None
+            assert item["vwapPrice"] is not None
+
+    aggregate = aggregatePairedResults([baselineRun], [interventionRun])
+    baselineConfiguration = next(
+        trace
+        for trace in aggregate["traces"]
+        if trace["scenario"] == "baseline"
+        and trace["eventType"] == "SCENARIO_CONFIGURATION_APPLIED"
+    )
+    interventionConfiguration = next(
+        trace
+        for trace in aggregate["traces"]
+        if trace["scenario"] == "intervention"
+        and trace["eventType"] == "REGISTERED_INTERVENTION_APPLIED"
+    )
+    assert baselineConfiguration["isInterventionDifference"] is False
+    assert interventionConfiguration["isInterventionDifference"] is True
+    assert aggregate["orderExecutionSummary"]
+
+
 def test_baseline_compared_with_itself_has_zero_delta() -> None:
     runs = [runCapacity(seed, 1.0) for seed in (11, 22, 33)]
     aggregate = aggregatePairedResults(runs, runs)
@@ -456,6 +525,14 @@ def test_cognitive_signal_cannot_inject_price_and_retains_full_causal_chain() ->
 
     assert attemptedInjectionRun == normalRun
     assert normalRun["metrics"]["cognitiveOrderCount"] == 1
+    assert normalRun["metrics"]["validCognitionDecisionCount"] == 1
+    assert normalRun["metrics"]["cognitionSignalConsumedCount"] == 1
+    assert normalRun["metrics"]["validCognitionSignalConsumedCount"] == 1
+    assert normalRun["metrics"]["cognitionChangedIntentCount"] == 1
+    assert normalRun["metrics"]["cognitionInfluencedOrderCount"] == 1
+    assert normalRun["metrics"]["cognitionRiskBlockedCount"] == 0
+    assert normalRun["metrics"]["cognitionNoActionCount"] == 0
+    assert normalRun["metrics"]["cognitionEffectRate"] == 1.0
     cognitiveIntent = next(
         trace
         for trace in normalRun["traces"]
@@ -503,6 +580,100 @@ def test_cognitive_signal_cannot_inject_price_and_retains_full_causal_chain() ->
     searchOffset = 0
     for eventType in requiredChain:
         searchOffset = causalChain.index(eventType, searchOffset) + 1
+
+    cognitiveChain = [
+        trace
+        for trace in normalRun["traces"]
+        if trace["payload"].get("decisionId") == signal["decisionId"]
+    ]
+    assert cognitiveChain
+    for trace in cognitiveChain:
+        assert {
+            "decisionId",
+            "shadowIntent",
+            "changedIntent",
+            "noActionReason",
+            "riskDecision",
+        }.issubset(trace["payload"])
+    riskTrace = next(trace for trace in cognitiveChain if trace["eventType"] == "RISK_CHECK")
+    orderTrace = next(trace for trace in cognitiveChain if trace["eventType"] == "ORDER_SUBMITTED")
+    assert riskTrace["payload"]["riskDecision"] in {"ACCEPT", "MODIFY"}
+    assert orderTrace["payload"]["riskDecision"] == riskTrace["payload"]["riskDecision"]
+
+
+def test_cognitive_hold_is_counted_as_an_explicit_no_action() -> None:
+    signal = {
+        "decisionId": "decision-cognitive-hold",
+        "role": "event_risk_analyst",
+        "direction": "NEUTRAL",
+        "actionPreference": "HOLD",
+        "targetPositionFraction": 0.0,
+        "urgency": 0.0,
+        "uncertainty": 0.2,
+        "tailRisk": 0.2,
+        "confidence": 0.9,
+        "decisionSummary": "Approved evidence supports holding.",
+        "evidenceIds": ["claim-risk-off"],
+    }
+    run = runScenario(
+        seed=316,
+        populationSize=28,
+        steps=60,
+        parameter="marketMakerCapacity",
+        value=1.0,
+        cognitiveSignals=[signal],
+    )
+
+    assert run["metrics"]["validCognitionDecisionCount"] == 1
+    assert run["metrics"]["validCognitionSignalConsumedCount"] == 1
+    assert run["metrics"]["cognitionNoActionCount"] == 1
+    noActionTrace = next(
+        trace
+        for trace in run["traces"]
+        if trace["eventType"] == "ACTION_INTENT_CREATED"
+        and trace["payload"].get("decisionId") == signal["decisionId"]
+    )
+    assert noActionTrace["payload"]["status"] == "NO_ORDER"
+    assert noActionTrace["payload"]["noActionReason"] == "COGNITIVE_HOLD"
+    assert noActionTrace["payload"]["shadowIntent"]["status"] in {"ORDER", "NO_ORDER"}
+
+
+def test_changed_cognitive_intent_blocked_by_risk_is_counted_without_an_order() -> None:
+    signal = {
+        "decisionId": "decision-cognitive-risk-blocked",
+        "role": "event_risk_analyst",
+        "direction": "NEGATIVE",
+        "actionPreference": "REDUCE",
+        "targetPositionFraction": -1.0,
+        "urgency": 1.0,
+        "uncertainty": 0.1,
+        "tailRisk": 0.9,
+        "confidence": 0.95,
+        "decisionSummary": "Approved evidence supports a bounded reduction.",
+        "evidenceIds": ["claim-risk-off"],
+    }
+    run = runScenario(
+        seed=317,
+        populationSize=28,
+        steps=60,
+        parameter="marketMakerCapacity",
+        value=1.0,
+        cognitiveSignals=[signal],
+        scenarioConfig={"population": {"shortSellingEnabled": False}},
+    )
+
+    assert run["metrics"]["cognitionChangedIntentCount"] == 1
+    assert run["metrics"]["cognitionRiskBlockedCount"] == 1
+    assert run["metrics"]["cognitionInfluencedOrderCount"] == 0
+    assert run["metrics"]["cognitiveOrderCount"] == 0
+    riskTrace = next(
+        trace
+        for trace in run["traces"]
+        if trace["eventType"] == "RISK_CHECK"
+        and trace["payload"].get("decisionId") == signal["decisionId"]
+    )
+    assert riskTrace["payload"]["riskDecision"] == "REJECT"
+    assert riskTrace["payload"]["noActionReason"] == "RISK_REJECTED"
 
 
 def test_scheduled_cognitive_decisions_are_consumed_at_their_point_in_time_steps() -> None:
@@ -595,6 +766,11 @@ def test_rule_fallback_cognitive_trace_preserves_provenance() -> None:
     assert belief["payload"]["failureReason"] == "SCHEMA_INVALID"
     assert belief["payload"]["failureCodes"] == ["SCHEMA_INVALID", "RULE_FALLBACK_USED"]
     assert "transportAttempts" not in belief["payload"]
+    assert run["metrics"]["validCognitionDecisionCount"] == 0
+    assert run["metrics"]["cognitionSignalConsumedCount"] == 1
+    assert run["metrics"]["validCognitionSignalConsumedCount"] == 0
+    assert run["metrics"]["cognitionChangedIntentCount"] == 0
+    assert run["metrics"]["cognitionEffectRate"] == 0
 
 
 def test_event_pack_clock_enforces_point_in_time_claim_boundaries() -> None:

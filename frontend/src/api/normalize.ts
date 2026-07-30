@@ -1,4 +1,6 @@
 import type {
+  AccountDataExport,
+  AccountDeletionReceipt,
   AdminActivity,
   AdminActivityPage,
   AdminUserPage,
@@ -16,11 +18,14 @@ import type {
   LegalSection,
   UserPreferences,
   CaseSummary,
+  ClaimImpactChannelRationale,
   CognitionDecisionSummary,
   CognitionEvalSummary,
   CognitionEvaluationRun,
   CognitionRunMetadata,
   CognitionTelemetry,
+  DeploymentCheckStatus,
+  DeploymentStatus,
   DistributionPoint,
   EventClaim,
   EventPack,
@@ -41,7 +46,11 @@ import type {
   GuidedEventMetadata,
   GuidedIntervention,
   GuidedStage,
+  GuidedTurnOperation,
+  GuidedTurnRecoveryAction,
+  GuidedTurnRecoveryResult,
   GuidedWorkflow,
+  GuidedWorkflowArchivedProposal,
   GuidedWorkflowDraft,
   GuidedWorkflowMessage,
   GuidedWorkflowProposal,
@@ -57,6 +66,7 @@ import type {
   MetricDisplayUnit,
   MetricResult,
   NetworkTopology,
+  OrderExecutionSummary,
   FactorySearchEngineDescriptor,
   FactorySearchEngineId,
   PairedSeedPoint,
@@ -339,6 +349,7 @@ const FACTORY_BUILD_STATUSES = ['DRAFT', 'REVIEW_READY'] as const;
 const FACTORY_SOURCE_KINDS = ['PASTE', 'SEARCH_RESULT', 'READER'] as const;
 const FACTORY_EVIDENCE_ROLES = ['EVIDENCE', 'DISCOVERY_ONLY'] as const;
 const FACTORY_REVIEW_STATUSES = ['PENDING', 'APPROVED', 'REJECTED'] as const;
+const FACTORY_SELECTION_STATUSES = ['INCLUDED', 'EXCLUDED'] as const;
 const FACTORY_SECURITY_DECISIONS = ['ALLOW', 'REVIEW'] as const;
 const FACTORY_SEARCH_ENGINES: FactorySearchEngineId[] = [
   'search_std',
@@ -449,6 +460,25 @@ function normalizeFactorySource(value: unknown): EventPackFactorySource {
   if (quotes !== undefined && !Array.isArray(quotes)) {
     throw new TypeError('verifiedEvidenceQuotes must be an array.');
   }
+  const securityFindings = unwrapItems(
+    read(value, 'securityFindings', 'security_findings'),
+  ).flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const code = asOptionalString(read(item, 'code'));
+    const field = asOptionalString(read(item, 'field'));
+    if (!code || !field) return [];
+    return [{
+      sourceId: asOptionalString(read(item, 'sourceId', 'source_id')),
+      code,
+      severity: asString(read(item, 'severity'), 'UNKNOWN'),
+      field,
+      offset: asNumber(read(item, 'offset')) ?? 0,
+      riskCategory: asOptionalString(read(item, 'riskCategory', 'risk_category')),
+      recommendedAction: asOptionalString(
+        read(item, 'recommendedAction', 'recommended_action'),
+      ),
+    }];
+  });
   return {
     id: requiredString(read(value, 'id'), 'source.id'),
     buildId: requiredString(read(value, 'buildId', 'build_id'), 'source.buildId'),
@@ -463,11 +493,22 @@ function normalizeFactorySource(value: unknown): EventPackFactorySource {
       FACTORY_REVIEW_STATUSES,
       'source.reviewStatus',
     ),
+    selectionStatus: enumValue(
+      read(value, 'selectionStatus', 'selection_status') ?? 'INCLUDED',
+      FACTORY_SELECTION_STATUSES,
+      'source.selectionStatus',
+    ),
     securityDecision: enumValue(
       read(value, 'securityDecision', 'security_decision'),
       FACTORY_SECURITY_DECISIONS,
       'source.securityDecision',
     ),
+    sourceReviewLabel: asString(
+      read(value, 'sourceReviewLabel', 'source_review_label'),
+      'URL_MISSING',
+    ),
+    officialHost: asOptionalString(read(value, 'officialHost', 'official_host')),
+    securityFindings,
     title: requiredString(read(value, 'title'), 'source.title'),
     publisher: requiredString(read(value, 'publisher'), 'source.publisher'),
     url: asOptionalString(read(value, 'url')),
@@ -692,6 +733,20 @@ function normalizeGuidedMessage(value: unknown): GuidedWorkflowMessage {
   };
 }
 
+function normalizeGuidedArchivedProposal(value: unknown): GuidedWorkflowArchivedProposal {
+  if (!isRecord(value)) throw new TypeError('Guided archived proposal is not an object.');
+  return {
+    id: requiredString(read(value, 'id'), 'archivedProposal.id'),
+    proposal: normalizeGuidedProposal(read(value, 'proposal')),
+    status: requiredString(read(value, 'status'), 'archivedProposal.status'),
+    archivedAt: requiredString(
+      read(value, 'archivedAt', 'archived_at'),
+      'archivedProposal.archivedAt',
+    ),
+    reason: asOptionalString(read(value, 'reason')),
+  };
+}
+
 export function normalizeGuidedWorkflow(value: unknown): GuidedWorkflow {
   if (!isRecord(value)) throw new TypeError('Guided workflow is not an object.');
   const schemaVersion = requiredString(
@@ -703,13 +758,21 @@ export function normalizeGuidedWorkflow(value: unknown): GuidedWorkflow {
   const messages = read(value, 'messages');
   if (!Array.isArray(messages)) throw new TypeError('Guided workflow messages are invalid.');
   const pendingProposal = read(value, 'pendingProposal', 'pending_proposal');
+  const archivedProposals = read(value, 'archivedProposals', 'archived_proposals');
+  if (
+    archivedProposals !== undefined
+    && archivedProposals !== null
+    && !Array.isArray(archivedProposals)
+  ) {
+    throw new TypeError('Guided archived proposals are invalid.');
+  }
   return {
     schemaVersion,
     id: requiredString(read(value, 'id'), 'workflow.id'),
     stage: enumValue(read(value, 'stage'), GUIDED_STAGES, 'workflow.stage'),
     status: enumValue(
       read(value, 'status'),
-      ['ACTIVE', 'COMPLETED', 'CANCELLED'] as const,
+      ['ACTIVE', 'COMPLETED', 'CANCELLED', 'ARCHIVED'] as const,
       'workflow.status',
     ),
     version: requiredNumber(read(value, 'version'), 'workflow.version', true),
@@ -721,6 +784,9 @@ export function normalizeGuidedWorkflow(value: unknown): GuidedWorkflow {
     pendingProposalId: asOptionalString(
       read(value, 'pendingProposalId', 'pending_proposal_id'),
     ),
+    archivedProposals: Array.isArray(archivedProposals)
+      ? archivedProposals.map(normalizeGuidedArchivedProposal)
+      : undefined,
     messages: messages.map(normalizeGuidedMessage),
     createdAt: requiredString(read(value, 'createdAt', 'created_at'), 'workflow.createdAt'),
     updatedAt: requiredString(read(value, 'updatedAt', 'updated_at'), 'workflow.updatedAt'),
@@ -729,6 +795,113 @@ export function normalizeGuidedWorkflow(value: unknown): GuidedWorkflow {
 
 export function normalizeGuidedWorkflows(value: unknown): GuidedWorkflow[] {
   return unwrapItems(value).map(normalizeGuidedWorkflow);
+}
+
+const GUIDED_TURN_OPERATION_STATUSES = [
+  'PENDING',
+  'RESULT_READY',
+  'SUCCEEDED',
+  'UNKNOWN',
+  'ABANDONED_BY_USER',
+] as const;
+
+const GUIDED_TURN_RECOVERY_ACTIONS = [
+  'RETRY_CACHED_COMMIT',
+  'ABANDON_AND_AUTHORIZE_RETRY',
+] as const;
+
+export function normalizeGuidedTurnOperation(value: unknown): GuidedTurnOperation {
+  if (!isRecord(value)) throw new TypeError('Guided turn operation is not an object.');
+  const schemaVersion = requiredString(
+    read(value, 'schemaVersion', 'schema_version'),
+    'operation.schemaVersion',
+  );
+  if (schemaVersion !== '1.0.0') {
+    throw new TypeError('Guided turn operation schema is unsupported.');
+  }
+  const languageValue = asOptionalString(read(value, 'language'));
+  if (languageValue && languageValue !== 'en' && languageValue !== 'zh-CN') {
+    throw new TypeError('Guided turn operation language is unsupported.');
+  }
+  const recoveryOptionsValue = read(value, 'recoveryOptions', 'recovery_options');
+  if (!Array.isArray(recoveryOptionsValue)) {
+    throw new TypeError('Guided turn recovery options are invalid.');
+  }
+  const recoveryOptions = recoveryOptionsValue.map((item) => enumValue(
+    item,
+    GUIDED_TURN_RECOVERY_ACTIONS,
+    'operation.recoveryOption',
+  )) as GuidedTurnRecoveryAction[];
+  return {
+    schemaVersion,
+    workflowId: requiredString(
+      read(value, 'workflowId', 'workflow_id'),
+      'operation.workflowId',
+    ),
+    clientRequestId: requiredString(
+      read(value, 'clientRequestId', 'client_request_id'),
+      'operation.clientRequestId',
+    ),
+    expectedVersion: requiredNumber(
+      read(value, 'expectedVersion', 'expected_version'),
+      'operation.expectedVersion',
+      true,
+    ),
+    status: enumValue(
+      read(value, 'status'),
+      GUIDED_TURN_OPERATION_STATUSES,
+      'operation.status',
+    ),
+    errorCode: asOptionalString(read(value, 'errorCode', 'error_code')),
+    requestMessage: asOptionalString(read(value, 'requestMessage', 'request_message')),
+    language: languageValue as GuidedTurnOperation['language'],
+    cachedProposalAvailable: asBoolean(
+      read(value, 'cachedProposalAvailable', 'cached_proposal_available'),
+    ) ?? false,
+    supersedesClientRequestId: asOptionalString(
+      read(value, 'supersedesClientRequestId', 'supersedes_client_request_id'),
+    ),
+    authorizedRetryClientRequestId: asOptionalString(
+      read(
+        value,
+        'authorizedRetryClientRequestId',
+        'authorized_retry_client_request_id',
+      ),
+    ),
+    recoveryOptions,
+    providerRequestId: asOptionalString(
+      read(value, 'providerRequestId', 'provider_request_id'),
+    ),
+    httpResponseReceived: asBoolean(
+      read(value, 'httpResponseReceived', 'http_response_received'),
+    ),
+    usageReceived: asBoolean(read(value, 'usageReceived', 'usage_received')),
+    parseCompleted: asBoolean(read(value, 'parseCompleted', 'parse_completed')),
+    failureStage: asOptionalString(read(value, 'failureStage', 'failure_stage')),
+    createdAt: requiredString(read(value, 'createdAt', 'created_at'), 'operation.createdAt'),
+    updatedAt: requiredString(read(value, 'updatedAt', 'updated_at'), 'operation.updatedAt'),
+  };
+}
+
+export function normalizeGuidedTurnOperations(value: unknown): GuidedTurnOperation[] {
+  return unwrapItems(value).map(normalizeGuidedTurnOperation);
+}
+
+export function normalizeGuidedTurnRecoveryResult(
+  value: unknown,
+): GuidedTurnRecoveryResult {
+  if (!isRecord(value)) throw new TypeError('Guided turn recovery response is not an object.');
+  const kind = enumValue(read(value, 'kind'), ['WORKFLOW', 'OPERATION'] as const, 'kind');
+  if (kind === 'WORKFLOW') {
+    return {
+      kind,
+      workflow: normalizeGuidedWorkflow(read(value, 'workflow')),
+    };
+  }
+  return {
+    kind,
+    operation: normalizeGuidedTurnOperation(read(value, 'operation')),
+  };
 }
 
 export function normalizeAuthSession(value: unknown): AuthSession {
@@ -752,6 +925,61 @@ export function normalizeAuthSession(value: unknown): AuthSession {
     preferences: preferencesValue === undefined || preferencesValue === null
       ? undefined
       : normalizeUserPreferences(preferencesValue),
+  };
+}
+
+export function normalizeAccountDataExport(value: unknown): AccountDataExport {
+  if (!isRecord(value)) throw new TypeError('Account data export is not an object.');
+  const rawData = read(value, 'data');
+  if (!isRecord(rawData)) throw new TypeError('Account data export is missing its data object.');
+  const data = Object.fromEntries(
+    Object.entries(rawData).map(([key, rows]) => {
+      if (!Array.isArray(rows)) {
+        throw new TypeError(`Account data export section ${key} is not an array.`);
+      }
+      return [key, rows];
+    }),
+  );
+  return {
+    schemaVersion: requiredString(
+      read(value, 'schemaVersion', 'schema_version'),
+      'accountDataExport.schemaVersion',
+    ),
+    generatedAt: requiredString(
+      read(value, 'generatedAt', 'generated_at'),
+      'accountDataExport.generatedAt',
+    ),
+    retentionNotice: requiredString(
+      read(value, 'retentionNotice', 'retention_notice'),
+      'accountDataExport.retentionNotice',
+    ),
+    excludedSecrets: asStringArray(
+      read(value, 'excludedSecrets', 'excluded_secrets'),
+    ),
+    data,
+  };
+}
+
+export function normalizeAccountDeletionReceipt(value: unknown): AccountDeletionReceipt {
+  if (!isRecord(value)) throw new TypeError('Account deletion receipt is not an object.');
+  if (read(value, 'deleted') !== true) {
+    throw new TypeError('Account deletion receipt did not confirm deletion.');
+  }
+  const deletedRecordCount = requiredNumber(
+    read(value, 'deletedRecordCount', 'deleted_record_count'),
+    'accountDeletion.deletedRecordCount',
+    true,
+  );
+  if (deletedRecordCount < 0) {
+    throw new TypeError('accountDeletion.deletedRecordCount must not be negative.');
+  }
+  return {
+    deleted: true,
+    deletedRecordCount,
+    backupRetentionNotice: requiredString(
+      read(value, 'backupRetentionNotice', 'backup_retention_notice'),
+      'accountDeletion.backupRetentionNotice',
+    ),
   };
 }
 
@@ -1056,6 +1284,47 @@ function normalizeClaim(value: unknown): EventClaim | null {
   const text = asString(read(value, 'text', 'claim', 'content'));
   if (!id || !text) return null;
   const sourceIds = asStringArray(read(value, 'sourceIds', 'source_ids'));
+  const confidenceComponentsValue = read(
+    value,
+    'confidenceComponents',
+    'confidence_components',
+  );
+  const confidenceComponents = isRecord(confidenceComponentsValue)
+    ? {
+      textualFidelity: asNumber(
+        read(confidenceComponentsValue, 'textualFidelity', 'textual_fidelity'),
+      ),
+      sourceTierStrength: asNumber(
+        read(confidenceComponentsValue, 'sourceTierStrength', 'source_tier_strength'),
+      ),
+      timeBoundaryCertainty: asNumber(
+        read(
+          confidenceComponentsValue,
+          'timeBoundaryCertainty',
+          'time_boundary_certainty',
+        ),
+      ),
+    }
+    : undefined;
+  const impactChannelRationale = unwrapItems(
+    read(value, 'impactChannelRationale', 'impact_channel_rationale'),
+  ).flatMap((item): ClaimImpactChannelRationale[] => {
+    if (!isRecord(item)) return [];
+    const channel = asOptionalString(read(item, 'channel'));
+    const reason = asOptionalString(read(item, 'reason'));
+    const evidenceType = asOptionalString(read(item, 'evidenceType', 'evidence_type'));
+    const simulatorParameter = asOptionalString(
+      read(item, 'simulatorParameter', 'simulator_parameter'),
+    );
+    if (!channel || !reason || !evidenceType || !simulatorParameter) return [];
+    return [{
+      channel,
+      reason,
+      reasonZh: asOptionalString(read(item, 'reasonZh', 'reason_zh')),
+      evidenceType,
+      simulatorParameter,
+    }];
+  });
   return {
     id,
     text,
@@ -1067,7 +1336,26 @@ function normalizeClaim(value: unknown): EventClaim | null {
     publishedAt: asOptionalString(read(value, 'publishedAt', 'published_at')),
     knownAt: asOptionalString(read(value, 'knownAt', 'known_at')),
     confidence: asNumber(read(value, 'confidence')),
+    modelReportedConfidence: asNumber(
+      read(value, 'modelReportedConfidence', 'model_reported_confidence'),
+    ),
+    confidenceMeaning: asOptionalString(read(value, 'confidenceMeaning', 'confidence_meaning')),
+    confidenceComponents,
     impactChannels: asStringArray(read(value, 'impactChannels', 'impact_channels')),
+    impactChannelRationale,
+    channelMappingIsInference: asBoolean(
+      read(value, 'channelMappingIsInference', 'channel_mapping_is_inference'),
+    ),
+    extractionQuality: asOptionalString(read(value, 'extractionQuality', 'extraction_quality')),
+    bulkApprovalEligible: asBoolean(
+      read(value, 'bulkApprovalEligible', 'bulk_approval_eligible'),
+    ),
+    bulkApprovalExclusionReasons: asStringArray(
+      read(value, 'bulkApprovalExclusionReasons', 'bulk_approval_exclusion_reasons'),
+    ),
+    bulkApprovalMinimumConfidence: asNumber(
+      read(value, 'bulkApprovalMinimumConfidence', 'bulk_approval_minimum_confidence'),
+    ),
     editedText: asOptionalString(read(value, 'editedText', 'edited_text')),
     isRequired: asBoolean(read(value, 'isRequired', 'is_required')),
     claimType: asOptionalString(read(value, 'claimType', 'claim_type')),
@@ -1177,6 +1465,10 @@ function normalizeEventPackContentSecurity(value: unknown): EventPackContentSecu
       severity: asString(read(item, 'severity'), 'UNKNOWN'),
       field,
       offset: asNumber(read(item, 'offset')) ?? 0,
+      riskCategory: asOptionalString(read(item, 'riskCategory', 'risk_category')),
+      recommendedAction: asOptionalString(
+        read(item, 'recommendedAction', 'recommended_action'),
+      ),
     }];
   });
   const sources = unwrapItems(read(value, 'sources')).flatMap((item) => {
@@ -1191,6 +1483,20 @@ function normalizeEventPackContentSecurity(value: unknown): EventPackContentSecu
       findingCount: asNumber(read(item, 'findingCount', 'finding_count')) ?? 0,
     }];
   });
+  const modelInputSummaryValue = read(value, 'modelInputSummary', 'model_input_summary');
+  const modelInputSummary = isRecord(modelInputSummaryValue)
+    ? {
+      retainedFieldCount: asNumber(
+        read(modelInputSummaryValue, 'retainedFieldCount', 'retained_field_count'),
+      ) ?? 0,
+      removedFieldCount: asNumber(
+        read(modelInputSummaryValue, 'removedFieldCount', 'removed_field_count'),
+      ) ?? 0,
+      redactedFieldCount: asNumber(
+        read(modelInputSummaryValue, 'redactedFieldCount', 'redacted_field_count'),
+      ) ?? 0,
+    }
+    : undefined;
   return {
     schemaVersion: asString(read(value, 'schemaVersion', 'schema_version'), '1.0.0'),
     decision: asString(read(value, 'decision'), 'UNKNOWN'),
@@ -1201,6 +1507,7 @@ function normalizeEventPackContentSecurity(value: unknown): EventPackContentSecu
     rawContentRetained: asBoolean(read(value, 'rawContentRetained', 'raw_content_retained')),
     findings,
     sources,
+    modelInputSummary,
   };
 }
 
@@ -1213,6 +1520,68 @@ function normalizeLog(value: unknown): ExperimentLogEntry | null {
     level: asString(read(value, 'level'), 'INFO'),
     message,
     seed: asNumber(read(value, 'seed')),
+    code: asOptionalString(read(value, 'code')),
+    parameters: isRecord(read(value, 'parameters')) ? read(value, 'parameters') as Record<string, unknown> : undefined,
+  };
+}
+
+function normalizeCognitionProgress(value: unknown) {
+  if (!isRecord(value)) return undefined;
+  const rawFailureCategoryCounts = read(
+    value,
+    'failureCategoryCounts',
+    'failure_category_counts',
+  );
+  const failureCategoryCounts = isRecord(rawFailureCategoryCounts)
+    ? Object.fromEntries(
+      Object.entries(rawFailureCategoryCounts).flatMap(([name, count]) => {
+        const normalizedCount = asNumber(count);
+        return normalizedCount !== undefined && normalizedCount >= 0
+          ? [[name, normalizedCount]]
+          : [];
+      }),
+    )
+    : undefined;
+  return {
+    status: asOptionalString(read(value, 'status')),
+    plannedCalls: asNumber(read(value, 'plannedCalls', 'planned_calls')),
+    attemptedCalls: asNumber(read(value, 'attemptedCalls', 'attempted_calls')),
+    completedCalls: asNumber(read(value, 'completedCalls', 'completed_calls')),
+    fallbackCount: asNumber(read(value, 'fallbackCount', 'fallback_count')),
+    totalTokens: asNumber(read(value, 'totalTokens', 'total_tokens')),
+    structuredValidCalls: asNumber(
+      read(value, 'structuredValidCalls', 'structured_valid_calls'),
+    ),
+    structuredSuccessRate: asNumber(
+      read(value, 'structuredSuccessRate', 'structured_success_rate'),
+    ),
+    structuredSuccessThreshold: asNumber(
+      read(value, 'structuredSuccessThreshold', 'structured_success_threshold'),
+    ),
+    structuredSuccessGateStatus: asOptionalString(
+      read(value, 'structuredSuccessGateStatus', 'structured_success_gate_status'),
+    ),
+    failureCategoryCounts,
+    currentCostUsd: asNumber(read(value, 'currentCostUsd', 'current_cost_usd')),
+    settledCostUsd: asNumber(read(value, 'settledCostUsd', 'settled_cost_usd')),
+    activeReservationUsd: asNumber(
+      read(value, 'activeReservationUsd', 'active_reservation_usd'),
+    ),
+    modelStage: asOptionalString(read(value, 'modelStage', 'model_stage')),
+    streamChunkCount: asNumber(read(value, 'streamChunkCount', 'stream_chunk_count')),
+    answerChunkCount: asNumber(read(value, 'answerChunkCount', 'answer_chunk_count')),
+    reasoningChunkCount: asNumber(
+      read(value, 'reasoningChunkCount', 'reasoning_chunk_count'),
+    ),
+    repairAttempted: asBoolean(read(value, 'repairAttempted', 'repair_attempted')),
+    decisionRound: asNumber(read(value, 'decisionRound', 'decision_round')),
+    representativeIndex: asNumber(read(value, 'representativeIndex', 'representative_index')),
+    failureCode: asOptionalString(read(value, 'failureCode', 'failure_code')),
+    resolvedMode: asOptionalString(read(value, 'resolvedMode', 'resolved_mode')),
+    userRequestedRuleContinuation: asBoolean(
+      read(value, 'userRequestedRuleContinuation', 'user_requested_rule_continuation'),
+    ),
+    updatedAt: asOptionalString(read(value, 'updatedAt', 'updated_at')),
   };
 }
 
@@ -1265,12 +1634,17 @@ export function normalizeExperiment(value: unknown): Experiment {
     resultsAvailable: asBoolean(read(value, 'resultsAvailable', 'results_available')),
     resultsPreserved: asBoolean(read(value, 'resultsPreserved', 'results_preserved')),
     validForResearchUse: asBoolean(read(value, 'validForResearchUse', 'valid_for_research_use')),
+    cognitionFallbackRequested: asBoolean(
+      read(value, 'cognitionFallbackRequested', 'cognition_fallback_requested'),
+    ),
     progress,
     completedSeeds,
     validSeeds: completedSeeds,
     totalSeeds,
     currentSeed: asNumber(read(value, 'currentSeed', 'current_seed'))
       ?? asNumber(read(runtime, 'currentSeed', 'current_seed')),
+    lastCompletedSeed: asNumber(read(value, 'lastCompletedSeed', 'last_completed_seed'))
+      ?? asNumber(read(runtime, 'lastCompletedSeed', 'last_completed_seed')),
     error: asOptionalString(read(value, 'errorCode', 'error_code', 'error', 'errorMessage', 'error_message')),
     scenario: request,
     intervention: request?.intervention ?? normalizeIntervention(read(value, 'intervention')),
@@ -1278,10 +1652,12 @@ export function normalizeExperiment(value: unknown): Experiment {
       phase: asOptionalString(read(runtime, 'phase')),
       pairIndex: asNumber(read(runtime, 'pairIndex', 'pair_index')),
       currentSeed: asNumber(read(runtime, 'currentSeed', 'current_seed')),
+      lastCompletedSeed: asNumber(read(runtime, 'lastCompletedSeed', 'last_completed_seed')),
       baseline: normalizeLiveMarketSnapshot(read(runtime, 'baseline')),
       intervention: normalizeLiveMarketSnapshot(read(runtime, 'intervention')),
       resumedFromCheckpoint: asBoolean(read(runtime, 'resumedFromCheckpoint', 'resumed_from_checkpoint')),
       checkpointPairs: asNumber(read(runtime, 'checkpointPairs', 'checkpoint_pairs')),
+      cognitionProgress: normalizeCognitionProgress(read(runtime, 'cognitionProgress', 'cognition_progress')),
     } : undefined,
     logs: unwrapItems(read(value, 'logs')).length > 0
       ? unwrapItems(read(value, 'logs')).map(normalizeLog).filter((item): item is ExperimentLogEntry => item !== null)
@@ -1472,16 +1848,39 @@ function normalizeStoppingRule(value: unknown): ExperimentResults['stoppingRule'
   const bootstrap = isRecord(read(value, 'bootstrapInterval95', 'bootstrap_interval_95'))
     ? read(value, 'bootstrapInterval95', 'bootstrap_interval_95') as JsonRecord
     : undefined;
+  const conditionEvaluations = unwrapItems(
+    read(value, 'conditionEvaluations', 'condition_evaluations'),
+  ).flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const code = asOptionalString(read(item, 'code'));
+    const evaluationOrder = asNumber(
+      read(item, 'evaluationOrder', 'evaluation_order'),
+    );
+    if (!code || evaluationOrder === undefined) return [];
+    return [{
+      code,
+      evaluationOrder,
+      satisfied: asBoolean(read(item, 'satisfied')) ?? false,
+      firstSatisfiedAtPair: asNumber(
+        read(item, 'firstSatisfiedAtPair', 'first_satisfied_at_pair'),
+      ),
+    }];
+  });
+  const reason = asString(read(value, 'reason'), 'NOT_REPORTED');
+  const reasons = asStringArray(read(value, 'reasons'));
   return {
     mode: asOptionalString(read(value, 'mode')),
     triggered: asBoolean(read(value, 'triggered')) ?? false,
-    reason: asString(read(value, 'reason'), 'NOT_REPORTED'),
+    reason,
+    primaryReason: asOptionalString(read(value, 'primaryReason', 'primary_reason')),
+    reasons: reasons.length > 0 ? reasons : [reason],
     primaryOutcome: asOptionalString(read(value, 'primaryOutcome', 'primary_outcome')),
     completedPairs: asNumber(read(value, 'completedPairs', 'completed_pairs')) ?? 0,
     observedCiHalfWidth: asNumber(read(value, 'observedCiHalfWidth', 'observed_ci_half_width')),
     targetCiHalfWidth: asNumber(read(value, 'targetCiHalfWidth', 'target_ci_half_width')),
     minimumPairs: asNumber(read(value, 'minimumPairs', 'minimum_pairs')),
     maximumPairs: asNumber(read(value, 'maximumPairs', 'maximum_pairs')),
+    conditionEvaluations,
     bootstrapInterval95: bootstrap ? {
       estimate: asNumber(read(bootstrap, 'estimate')),
       lower: asNumber(read(bootstrap, 'lower')),
@@ -1518,21 +1917,72 @@ function normalizeTrace(value: unknown, index: number): TraceNode | null {
   if (!eventType) return null;
   return {
     id: asString(read(value, 'traceId', 'trace_id', 'id'), `trace-${index}`),
+    globalSequence: asNumber(read(value, 'globalSequence', 'global_sequence')),
     step: asNumber(read(value, 'step')),
+    phase: asOptionalString(read(value, 'phase')),
+    phaseSequence: asNumber(read(value, 'phaseSequence', 'phase_sequence')),
     time: asOptionalString(read(value, 'time', 'timestamp')),
     kind: eventType,
     title: eventType,
     summary: asOptionalString(read(value, 'summary', 'detail', 'description')),
     summaryZh: asOptionalString(read(value, 'summaryZh', 'summary_zh')),
     sourceId: asOptionalString(read(payload, 'sourceId', 'source_id')),
-    agentId: asOptionalString(read(payload, 'agentId', 'agent_id')),
+    agentId: asOptionalString(
+      read(value, 'agentId', 'agent_id')
+      ?? read(payload, 'agentId', 'agent_id'),
+    ),
     orderId: asOptionalString(read(payload, 'orderId', 'order_id')),
     metricContribution: asNumber(read(payload, 'metricContribution', 'metric_contribution')),
     methodNote: asOptionalString(read(payload, 'methodNote', 'method_note')),
     scenario: asOptionalString(read(value, 'scenario')),
     seed: asNumber(read(value, 'seed')),
-    parentId: asOptionalString(read(value, 'parentId', 'parent_id')),
+    parentId: asOptionalString(
+      read(value, 'parentTraceId', 'parent_trace_id', 'parentId', 'parent_id')
+      ?? read(payload, 'parentTraceId', 'parent_trace_id', 'parentId', 'parent_id'),
+    ),
+    sourceLayer: asOptionalString(read(value, 'sourceLayer', 'source_layer')),
+    isInterventionDifference: asBoolean(
+      read(value, 'isInterventionDifference', 'is_intervention_difference'),
+    ),
     payload,
+  };
+}
+
+function normalizeOrderExecutionSummary(value: unknown): OrderExecutionSummary | null {
+  if (!isRecord(value)) return null;
+  const orderId = asOptionalString(read(value, 'orderId', 'order_id'));
+  if (!orderId) return null;
+  return {
+    orderId,
+    orderTraceId: asOptionalString(read(value, 'orderTraceId', 'order_trace_id')),
+    agentId: asOptionalString(read(value, 'agentId', 'agent_id')),
+    side: asOptionalString(read(value, 'side')),
+    submissionStep: asNumber(read(value, 'submissionStep', 'submission_step')),
+    submissionSequence: asNumber(read(value, 'submissionSequence', 'submission_sequence')),
+    timeInForce: asOptionalString(read(value, 'timeInForce', 'time_in_force')),
+    limitPriceTicks: asNumber(read(value, 'limitPriceTicks', 'limit_price_ticks')),
+    limitPrice: asNumber(read(value, 'limitPrice', 'limit_price')),
+    requestedQuantity: asNumber(read(value, 'requestedQuantity', 'requested_quantity')),
+    approvedQuantity: asNumber(read(value, 'approvedQuantity', 'approved_quantity')),
+    unapprovedQuantity: asNumber(read(value, 'unapprovedQuantity', 'unapproved_quantity')),
+    cumulativeFilledQuantity: asNumber(
+      read(value, 'cumulativeFilledQuantity', 'cumulative_filled_quantity'),
+    ),
+    remainingQuantity: asNumber(read(value, 'remainingQuantity', 'remaining_quantity')),
+    vwapPriceTicks: asNumber(read(value, 'vwapPriceTicks', 'vwap_price_ticks')),
+    vwapPrice: asNumber(read(value, 'vwapPrice', 'vwap_price')),
+    fillCount: asNumber(read(value, 'fillCount', 'fill_count')),
+    tradeIds: asStringArray(read(value, 'tradeIds', 'trade_ids')),
+    tradeTraceIds: asStringArray(read(value, 'tradeTraceIds', 'trade_trace_ids')),
+    riskDecision: asOptionalString(read(value, 'riskDecision', 'risk_decision')),
+    finalStatus: asOptionalString(read(value, 'finalStatus', 'final_status')),
+    terminal: asBoolean(read(value, 'terminal')),
+    closure: asOptionalString(read(value, 'closure')),
+    scenario: asOptionalString(read(value, 'scenario')),
+    seed: asNumber(read(value, 'seed')),
+    isInterventionDifference: asBoolean(
+      read(value, 'isInterventionDifference', 'is_intervention_difference'),
+    ),
   };
 }
 
@@ -1814,6 +2264,14 @@ export function normalizeResults(value: unknown): ExperimentResults {
     agentFlows: normalizeAgentFlows(read(value, 'agentFlows', 'agent_flows')),
     agentPnl: normalizeAgentPnl(read(value, 'agentPnl', 'agent_pnl')),
     traces: unwrapItems(read(value, 'traces', 'trace')).map(normalizeTrace).filter((item): item is TraceNode => item !== null),
+    orderExecutionSummary: unwrapItems(
+      read(value, 'orderExecutionSummary', 'order_execution_summary'),
+    ).map(normalizeOrderExecutionSummary).filter(
+      (item): item is OrderExecutionSummary => item !== null,
+    ),
+    strongestMetricIds: asStringArray(
+      read(value, 'strongestMetricIds', 'strongest_metric_ids'),
+    ),
     validationStatus: asOptionalString(read(value, 'validationStatus', 'validation_status')),
     primaryMetricId,
     pairedSeries,
@@ -2172,12 +2630,20 @@ export function normalizeResultInterpretationStreamError(
     throw new TypeError('Result interpretation stream error is incomplete.');
   }
   const traceId = asOptionalString(read(value, 'traceId', 'trace_id'))?.trim();
+  const failureStage = asOptionalString(read(value, 'failureStage', 'failure_stage'))?.trim();
+  const billingConclusion = asOptionalString(
+    read(value, 'billingConclusion', 'billing_conclusion'),
+  )?.trim();
   return {
     code,
     message,
     retryable,
     httpStatus,
     uncertainBillableAttempts,
+    failureStage: failureStage || undefined,
+    repairAttempted: asBoolean(read(value, 'repairAttempted', 'repair_attempted')),
+    repairUsed: asBoolean(read(value, 'repairUsed', 'repair_used')),
+    billingConclusion: billingConclusion || undefined,
     traceId: traceId || undefined,
   };
 }
@@ -2216,9 +2682,38 @@ export function normalizeValidation(value: unknown): ScenarioValidation {
   const explicitChecks = unwrapItems(read(value, 'checks'))
     .map(normalizeExplicitCheck)
     .filter((item): item is ValidationCheck => item !== null);
-  const checks = explicitChecks.length > 0 ? explicitChecks : [...errors, ...warnings];
+  const explicitCheckIds = new Set(explicitChecks.map((item) => item.id));
+  // 结构化 checks 与顶层 errors/warnings 承载不同信息。尤其是机制禁用只出现在
+  // errors，不能因为响应同时包含 checks 就丢失这个可操作的失败原因。
+  const checks = explicitChecks.length > 0
+    ? [
+        ...explicitChecks,
+        ...errors.filter((item) => !explicitCheckIds.has(item.id)),
+        ...warnings.filter((item) => !explicitCheckIds.has(item.id)),
+      ]
+    : [...errors, ...warnings];
+  const valid = asBoolean(read(value, 'valid')) ?? errors.length === 0;
   return {
-    valid: asBoolean(read(value, 'valid')) ?? errors.length === 0,
+    valid,
+    simulationRunnable: asBoolean(
+      read(value, 'simulationRunnable', 'simulation_runnable'),
+    ) ?? valid,
+    requestedCognitionRunnable: asBoolean(
+      read(value, 'requestedCognitionRunnable', 'requested_cognition_runnable'),
+    ) ?? valid,
+    effectiveCognitionMode: asOptionalString(
+      read(value, 'effectiveCognitionMode', 'effective_cognition_mode'),
+    ),
+    degradationReasons: asStringArray(
+      read(value, 'degradationReasons', 'degradation_reasons'),
+    ),
+    requiresExplicitRuleFallbackConfirmation: asBoolean(
+      read(
+        value,
+        'requiresExplicitRuleFallbackConfirmation',
+        'requires_explicit_rule_fallback_confirmation',
+      ),
+    ) ?? false,
     checks,
     estimatedRuntimeSeconds: asNumber(read(value, 'estimatedRuntimeSeconds', 'estimated_runtime_seconds')),
     estimatedLlmCalls: asNumber(read(value, 'estimatedLlmCalls', 'estimated_llm_calls')),
@@ -2262,6 +2757,8 @@ export function normalizeLlmCatalog(value: unknown): LlmCatalog {
     const name = asString(read(item, 'name', 'displayName', 'display_name'));
     const contextTokens = asNumber(read(item, 'contextTokens', 'context_tokens'));
     const maxOutputTokens = asNumber(read(item, 'maxOutputTokens', 'max_output_tokens'));
+    const validationValue = read(item, 'validationEvidence', 'validation_evidence');
+    const validation = isRecord(validationValue) ? validationValue : undefined;
     if (!id || !name || contextTokens === undefined) return [];
     return [{
       provider: asLlmProviderId(read(item, 'provider')) ?? fallbackProvider,
@@ -2289,9 +2786,15 @@ export function normalizeLlmCatalog(value: unknown): LlmCatalog {
       capabilityNote: asOptionalString(read(item, 'capabilityNote', 'capability_note')),
       officialModelUrl: asOptionalString(read(item, 'officialModelUrl', 'official_model_url')),
       catalogVerifiedAt: asOptionalString(read(item, 'catalogVerifiedAt', 'catalog_verified_at')),
-      pricingStatus: asString(read(item, 'pricingStatus', 'pricing_status'), 'UNAVAILABLE_FAIL_CLOSED') === 'VERIFIED_UPPER_BOUND'
-        ? 'VERIFIED_UPPER_BOUND' as const
-        : 'UNAVAILABLE_FAIL_CLOSED' as const,
+      pricingStatus: ((): LlmModelDescriptor['pricingStatus'] => {
+        const status = asString(
+          read(item, 'pricingStatus', 'pricing_status'),
+          'UNAVAILABLE_FAIL_CLOSED',
+        );
+        return status === 'VERIFIED_UPPER_BOUND' || status === 'STALE_FAIL_CLOSED'
+          ? status
+          : 'UNAVAILABLE_FAIL_CLOSED';
+      })(),
       billingCurrency: asOptionalString(read(item, 'billingCurrency', 'billing_currency')),
       inputRateUpperPerMillion: asNumber(read(
         item,
@@ -2323,7 +2826,49 @@ export function normalizeLlmCatalog(value: unknown): LlmCatalog {
         'cached_input_rate_per_million',
       )),
       pricingVerifiedAt: asOptionalString(read(item, 'pricingVerifiedAt', 'pricing_verified_at')),
+      pricingValidUntil: asOptionalString(
+        read(item, 'pricingValidUntil', 'pricing_valid_until'),
+      ),
       pricingNote: asOptionalString(read(item, 'pricingNote', 'pricing_note')),
+      validationEvidence: validation ? {
+        knownModel: asBoolean(read(validation, 'knownModel', 'known_model')) ?? false,
+        officialDocumentationStatus: asString(
+          read(validation, 'officialDocumentationStatus', 'official_documentation_status'),
+          'UNVERIFIED',
+        ),
+        adapterContractStatus: asString(
+          read(validation, 'adapterContractStatus', 'adapter_contract_status'),
+          'NOT_RUN',
+        ),
+        liveKeyE2eStatus: asString(
+          read(validation, 'liveKeyE2eStatus', 'live_key_e2e_status'),
+          'NOT_RUN',
+        ),
+        structuredOutputStatus: asString(
+          read(validation, 'structuredOutputStatus', 'structured_output_status'),
+          'UNVERIFIED',
+        ),
+        streamingStatus: asString(
+          read(validation, 'streamingStatus', 'streaming_status'),
+          'UNVERIFIED',
+        ),
+        thinkingJsonStatus: asString(
+          read(validation, 'thinkingJsonStatus', 'thinking_json_status'),
+          'UNVERIFIED',
+        ),
+        usageCostStatus: asString(
+          read(validation, 'usageCostStatus', 'usage_cost_status'),
+          'UNVERIFIED',
+        ),
+        evidenceSourceUrl: asOptionalString(
+          read(validation, 'evidenceSourceUrl', 'evidence_source_url'),
+        ),
+        verifiedAt: asOptionalString(read(validation, 'verifiedAt', 'verified_at')),
+        verificationScope: asString(
+          read(validation, 'verificationScope', 'verification_scope'),
+          'UNKNOWN_MODEL_UNVERIFIED',
+        ),
+      } : undefined,
     }];
     })
   );
@@ -2405,6 +2950,27 @@ export function normalizeLlmCatalog(value: unknown): LlmCatalog {
     documentationUrl: defaultDescriptor.documentationUrl,
     pricingUrl: defaultDescriptor.pricingUrl,
     pricingSnapshotVersion: asString(read(value, 'pricingSnapshotVersion', 'pricing_snapshot_version')),
+    pricingSnapshotStatus: asOptionalString(
+      read(value, 'pricingSnapshotStatus', 'pricing_snapshot_status'),
+    ),
+    pricingSnapshotValidUntil: asOptionalString(
+      read(value, 'pricingSnapshotValidUntil', 'pricing_snapshot_valid_until'),
+    ),
+    pricingReviewCadenceDays: asNumber(
+      read(value, 'pricingReviewCadenceDays', 'pricing_review_cadence_days'),
+    ),
+    capabilitySnapshotVersion: asOptionalString(
+      read(value, 'capabilitySnapshotVersion', 'capability_snapshot_version'),
+    ),
+    capabilitySnapshotStatus: asOptionalString(
+      read(value, 'capabilitySnapshotStatus', 'capability_snapshot_status'),
+    ),
+    capabilitySnapshotValidUntil: asOptionalString(
+      read(value, 'capabilitySnapshotValidUntil', 'capability_snapshot_valid_until'),
+    ),
+    capabilityReviewCadenceDays: asNumber(
+      read(value, 'capabilityReviewCadenceDays', 'capability_review_cadence_days'),
+    ),
     fxSourceUrl: asString(read(value, 'fxSourceUrl', 'fx_source_url')),
     officialFxSnapshotCnyPerUsd: asNumber(read(value, 'officialFxSnapshotCnyPerUsd', 'official_fx_snapshot_cny_per_usd')) ?? 0,
     cnyPerUsdBudgetFloor: asNumber(read(value, 'cnyPerUsdBudgetFloor', 'cny_per_usd_budget_floor')) ?? 0,
@@ -2465,6 +3031,21 @@ export function normalizeLlmConnectionTest(value: unknown): LlmConnectionTest {
 
 function normalizeTelemetry(value: unknown): CognitionTelemetry {
   const record = isRecord(value) ? value : {};
+  const rawFailureCategoryCounts = read(
+    record,
+    'failure_category_counts',
+    'failureCategoryCounts',
+  );
+  const failureCategoryCounts = isRecord(rawFailureCategoryCounts)
+    ? Object.fromEntries(
+      Object.entries(rawFailureCategoryCounts).flatMap(([name, count]) => {
+        const normalizedCount = asNumber(count);
+        return normalizedCount !== undefined && normalizedCount >= 0
+          ? [[name, normalizedCount]]
+          : [];
+      }),
+    )
+    : {};
   return {
     calls: asNumber(read(record, 'calls')) ?? 0,
     cacheHits: asNumber(read(record, 'cache_hits', 'cacheHits')) ?? 0,
@@ -2479,6 +3060,25 @@ function normalizeTelemetry(value: unknown): CognitionTelemetry {
     cacheHitRate: asNumber(read(record, 'cache_hit_rate', 'cacheHitRate')) ?? 0,
     fallbackRate: asNumber(read(record, 'fallback_rate', 'fallbackRate')) ?? 0,
     invalidOutputRate: asNumber(read(record, 'invalid_output_rate', 'invalidOutputRate')) ?? 0,
+    structuredSuccesses: asNumber(
+      read(record, 'structured_successes', 'structuredSuccesses'),
+    ) ?? 0,
+    structuredSuccessRate: asNumber(
+      read(record, 'structured_success_rate', 'structuredSuccessRate'),
+    ) ?? 0,
+    structuredSuccessThreshold: asNumber(
+      read(record, 'structured_success_threshold', 'structuredSuccessThreshold'),
+    ) ?? 0.95,
+    structuredSuccessGateStatus: asString(
+      read(record, 'structured_success_gate_status', 'structuredSuccessGateStatus'),
+      'NOT_EVALUATED',
+    ),
+    failureCategoryCounts,
+    observationScope: asString(
+      read(record, 'observation_scope', 'observationScope'),
+      'PROCESS_LOCAL',
+    ),
+    observedSince: asOptionalString(read(record, 'observed_since', 'observedSince')),
   };
 }
 
@@ -2533,6 +3133,92 @@ export function normalizeSystemMetrics(value: unknown): SystemMetrics {
       apiP95Milliseconds: asNumber(read(sloTargets, 'apiP95Milliseconds', 'api_p95_milliseconds')) ?? 0,
       status: asString(read(sloTargets, 'status'), 'TARGETS_NOT_PRODUCTION_EVIDENCE'),
     },
+  };
+}
+
+function normalizeDeploymentCheckStatus(value: unknown): DeploymentCheckStatus {
+  const status = asString(value, 'UNKNOWN');
+  return ['PASS', 'FAIL', 'PENDING', 'UNKNOWN'].includes(status)
+    ? status as DeploymentCheckStatus
+    : 'UNKNOWN';
+}
+
+export function normalizeDeploymentStatus(value: unknown): DeploymentStatus {
+  if (!isRecord(value)) throw new TypeError('Deployment status response is not an object.');
+  const requiredChecks = unwrapItems(read(value, 'requiredChecks', 'required_checks'))
+    .flatMap((item) => {
+      if (!isRecord(item)) return [];
+      const name = asOptionalString(read(item, 'name'));
+      if (!name) return [];
+      return [{
+        name,
+        status: normalizeDeploymentCheckStatus(read(item, 'status')),
+        completedAt: asOptionalString(read(item, 'completedAt', 'completed_at')),
+      }];
+    });
+  const requiredChecksStatusValue = asString(
+    read(value, 'requiredChecksStatus', 'required_checks_status'),
+    'UNKNOWN',
+  );
+  const lastSyncResultValue = asString(
+    read(value, 'lastSyncResult', 'last_sync_result'),
+    'UNKNOWN',
+  );
+  return {
+    schemaVersion: asString(read(value, 'schemaVersion', 'schema_version'), '1.0.0'),
+    deployedCommit: asString(read(value, 'deployedCommit', 'deployed_commit'), 'unknown'),
+    healthCommit: asString(read(value, 'healthCommit', 'health_commit'), 'unknown'),
+    reportedDeployedCommit: asOptionalString(
+      read(value, 'reportedDeployedCommit', 'reported_deployed_commit'),
+    ),
+    githubMainCommit: asOptionalString(
+      read(value, 'githubMainCommit', 'github_main_commit'),
+    ),
+    branch: asOptionalString(read(value, 'branch')),
+    commitAlignment: asString(
+      read(value, 'commitAlignment', 'commit_alignment'),
+      'HEALTH_ONLY',
+    ),
+    requiredChecks,
+    requiredChecksStatus: [
+      'PASS',
+      'FAIL',
+      'PENDING',
+      'UNKNOWN',
+      'INCOMPLETE',
+    ].includes(requiredChecksStatusValue)
+      ? requiredChecksStatusValue as DeploymentStatus['requiredChecksStatus']
+      : 'UNKNOWN',
+    lastSyncAt: asOptionalString(read(value, 'lastSyncAt', 'last_sync_at')),
+    lastSyncResult: [
+      'SUCCEEDED',
+      'FAILED',
+      'PENDING',
+      'NOT_RUN',
+      'UNKNOWN',
+    ].includes(lastSyncResultValue)
+      ? lastSyncResultValue as DeploymentStatus['lastSyncResult']
+      : 'UNKNOWN',
+    lastDeployAt: asOptionalString(read(value, 'lastDeployAt', 'last_deploy_at')),
+    lastFailureAt: asOptionalString(read(value, 'lastFailureAt', 'last_failure_at')),
+    lastFailureCode: asOptionalString(
+      read(value, 'lastFailureCode', 'last_failure_code'),
+    ),
+    evidenceObservedAt: asOptionalString(
+      read(value, 'evidenceObservedAt', 'evidence_observed_at'),
+    ),
+    statusSource: asString(
+      read(value, 'statusSource', 'status_source'),
+      'RELEASE_ENVIRONMENT_ONLY',
+    ),
+    statusFileState: asString(
+      read(value, 'statusFileState', 'status_file_state'),
+      'NOT_CONFIGURED',
+    ),
+    statusErrorCode: asOptionalString(
+      read(value, 'statusErrorCode', 'status_error_code'),
+    ),
+    observedAt: asString(read(value, 'observedAt', 'observed_at')),
   };
 }
 
@@ -2703,6 +3389,21 @@ export function normalizeReleaseGate(value: unknown): ReleaseGateView {
   if (!isRecord(value)) throw new TypeError('Release gate response is not an object.');
   const reportValue = read(value, 'report');
   const report = isRecord(reportValue) ? reportValue : {};
+  const rawCategoryCounts = read(
+    report,
+    'blockerCategoryCounts',
+    'blocker_category_counts',
+  );
+  const blockerCategoryCounts = isRecord(rawCategoryCounts)
+    ? Object.fromEntries(
+      Object.entries(rawCategoryCounts).flatMap(([name, count]) => {
+        const normalizedCount = asNumber(count);
+        return normalizedCount !== undefined && normalizedCount >= 0
+          ? [[name, normalizedCount]]
+          : [];
+      }),
+    )
+    : {};
   return {
     releaseId: asString(read(report, 'releaseId', 'release_id')),
     evaluatedAt: asOptionalString(read(report, 'evaluatedAt', 'evaluated_at')),
@@ -2711,6 +3412,41 @@ export function normalizeReleaseGate(value: unknown): ReleaseGateView {
     inventoryHash: asString(read(report, 'inventoryHash', 'inventory_hash')),
     humanEvidenceComplete: asBoolean(read(report, 'humanEvidenceComplete', 'human_evidence_complete')) ?? false,
     blockerGateIds: asStringArray(read(report, 'blockerGateIds', 'blocker_gate_ids')),
+    blockerCategoryCounts,
+    blockerSummaries: unwrapItems(
+      read(report, 'blockerSummaries', 'blocker_summaries'),
+    ).flatMap((item) => {
+      if (!isRecord(item)) return [];
+      const gateId = asOptionalString(read(item, 'gateId', 'gate_id'));
+      if (!gateId) return [];
+      return [{
+        gateId,
+        category: asString(read(item, 'category'), 'UNCLASSIFIED'),
+        status: asString(read(item, 'status'), 'NOT_EVALUATED'),
+        owner: asString(read(item, 'owner'), 'Unassigned'),
+        requiredEvidence: asString(
+          read(item, 'requiredEvidence', 'required_evidence'),
+        ),
+        evidenceIds: asStringArray(read(item, 'evidenceIds', 'evidence_ids')),
+        actionTarget: asString(
+          read(item, 'actionTarget', 'action_target'),
+          `#gate-${gateId}`,
+        ),
+      }];
+    }),
+    useCaseAxes: unwrapItems(read(report, 'useCaseAxes', 'use_case_axes')).flatMap(
+      (item) => {
+        if (!isRecord(item)) return [];
+        const axisId = asOptionalString(read(item, 'axisId', 'axis_id'));
+        if (!axisId) return [];
+        return [{
+          axisId,
+          label: asString(read(item, 'label'), axisId),
+          status: asString(read(item, 'status'), 'BLOCKED'),
+          boundary: asString(read(item, 'boundary')),
+        }];
+      },
+    ),
     gateResults: unwrapItems(read(report, 'gateResults', 'gate_results'))
       .map(normalizeReleaseGateResult)
       .filter((item): item is ReleaseGateResult => item !== null),

@@ -11,14 +11,22 @@ readonly MIRROR_DIR="${SHARED_DIR}/github-mirror.git"
 readonly STAGING_ROOT="${TARGET_ROOT}/github-staging"
 readonly STATE_FILE="${SHARED_DIR}/github-sync.state"
 readonly FAILED_STATE_FILE="${SHARED_DIR}/github-sync.failed"
+readonly DATA_VOLUME_NAME="eventshock-data"
+readonly DEPLOYMENT_STATUS_FILE_NAME="deployment-status.json"
 readonly CONFIG_FILE="${EVENTSHOCK_GITHUB_SYNC_CONFIG:-${SHARED_DIR}/github-sync.env}"
 readonly LOCK_FILE="/run/lock/eventshock-github-sync.lock"
 readonly DEPLOY_REF="refs/remotes/origin/eventshock-deploy"
+readonly REQUIRED_CHECK_NAMES_JSON='["Backend / Python 3.12.13","Frontend / Node 22","Production container"]'
 
 REPOSITORY_URL="https://github.com/Mike-Zhuang/EventShock.git"
 DEPLOY_BRANCH="main"
 GITHUB_REPOSITORY="Mike-Zhuang/EventShock"
 STAGING_DIR=""
+REQUIRED_CHECKS_JSON="[]"
+STATUS_TARGET_COMMIT=""
+STATUS_DEPLOYED_COMMIT=""
+STATUS_FAILURE_CODE="GITHUB_SYNC_FAILED"
+STATUS_FINALIZED=0
 
 log() {
   printf '[%s] [eventshock-github-sync] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*"
@@ -37,6 +45,197 @@ cleanup() {
   fi
 }
 
+reset_required_check_evidence() {
+  REQUIRED_CHECKS_JSON="$(
+    jq -cn --argjson names "${REQUIRED_CHECK_NAMES_JSON}" \
+      '[$names[] | {name: ., status: "UNKNOWN", completedAt: null}]'
+  )"
+}
+
+append_required_check_evidence() {
+  local checkName="$1"
+  local checkStatus="$2"
+  local completedAt="${3:-}"
+  REQUIRED_CHECKS_JSON="$(
+    jq -cn \
+      --argjson checks "${REQUIRED_CHECKS_JSON}" \
+      --arg name "${checkName}" \
+      --arg status "${checkStatus}" \
+      --arg completedAt "${completedAt}" \
+      '$checks + [{
+        name: $name,
+        status: $status,
+        completedAt: (if $completedAt == "" then null else $completedAt end)
+      }]'
+  )"
+}
+
+deployment_status_volume_mountpoint() {
+  local mountpoint
+  mountpoint="$(
+    docker volume inspect --format '{{ .Mountpoint }}' "${DATA_VOLUME_NAME}" 2>/dev/null
+  )" || return 1
+  [[ "${mountpoint}" == /* ]] && [[ -d "${mountpoint}" ]] && [[ ! -L "${mountpoint}" ]] \
+    || return 1
+  printf '%s\n' "${mountpoint}"
+}
+
+read_deployment_status_document() {
+  local mountpoint="$1"
+  local statusPath="${mountpoint}/${DEPLOYMENT_STATUS_FILE_NAME}"
+  local fileMode fileSize
+  if [[ ! -f "${statusPath}" ]] || [[ -L "${statusPath}" ]]; then
+    printf '{}\n'
+    return
+  fi
+  fileMode="$(stat -c '%a' "${statusPath}")" || {
+    printf '{}\n'
+    return
+  }
+  fileSize="$(stat -c '%s' "${statusPath}")" || {
+    printf '{}\n'
+    return
+  }
+  if (( (8#${fileMode} & 8#022) != 0 )) || ((fileSize > 32768)); then
+    printf '{}\n'
+    return
+  fi
+  jq -ce 'if type == "object" then . else error("not an object") end' \
+    "${statusPath}" 2>/dev/null || printf '{}\n'
+}
+
+build_deployment_status_document() {
+  local previousJson="$1"
+  local syncResult="$2"
+  local deployedCommit="$3"
+  local githubMainCommit="$4"
+  local now="$5"
+  local failureCode="${6:-}"
+  local deployCompleted="${7:-false}"
+  local reuseVerifiedChecks="${8:-false}"
+  jq -cn \
+    --argjson previous "${previousJson}" \
+    --argjson checks "${REQUIRED_CHECKS_JSON}" \
+    --argjson requiredNames "${REQUIRED_CHECK_NAMES_JSON}" \
+    --arg branch "${DEPLOY_BRANCH}" \
+    --arg syncResult "${syncResult}" \
+    --arg deployedCommit "${deployedCommit}" \
+    --arg githubMainCommit "${githubMainCommit}" \
+    --arg now "${now}" \
+    --arg failureCode "${failureCode}" \
+    --arg deployCompleted "${deployCompleted}" \
+    --arg reuseVerifiedChecks "${reuseVerifiedChecks}" \
+    '
+      def reusableChecks:
+        $reuseVerifiedChecks == "true"
+        and ($previous.githubMainCommit? == $githubMainCommit)
+        and (($previous.requiredChecks? | type) == "array")
+        and (($previous.requiredChecks | length) == ($requiredNames | length))
+        and (([$previous.requiredChecks[].name] | sort) == ($requiredNames | sort))
+        and all($previous.requiredChecks[]; .status == "PASS");
+      {
+        branch: $branch,
+        deployedCommit: (
+          if $deployedCommit == "" then ($previous.deployedCommit // null)
+          else $deployedCommit end
+        ),
+        githubMainCommit: (
+          if $githubMainCommit == "" then ($previous.githubMainCommit // null)
+          else $githubMainCommit end
+        ),
+        requiredChecks: (
+          if reusableChecks then $previous.requiredChecks else $checks end
+        ),
+        lastSyncAt: $now,
+        lastSyncResult: $syncResult,
+        lastDeployAt: (
+          if $deployCompleted == "true" then $now
+          else ($previous.lastDeployAt // null) end
+        ),
+        lastFailureAt: (
+          if $failureCode == "" then ($previous.lastFailureAt // null)
+          else $now end
+        ),
+        lastFailureCode: (
+          if $failureCode == "" then ($previous.lastFailureCode // null)
+          else $failureCode end
+        ),
+        observedAt: $now
+      }
+    '
+}
+
+write_deployment_status() {
+  local syncResult="$1"
+  local deployedCommit="${2:-}"
+  local githubMainCommit="${3:-}"
+  local failureCode="${4:-}"
+  local deployCompleted="${5:-false}"
+  local reuseVerifiedChecks="${6:-false}"
+  local mountpoint previousJson now document statusTemp statusPath
+  case "${syncResult}" in
+    SUCCEEDED | FAILED | PENDING | NOT_RUN | UNKNOWN) ;;
+    *) return 1 ;;
+  esac
+  [[ -z "${deployedCommit}" ]] || [[ "${deployedCommit}" =~ ^[0-9a-f]{40}$ ]] || return 1
+  [[ -z "${githubMainCommit}" ]] \
+    || [[ "${githubMainCommit}" =~ ^[0-9a-f]{40}$ ]] \
+    || return 1
+  [[ -z "${failureCode}" ]] || [[ "${failureCode}" =~ ^[A-Z0-9_:-]{1,80}$ ]] || return 1
+  jq -e --argjson names "${REQUIRED_CHECK_NAMES_JSON}" '
+    type == "array"
+    and length == 3
+    and (([.[].name] | sort) == ($names | sort))
+    and all(.[];
+      (.status == "PASS" or .status == "FAIL"
+        or .status == "PENDING" or .status == "UNKNOWN")
+      and ((.completedAt == null) or (.completedAt | type == "string"))
+    )
+  ' <<<"${REQUIRED_CHECKS_JSON}" >/dev/null || return 1
+  mountpoint="$(deployment_status_volume_mountpoint)" || return 1
+  previousJson="$(read_deployment_status_document "${mountpoint}")"
+  now="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+  document="$(
+    build_deployment_status_document \
+      "${previousJson}" \
+      "${syncResult}" \
+      "${deployedCommit}" \
+      "${githubMainCommit}" \
+      "${now}" \
+      "${failureCode}" \
+      "${deployCompleted}" \
+      "${reuseVerifiedChecks}"
+  )" || return 1
+  (( ${#document} <= 32768 )) || return 1
+  statusPath="${mountpoint}/${DEPLOYMENT_STATUS_FILE_NAME}"
+  [[ ! -L "${statusPath}" ]] || return 1
+  statusTemp="$(mktemp "${mountpoint}/.${DEPLOYMENT_STATUS_FILE_NAME}.XXXXXX")" || return 1
+  if ! printf '%s\n' "${document}" >"${statusTemp}" \
+    || ! chmod 0644 "${statusTemp}" \
+    || ! sync -f "${statusTemp}" \
+    || ! mv -f -- "${statusTemp}" "${statusPath}" \
+    || ! sync -f "${mountpoint}"; then
+    rm -f -- "${statusTemp}"
+    return 1
+  fi
+}
+
+sync_on_exit() {
+  local exitCode=$?
+  trap - EXIT
+  if ((exitCode != 0)) && ((STATUS_FINALIZED == 0)); then
+    if ! write_deployment_status \
+      "FAILED" \
+      "${STATUS_DEPLOYED_COMMIT}" \
+      "${STATUS_TARGET_COMMIT}" \
+      "${STATUS_FAILURE_CODE}"; then
+      log "ERROR: could not persist the fail-closed deployment status" >&2
+    fi
+  fi
+  cleanup || true
+  exit "${exitCode}"
+}
+
 validate_configuration() {
   [[ "${EUID}" -eq 0 ]] || fail "must run as root"
   [[ "${REPOSITORY_URL}" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$ ]] \
@@ -48,7 +247,7 @@ validate_configuration() {
   [[ "${REPOSITORY_URL}" == "https://github.com/${GITHUB_REPOSITORY}.git" ]] \
     || fail "REPOSITORY_URL and GITHUB_REPOSITORY must identify the same repository"
   local requiredCommand managedPath statePath stateMode resolvedBin
-  for requiredCommand in cmp curl docker flock git jq tar timeout; do
+  for requiredCommand in cmp curl docker flock git jq sync tar timeout; do
     command -v "${requiredCommand}" >/dev/null 2>&1 \
       || fail "required command is unavailable: ${requiredCommand}"
   done
@@ -332,7 +531,7 @@ write_state() {
 
 verify_github_checks() {
   local commitSha="$1"
-  local response checkName checkCount successCount incompleteCount failedCount
+  local response checkName checkCount successCount incompleteCount failedCount completedAt
   local -a requiredChecks=(
     "Backend / Python 3.12.13"
     "Frontend / Node 22"
@@ -360,6 +559,7 @@ verify_github_checks() {
     return 30
   fi
 
+  REQUIRED_CHECKS_JSON="[]"
   for checkName in "${requiredChecks[@]}"; do
     if ! checkCount="$(jq --arg checkName "${checkName}" \
       '[.check_runs[] | select(.name == $checkName and .app.slug == "github-actions")] | length' \
@@ -396,14 +596,25 @@ verify_github_checks() {
       log "ERROR: could not inspect GitHub check conclusions ${checkName}" >&2
       return 30
     fi
+    completedAt="$(jq -r --arg checkName "${checkName}" '
+      [.check_runs[]
+        | select(.name == $checkName and .app.slug == "github-actions")
+        | .completed_at
+        | select(type == "string")]
+      | sort
+      | last // ""
+    ' <<<"${response}")"
     if ((failedCount > 0)); then
       failedChecks+=("${checkName}")
+      append_required_check_evidence "${checkName}" "FAIL" "${completedAt}"
     elif ((checkCount == 0)) || ((incompleteCount > 0)); then
       waitingChecks+=("${checkName}")
+      append_required_check_evidence "${checkName}" "PENDING"
     elif ((successCount != checkCount)); then
       failedChecks+=("${checkName}")
+      append_required_check_evidence "${checkName}" "FAIL" "${completedAt}"
     else
-      continue
+      append_required_check_evidence "${checkName}" "PASS" "${completedAt}"
     fi
   done
 
@@ -501,14 +712,16 @@ cleanup_old_operational_releases() {
 }
 
 main() {
-  trap cleanup EXIT
+  trap sync_on_exit EXIT
   load_configuration
   validate_configuration
   acquire_lock
+  reset_required_check_evidence
 
   local targetCommit deployedCommit currentCommit shortCommit subject runtimeHealthy
   local localRuntimeHealthy infrastructureBlocked
   deployedCommit="$(read_deployed_commit || true)"
+  STATUS_DEPLOYED_COMMIT="${deployedCommit}"
   runtimeHealthy=0
   localRuntimeHealthy=0
   infrastructureBlocked=0
@@ -533,12 +746,20 @@ main() {
 
   prepare_mirror
   targetCommit="$(git --git-dir="${MIRROR_DIR}" rev-parse "${DEPLOY_REF}^{commit}")"
+  STATUS_TARGET_COMMIT="${targetCommit}"
   if [[ "${targetCommit}" == "${deployedCommit}" ]] && ((runtimeHealthy == 1)); then
+    if ! write_deployment_status \
+      "SUCCEEDED" "${deployedCommit}" "${targetCommit}" "" "false" "true"; then
+      STATUS_FAILURE_CODE="DEPLOYMENT_STATUS_WRITE_FAILED"
+      fail "could not persist NO_CHANGE deployment evidence"
+    fi
+    STATUS_FINALIZED=1
     rm -f -- "${FAILED_STATE_FILE}"
     log "NO_CHANGE: branch, state, current release, container and public health remain at ${targetCommit}"
     exit 0
   fi
   if ((infrastructureBlocked == 1)) && [[ "${targetCommit}" == "${deployedCommit}" ]]; then
+    STATUS_FAILURE_CODE="INFRASTRUCTURE_BLOCKED"
     log "INFRASTRUCTURE_BLOCKED: local release is healthy but the BaoTa proxy path could not be repaired" >&2
     exit 1
   fi
@@ -550,10 +771,26 @@ main() {
   local checkStatus
   if verify_github_checks "${targetCommit}"; then
     checkStatus=0
+    if ! write_deployment_status \
+      "PENDING" "${deployedCommit}" "${targetCommit}"; then
+      STATUS_FAILURE_CODE="DEPLOYMENT_STATUS_WRITE_FAILED"
+      fail "could not persist verified CI evidence before deployment"
+    fi
   else
     checkStatus=$?
     if ((checkStatus == 10)); then
+      if ! write_deployment_status \
+        "PENDING" "${deployedCommit}" "${targetCommit}"; then
+        STATUS_FAILURE_CODE="DEPLOYMENT_STATUS_WRITE_FAILED"
+        fail "could not persist pending CI evidence"
+      fi
+      STATUS_FINALIZED=1
       exit 0
+    fi
+    if ((checkStatus == 20)); then
+      STATUS_FAILURE_CODE="REQUIRED_CHECKS_FAILED"
+    else
+      STATUS_FAILURE_CODE="GITHUB_CHECKS_API_FAILED"
     fi
     exit 1
   fi
@@ -569,6 +806,7 @@ main() {
     if ! repair_baota_proxy \
       "${deployedCommit}" \
       "${STAGING_DIR}/scripts/register-baota-site.py"; then
+      STATUS_FAILURE_CODE="INFRASTRUCTURE_BLOCKED"
       log "INFRASTRUCTURE_BLOCKED: verified target could not repair the BaoTa proxy path" >&2
       exit 1
     fi
@@ -582,6 +820,12 @@ main() {
   else
     backoffStatus=$?
     if ((backoffStatus == 10)); then
+      if ! write_deployment_status \
+        "PENDING" "${deployedCommit}" "${targetCommit}"; then
+        STATUS_FAILURE_CODE="DEPLOYMENT_STATUS_WRITE_FAILED"
+        fail "could not persist deployment backoff evidence"
+      fi
+      STATUS_FINALIZED=1
       exit 0
     fi
     exit 1
@@ -592,6 +836,13 @@ main() {
     && verify_runtime_commit "${targetCommit}"; then
     install_operational_scripts "${STAGING_DIR}" "${targetCommit}"
     write_state "${targetCommit}"
+    STATUS_DEPLOYED_COMMIT="${targetCommit}"
+    if ! write_deployment_status \
+      "SUCCEEDED" "${targetCommit}" "${targetCommit}"; then
+      STATUS_FAILURE_CODE="DEPLOYMENT_STATUS_WRITE_FAILED"
+      fail "could not persist reconciled deployment evidence"
+    fi
+    STATUS_FINALIZED=1
     rm -f -- "${FAILED_STATE_FILE}"
     cleanup_old_operational_releases
     log "STATE_RECONCILED: running deployment was already healthy at ${targetCommit}"
@@ -601,10 +852,19 @@ main() {
   if ! EVENTSHOCK_RELEASE_COMMIT="${targetCommit}" \
     bash "${STAGING_DIR}/scripts/deploy-server.sh" "${STAGING_DIR}"; then
     record_deployment_failure "${targetCommit}"
+    STATUS_DEPLOYED_COMMIT="$(read_current_release_commit 2>/dev/null || true)"
+    STATUS_FAILURE_CODE="DEPLOYMENT_FAILED"
     fail "deployment failed; the commit entered bounded backoff"
   fi
   install_operational_scripts "${STAGING_DIR}" "${targetCommit}"
   write_state "${targetCommit}"
+  STATUS_DEPLOYED_COMMIT="${targetCommit}"
+  if ! write_deployment_status \
+    "SUCCEEDED" "${targetCommit}" "${targetCommit}" "" "true"; then
+    STATUS_FAILURE_CODE="DEPLOYMENT_STATUS_WRITE_FAILED"
+    fail "deployment succeeded but its evidence could not be persisted"
+  fi
+  STATUS_FINALIZED=1
   rm -f -- "${FAILED_STATE_FILE}"
   cleanup_old_operational_releases
   log "DEPLOY_SUCCESS: branch=${DEPLOY_BRANCH} commit=${targetCommit}"

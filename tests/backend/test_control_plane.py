@@ -76,6 +76,10 @@ def test_model_catalog_and_session_secret_lifecycle_are_safe(tmp_path: Path) -> 
     modelIds = {item["id"] for item in catalog.json()["models"]}
     assert {"glm-5.2", "glm-5.1", "glm-5", "glm-4.7-flash"}.issubset(modelIds)
     assert catalog.json()["defaultProvider"] == "zhipu"
+    assert catalog.json()["pricingSnapshotStatus"] == "CURRENT"
+    assert catalog.json()["pricingSnapshotValidUntil"] == "2026-08-20T00:00:00Z"
+    assert catalog.json()["capabilitySnapshotStatus"] == "CURRENT"
+    assert catalog.json()["capabilitySnapshotValidUntil"] == "2026-08-20T23:59:59Z"
     providers = {item["id"]: item for item in catalog.json()["providers"]}
     assert set(providers) == {
         "zhipu",
@@ -96,9 +100,17 @@ def test_model_catalog_and_session_secret_lifecycle_are_safe(tmp_path: Path) -> 
         "https://github.com/Mike-Zhuang/EventShock/issues/new?template=llm-provider-feedback.yml"
     )
     assert providers["openai"]["models"][0]["billingCurrency"] == "USD"
+    exactModelEvidence = providers["openai"]["models"][0]["validationEvidence"]
+    assert exactModelEvidence["knownModel"] is True
+    assert exactModelEvidence["adapterContractStatus"] == "PASS"
+    assert exactModelEvidence["liveKeyE2eStatus"] == "NOT_RUN"
+    assert exactModelEvidence["verificationScope"] == (
+        "EXACT_MODEL_DOCS_PLUS_PROVIDER_ADAPTER_NO_LIVE_KEY"
+    )
     kimi26 = next(item for item in providers["moonshot"]["models"] if item["id"] == "kimi-k2.6")
     assert kimi26["maxOutputTokens"] is None
     assert kimi26["pricingStatus"] == "VERIFIED_UPPER_BOUND"
+    assert kimi26["pricingValidUntil"] == "2026-08-20T00:00:00Z"
     kimi3 = next(item for item in providers["moonshot"]["models"] if item["id"] == "kimi-k3")
     assert kimi3["maxOutputTokens"] == 131_072
     assert kimi3["officialMaxOutputTokens"] == 1_048_576
@@ -161,7 +173,112 @@ def test_hybrid_preflight_requires_worst_case_cost_reservation(tmp_path: Path) -
     assert insufficientCostCheck["status"] == "FAIL"
     assert insufficient.json()["llmPricingStatus"] == "VERIFIED_UPPER_BOUND"
     assert insufficient.json()["llmMinimumCallReservationUsd"] == pytest.approx(8.057344)
+    assert insufficient.json()["simulationRunnable"] is False
+    assert insufficient.json()["requestedCognitionRunnable"] is False
+    assert insufficient.json()["effectiveCognitionMode"] == "UNAVAILABLE"
+    assert insufficient.json()["degradationReasons"] == ["LLM_COST_CAP_INSUFFICIENT"]
+    assert insufficient.json()["requiresExplicitRuleFallbackConfirmation"] is True
     assert sufficientCostCheck["status"] == "PASS"
+    assert sufficient.json()["simulationRunnable"] is True
+    assert sufficient.json()["requestedCognitionRunnable"] is True
+    assert sufficient.json()["effectiveCognitionMode"] == "HYBRID_LLM"
+    assert sufficient.json()["degradationReasons"] == []
+    assert sufficient.json()["requiresExplicitRuleFallbackConfirmation"] is False
+
+
+def test_hybrid_degradation_requires_explicit_rule_only_conversion(
+    tmp_path: Path,
+) -> None:
+    with TestClient(createApp(tmp_path)) as client:
+        _freezeCanonicalPack(client)
+        configured = client.put(
+            "/api/v1/llm/config",
+            headers={"X-Session-ID": SESSION_ID},
+            json={
+                "provider": "zhipu",
+                "model": "glm-5.2",
+                "apiKey": "test-secret-api-key-explicit-rule",
+                "thinkingEnabled": True,
+                "maxTokens": 2_048,
+            },
+        )
+        payload = _experimentPayload()
+        payload["llmPolicy"] = {
+            "mode": "HYBRID_LLM",
+            "provider": "zhipu",
+            "modelId": "glm-5.2",
+            "representativeAgentCount": 2,
+            "decisionIntervalSteps": 12,
+            "callBudget": 4,
+            "maxCostUsd": 1.0,
+            "fallbackToRules": True,
+        }
+        degraded = client.post(
+            "/api/v1/scenarios/validate",
+            headers={"X-Session-ID": SESSION_ID},
+            json=payload,
+        )
+        blockedCreate = client.post(
+            "/api/v1/experiments",
+            headers={
+                "X-Session-ID": SESSION_ID,
+                "Idempotency-Key": "hybrid-degradation-blocked-001",
+            },
+            json=payload,
+        )
+        payload["llmPolicy"]["mode"] = "RULE_ONLY"
+        ruleOnly = client.post(
+            "/api/v1/scenarios/validate",
+            headers={"X-Session-ID": SESSION_ID},
+            json=payload,
+        )
+        created = client.post(
+            "/api/v1/experiments",
+            headers={
+                "X-Session-ID": SESSION_ID,
+                "Idempotency-Key": "explicit-rule-only-create-001",
+            },
+            json=payload,
+        )
+
+    assert configured.status_code == 200
+    assert degraded.json()["valid"] is True
+    assert degraded.json()["simulationRunnable"] is True
+    assert degraded.json()["requestedCognitionRunnable"] is False
+    assert degraded.json()["effectiveCognitionMode"] == "RULE_ONLY"
+    assert degraded.json()["degradationReasons"] == ["LLM_COST_CAP_INSUFFICIENT"]
+    assert degraded.json()["requiresExplicitRuleFallbackConfirmation"] is True
+    assert degraded.json()["thinkingPreferenceEnabled"] is True
+    assert degraded.json()["thinkingEnabled"] is False
+    assert blockedCreate.status_code == 409
+    assert blockedCreate.json()["error"]["code"] == ("HYBRID_LLM_DEGRADATION_REQUIRES_RULE_ONLY")
+    assert ruleOnly.json()["simulationRunnable"] is True
+    assert ruleOnly.json()["requestedCognitionRunnable"] is True
+    assert ruleOnly.json()["effectiveCognitionMode"] == "RULE_ONLY"
+    assert ruleOnly.json()["requiresExplicitRuleFallbackConfirmation"] is False
+    assert created.status_code == 201
+
+
+def test_preflight_marks_structurally_invalid_rule_simulation_unavailable(
+    tmp_path: Path,
+) -> None:
+    with TestClient(createApp(tmp_path)) as client:
+        _freezeCanonicalPack(client)
+        payload = _experimentPayload()
+        payload["network"] = {"averageDegree": payload["populationSize"]}
+        checked = client.post(
+            "/api/v1/scenarios/validate",
+            headers={"X-Session-ID": SESSION_ID},
+            json=payload,
+        )
+
+    assert checked.status_code == 200
+    assert checked.json()["valid"] is False
+    assert checked.json()["simulationRunnable"] is False
+    assert checked.json()["requestedCognitionRunnable"] is False
+    assert checked.json()["effectiveCognitionMode"] == "UNAVAILABLE"
+    assert checked.json()["degradationReasons"] == []
+    assert checked.json()["requiresExplicitRuleFallbackConfirmation"] is False
 
 
 def test_hybrid_preflight_rejects_a_different_configured_provider_route(
@@ -290,7 +407,18 @@ def test_frozen_event_pack_cannot_be_reopened_by_concurrent_reextraction(
                 "expectedClaimIds": pendingClaimIds,
             },
         )
-        assert approved.status_code == 200
+        assert approved.status_code == 409
+        assert approved.json()["error"]["code"] == "NO_BULK_APPROVAL_ELIGIBLE_CLAIMS"
+        for claimId in pendingClaimIds:
+            reviewed = client.post(
+                f"/api/v1/event-packs/{eventPackId}/claims/{claimId}/review",
+                headers={"X-Session-ID": SESSION_ID},
+                json={
+                    "reviewStatus": "HUMAN_APPROVED",
+                    "rationale": "Individually reviewed rule-fallback claim.",
+                },
+            )
+            assert reviewed.status_code == 200
 
         service = client.app.state.eventPackService
         database = client.app.state.database

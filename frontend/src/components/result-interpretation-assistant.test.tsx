@@ -139,10 +139,17 @@ function createSavedConversation(
   };
 }
 
-function renderAssistant(navigate = vi.fn()) {
+function renderAssistant(
+  navigate = vi.fn(),
+  onCreateExperimentDraft?: (suggestion: string) => void,
+) {
   render(
     <I18nProvider>
-      <ResultInterpretationAssistant experimentId={EXPERIMENT_ID} navigate={navigate} />
+      <ResultInterpretationAssistant
+        experimentId={EXPERIMENT_ID}
+        navigate={navigate}
+        onCreateExperimentDraft={onCreateExperimentDraft}
+      />
     </I18nProvider>,
   );
   return navigate;
@@ -360,6 +367,35 @@ describe('结果解释助手', () => {
     const suggestion = screen.getByRole('button', { name: 'How stable is this difference?' });
     await user.click(suggestion);
     expect(screen.getByLabelText('Ask about this experiment')).toHaveValue('How stable is this difference?');
+    expect(api.streamChatAboutResults).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks unrun experiment suggestions and creates only a prefilled draft', async () => {
+    const createDraft = vi.fn();
+    vi.mocked(api.streamChatAboutResults).mockImplementation(async (_experimentId, input) => (
+      createStreamResult(input, {
+        followUpSuggestions: [
+          'What changes with 50 matched seeds?',
+          'Which interval can the current result explain?',
+          'Compare against external historical market data.',
+        ],
+      })
+    ));
+    renderAssistant(vi.fn(), createDraft);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: 'Generate explanation' }));
+
+    expect(await screen.findByText('New experiment required')).toBeInTheDocument();
+    expect(screen.getByText('Not run')).toBeInTheDocument();
+    expect(screen.getByText('Answerable from current result')).toBeInTheDocument();
+    expect(screen.getByText('External data required')).toBeInTheDocument();
+    expect(screen.queryByRole('button', {
+      name: 'Compare against external historical market data.',
+    })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Create prefilled scenario draft' }));
+
+    expect(createDraft).toHaveBeenCalledWith('What changes with 50 matched seeds?');
     expect(api.streamChatAboutResults).toHaveBeenCalledTimes(1);
   });
 
@@ -920,6 +956,10 @@ describe('结果解释助手', () => {
         retryable: true,
         httpStatus: 502,
         uncertainBillableAttempts: 2,
+        failureStage: 'REPAIRING',
+        repairAttempted: true,
+        repairUsed: false,
+        billingConclusion: 'BILLING_UNCERTAIN',
         traceId: 'trace-safe',
       }),
     );
@@ -930,6 +970,9 @@ describe('结果解释助手', () => {
     expect(await screen.findByText(/供应商未在时限内完成/)).toBeInTheDocument();
     expect(screen.queryByText('raw provider timeout')).not.toBeInTheDocument();
     expect(screen.getByText('MODEL_TIMEOUT')).toBeInTheDocument();
+    expect(screen.getByText('REPAIRING')).toBeInTheDocument();
+    expect(screen.getByText('已尝试，未采用修复结果')).toBeInTheDocument();
+    expect(screen.getByText('计费状态不确定')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '查看重试与费用提示' }));
     expect(screen.getByText(/有 2 次供应商调用无法确认是否已计费/)).toBeInTheDocument();
   });

@@ -69,6 +69,8 @@ vi.mock('./api/client', () => ({
     requestVerificationCode: vi.fn(),
     resetPassword: vi.fn(async () => undefined),
     logout: vi.fn(async () => undefined),
+    exportAccountData: vi.fn(),
+    deleteAccount: vi.fn(),
     getAdminUsers: vi.fn(async () => ({
       items: [],
       total: 0,
@@ -141,6 +143,11 @@ describe('移动主导航', () => {
     });
     expect(parseAppRoute('#/factory')).toEqual({
       view: 'factory',
+      experimentId: undefined,
+      target: undefined,
+    });
+    expect(parseAppRoute('#/account')).toEqual({
+      view: 'account',
       experimentId: undefined,
       target: undefined,
     });
@@ -622,6 +629,13 @@ describe('移动主导航', () => {
       expect(within(section).getByRole('button', { name: 'Mechanism Trace', hidden: true })).toBeInTheDocument();
       expect(within(section).getByRole('button', { name: 'Validation & Governance', hidden: true })).toBeInTheDocument();
       expect(within(section).queryByRole('button', { name: 'AI Configuration', hidden: true })).not.toBeInTheDocument();
+    });
+    const accountSections = Array.from(document.querySelectorAll<HTMLElement>('.navigation-section'))
+      .filter((section) => section.getAttribute('aria-label') === 'Account');
+    expect(accountSections).toHaveLength(2);
+    accountSections.forEach((section) => {
+      expect(within(section).getByRole('button', { name: 'Account & Privacy', hidden: true }))
+        .toBeInTheDocument();
     });
   });
 

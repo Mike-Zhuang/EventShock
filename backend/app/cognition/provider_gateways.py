@@ -490,6 +490,7 @@ class StructuredProviderRestGateway:
         # 首轮启用流式；修复轮聚焦一次性重建完整 JSON，不把半截修复结果当作
         # 可展示内容。无论是否流式，落地后都执行同一套严格本地校验。
         streamEnabled = request.streamResponse and repairContext is None
+        thinkingEnabled = request.samplingConfig.thinking_enabled and repairContext is None
         if repairContext is not None:
             repairInstruction = buildRepairInstruction(
                 validationCode=repairContext.error.code.value,
@@ -519,7 +520,7 @@ class StructuredProviderRestGateway:
                     }
                 },
             }
-            if request.samplingConfig.thinking_enabled:
+            if thinkingEnabled:
                 payload["reasoning"] = {
                     "effort": request.samplingConfig.reasoning_effort or "medium"
                 }
@@ -535,7 +536,7 @@ class StructuredProviderRestGateway:
                 "stream": streamEnabled,
                 "output_config": {"format": {"type": "json_schema", "schema": jsonSchema}},
             }
-            if request.samplingConfig.thinking_enabled:
+            if thinkingEnabled:
                 if request.model == "claude-haiku-4-5-20251001":
                     payload["thinking"] = {
                         "type": "enabled",
@@ -553,7 +554,7 @@ class StructuredProviderRestGateway:
                 "max_output_tokens": request.samplingConfig.max_tokens,
                 "thinking_level": (
                     self._googleThinkingLevel(request.samplingConfig.reasoning_effort)
-                    if request.samplingConfig.thinking_enabled
+                    if thinkingEnabled
                     else "minimal"
                 ),
                 "thinking_summaries": "none",
@@ -594,7 +595,7 @@ class StructuredProviderRestGateway:
                 # Kimi K3 始终推理且不接受 thinking.type；关闭开关时使用官方
                 # 最低推理档，开启时才提升力度，避免发送会被拒绝的参数。
                 "reasoning_effort": self._kimiEffort(
-                    request.samplingConfig.thinking_enabled,
+                    thinkingEnabled,
                     request.samplingConfig.reasoning_effort,
                 ),
             }
@@ -611,15 +612,13 @@ class StructuredProviderRestGateway:
             "response_format": {"type": "json_object"},
         }
         if self._provider == "deepseek":
-            payload["thinking"] = {
-                "type": ("enabled" if request.samplingConfig.thinking_enabled else "disabled")
-            }
+            payload["thinking"] = {"type": ("enabled" if thinkingEnabled else "disabled")}
             if request.samplingConfig.reasoning_effort is not None:
                 payload["reasoning_effort"] = self._deepSeekEffort(
                     request.samplingConfig.reasoning_effort
                 )
         elif self._provider == "alibaba":
-            payload["enable_thinking"] = request.samplingConfig.thinking_enabled
+            payload["enable_thinking"] = thinkingEnabled
         self._applyAdvancedSamplingParameters(payload, request)
         if streamEnabled:
             payload["stream_options"] = {"include_usage": True}

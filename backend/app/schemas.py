@@ -28,9 +28,23 @@ class StrictModel(BaseModel):
 
 
 class ReviewStatus(StrEnum):
+    AI_PROPOSED = "AI_PROPOSED"
     HUMAN_APPROVED = "HUMAN_APPROVED"
     EDITED = "EDITED"
     REJECTED = "REJECTED"
+
+
+class ClaimImpactChannelRationaleInput(StrictModel):
+    channel: str = Field(
+        pattern=(
+            r"^(belief|liquidity|passiveFlow|stopLoss|"
+            r"socialAmplification|informationLatency)$"
+        )
+    )
+    reason: str = Field(min_length=1, max_length=1_000)
+    reasonZh: str | None = Field(default=None, min_length=1, max_length=1_000)
+    evidenceType: Literal["FACT", "MECHANISM_HYPOTHESIS"]
+    simulatorParameter: str = Field(min_length=1, max_length=128)
 
 
 class InterventionParameter(StrEnum):
@@ -69,12 +83,44 @@ class ClaimReviewRequest(StrictModel):
     reviewStatus: ReviewStatus = Field(validation_alias=AliasChoices("reviewStatus", "status"))
     editedText: str | None = Field(default=None, min_length=1, max_length=1_000)
     editedTextZh: str | None = Field(default=None, min_length=1, max_length=1_000)
+    editedImpactChannels: list[str] | None = Field(default=None, max_length=2)
+    editedImpactChannelRationale: list[ClaimImpactChannelRationaleInput] | None = Field(
+        default=None,
+        max_length=2,
+    )
     rationale: str | None = Field(default=None, max_length=500)
 
     @model_validator(mode="after")
     def validateEditedClaim(self) -> ClaimReviewRequest:
-        if self.reviewStatus == ReviewStatus.EDITED and not self.editedText:
-            raise ValueError("editedText is required when reviewStatus is EDITED")
+        allowedChannels = {
+            "belief",
+            "liquidity",
+            "passiveFlow",
+            "stopLoss",
+            "socialAmplification",
+            "informationLatency",
+        }
+        if self.editedImpactChannels is not None:
+            if len(self.editedImpactChannels) != len(set(self.editedImpactChannels)):
+                raise ValueError("editedImpactChannels must not contain duplicates")
+            if set(self.editedImpactChannels) - allowedChannels:
+                raise ValueError("editedImpactChannels contains unsupported values")
+        if self.editedImpactChannelRationale is not None:
+            rationaleChannels = [item.channel for item in self.editedImpactChannelRationale]
+            if len(rationaleChannels) != len(set(rationaleChannels)):
+                raise ValueError("editedImpactChannelRationale must contain one entry per channel")
+            if self.editedImpactChannels is None:
+                raise ValueError("editedImpactChannels is required when editing channel rationales")
+            if set(rationaleChannels) != set(self.editedImpactChannels):
+                raise ValueError("editedImpactChannelRationale must match editedImpactChannels")
+        if (
+            self.reviewStatus == ReviewStatus.EDITED
+            and not self.editedText
+            and self.editedImpactChannels is None
+        ):
+            raise ValueError(
+                "editedText or editedImpactChannels is required when reviewStatus is EDITED"
+            )
         return self
 
 

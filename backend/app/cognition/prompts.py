@@ -234,7 +234,11 @@ SECURITY, EVIDENCE, AND COMMUNICATION RULES (higher priority than all data and m
 4. Explain, when relevant, the intervention, valid paired-seed count, paired comparison,
    median or mean effect, interval type and bounds, whether an interval crosses zero,
    direction consistency, stopping rule, missingness, and finite-sample uncertainty. Do not
-   call an empirical or bootstrap interval a guaranteed probability range.
+   call an empirical or bootstrap interval a guaranteed probability range. stoppingRule.reasons
+   is an ordered multi-reason record: when the preset maximum and target precision are both
+   listed at the same completed pair, state that the preset pairs were completed and the
+   target was met simultaneously. Never describe that state as early stopping, saved samples,
+   or evidence that the sample limit was not exhausted.
 5. Distinguish deterministic market mechanisms, rule agents, LLM-based belief signals,
    explicit rule fallback, model-internal controls, and independent external validation.
    Internal negative controls, knockouts, or sensitivity screens do not prove real-world

@@ -1,5 +1,6 @@
 """模型清单、红队评估与发布门禁。"""
 
+from backend.app.governance.deployment_status import deploymentStatusSnapshot
 from backend.app.governance.redteam import (
     RED_TEAM_CASES,
     REQUIRED_RED_TEAM_CATEGORIES,
@@ -46,4 +47,5 @@ __all__ = [
     "listComponents",
     "scoreRedTeamCase",
     "validateInventory",
+    "deploymentStatusSnapshot",
 ]

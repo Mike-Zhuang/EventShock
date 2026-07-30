@@ -228,6 +228,66 @@ def testGitHubSyncEnforcesCiFastForwardAndExactRuntimeCommit() -> None:
     assert selfHeal < githubAccess < ciGate < extraction < backoffGate < deployment
 
 
+def testDeploymentStatusUsesPersistentVolumeAndFixedReadOnlyApiPath() -> None:
+    composeFile = (PROJECT_ROOT / "compose.yml").read_text()
+    environmentExample = (PROJECT_ROOT / ".env.example").read_text()
+    deployScript = readScript("deploy-server.sh")
+    syncScript = readScript("sync-from-github.sh")
+    writeStatus = syncScript.split("write_deployment_status() {", 1)[1].split(
+        "\n}\n\nsync_on_exit() {", 1
+    )[0]
+    buildDocument = syncScript.split("build_deployment_status_document() {", 1)[1].split(
+        "\n}\n\nwrite_deployment_status() {", 1
+    )[0]
+
+    assert "EVENTSHOCK_DEPLOYMENT_STATUS_FILE: /data/deployment-status.json" in composeFile
+    assert "- eventshock-data:/data" in composeFile
+    assert "EVENTSHOCK_DEPLOYMENT_STATUS_FILE=/data/deployment-status.json" in (environmentExample)
+    assert "EVENTSHOCK_DEPLOYMENT_STATUS_FILE 必须精确为" in deployScript
+    assert 'DATA_VOLUME_NAME="eventshock-data"' in syncScript
+    assert 'DEPLOYMENT_STATUS_FILE_NAME="deployment-status.json"' in syncScript
+    assert "docker volume inspect --format '{{ .Mountpoint }}'" in syncScript
+    assert 'statusTemp="$(mktemp "${mountpoint}/.${DEPLOYMENT_STATUS_FILE_NAME}.XXXXXX")"' in (
+        writeStatus
+    )
+    assert 'chmod 0644 "${statusTemp}"' in writeStatus
+    assert 'sync -f "${statusTemp}"' in writeStatus
+    assert 'mv -f -- "${statusTemp}" "${statusPath}"' in writeStatus
+    assert 'sync -f "${mountpoint}"' in writeStatus
+    for allowedField in (
+        "deployedCommit",
+        "githubMainCommit",
+        "branch",
+        "requiredChecks",
+        "lastSyncAt",
+        "lastSyncResult",
+        "lastDeployAt",
+        "lastFailureAt",
+        "lastFailureCode",
+        "observedAt",
+    ):
+        assert allowedField in buildDocument
+    for forbiddenField in ("token", "password", "logContent", "responseBody"):
+        assert forbiddenField not in buildDocument
+
+
+def testGitHubSyncPublishesFailClosedEvidenceForEveryTerminalBranch() -> None:
+    script = readScript("sync-from-github.sh")
+    mainBody = script.split("main() {", 1)[1].split('\n}\n\nmain "$@"', 1)[0]
+
+    assert "reset_required_check_evidence" in mainBody
+    assert '"SUCCEEDED" "${deployedCommit}" "${targetCommit}" "" "false" "true"' in mainBody
+    assert '"PENDING" "${deployedCommit}" "${targetCommit}"' in mainBody
+    assert '"SUCCEEDED" "${targetCommit}" "${targetCommit}" "" "true"' in mainBody
+    assert 'STATUS_FAILURE_CODE="REQUIRED_CHECKS_FAILED"' in mainBody
+    assert 'STATUS_FAILURE_CODE="GITHUB_CHECKS_API_FAILED"' in mainBody
+    assert 'STATUS_FAILURE_CODE="DEPLOYMENT_FAILED"' in mainBody
+    assert "trap sync_on_exit EXIT" in mainBody
+    assert '.status == "PASS"' in script
+    assert "$previous.requiredChecks" in script
+    assert "reuseVerifiedChecks" in script
+
+
 def testGitHubSyncRepairsInfrastructureWithoutQuarantiningKnownGoodCommit() -> None:
     script = readScript("sync-from-github.sh")
     mainBody = script.split("main() {", 1)[1].split('\n}\n\nmain "$@"', 1)[0]
@@ -369,3 +429,56 @@ def testOperationalBootstrapIncludesNginxSystemdInstaller() -> None:
     assert "install-nginx-systemd-override.sh \\" in script
     assert '"${bootstrapRelease}/install-nginx-systemd-override.sh"' in script
     assert "EVENTSHOCK_GITHUB_BRANCH=main" in script
+
+
+def testControlledRestartVerifierIsInstalledButNeverRebootsImplicitly() -> None:
+    installer = readScript("install-github-sync.sh")
+    verifier = readScript("verify-restart-recovery.sh")
+
+    assert "verify-restart-recovery.sh \\" in installer
+    assert "eventshock-restart-verification.service" in installer
+    assert "ConditionPathExists=/var/lib/eventshock-restart-verification/pending.json" in installer
+    assert "After=docker.service nginx.service network-online.target" in installer
+    assert "systemctl enable eventshock-restart-verification.service" in installer
+
+    assert 'requestReboot="false"' in verifier
+    assert '[[ "${requestReboot}" == "true" ]]' in verifier
+    assert "REBOOT_EVENTSHOCK_PRODUCTION_IN_MAINTENANCE_WINDOW" in verifier
+    assert verifier.index('[[ "${EVENTSHOCK_REBOOT_CONFIRMATION:-}"') < verifier.index(
+        "systemctl reboot"
+    )
+
+
+def testControlledRestartVerifierRequiresDirectRecoveryEvidence() -> None:
+    verifier = readScript("verify-restart-recovery.sh")
+
+    for evidenceName in (
+        "runtimeRecovery",
+        "releaseAndContainers",
+        "nginxSystemdDependency",
+        "privatePorts",
+        "caddyToBaotaToApp",
+        "publicHealth",
+        "baotaTraffic",
+        "baotaScheduledTask",
+        "authenticatedApiAndSse",
+    ):
+        assert f'"{evidenceName}"' in verifier
+    assert 'all(.[]; .status == "PASS")' in verifier
+    assert 'overallStatus="INCOMPLETE"' in verifier
+    assert "restart-verification-" in verifier
+    assert verifier.index('if [[ "${overallStatus}" == "PASS" ]]') < verifier.index(
+        'rm -f -- "${PENDING_FILE}"'
+    )
+    assert "Cookie 文件只读取、不复制" in verifier
+
+
+def testControlledRestartVerifierHasValidBashSyntax() -> None:
+    result = subprocess.run(
+        ["bash", "-n", str(SCRIPTS_DIR / "verify-restart-recovery.sh")],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr

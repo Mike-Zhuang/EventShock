@@ -74,6 +74,40 @@ SYSTEM_ACCOUNT_IDS = (
     "opening-auction-seller",
     "synthetic-event-flow",
 )
+TRACE_PHASE_BY_EVENT_TYPE = {
+    "FACT_ARRIVED": "EVIDENCE",
+    "CLARIFICATION_ARRIVED": "EVIDENCE",
+    "SOCIAL_PROPAGATED": "EVIDENCE",
+    "OBSERVATION_CREATED": "OBSERVATION",
+    "BELIEF_UPDATED": "BELIEF",
+    "ACTION_INTENT_CREATED": "INTENT",
+    "ORDER_EXPIRED_BEFORE_ARRIVAL": "INTENT",
+    "RISK_CHECK": "RISK",
+    "ORDER_REJECTED_MARKET_HALTED": "RISK",
+    "ORDER_ARRIVED": "ORDER",
+    "ORDER_SUBMITTED": "ORDER",
+    "SYSTEM_ORDER_SUBMITTED": "ORDER",
+    "TRADE_EXECUTED": "TRADE",
+}
+EVENT_PACK_TRACE_TYPES = {
+    "FACT_ARRIVED",
+    "CLARIFICATION_ARRIVED",
+    "SOCIAL_PROPAGATED",
+    "SYSTEM_ORDER_SUBMITTED",
+}
+AGENT_BEHAVIOR_TRACE_TYPES = {
+    "OBSERVATION_CREATED",
+    "BELIEF_UPDATED",
+    "ACTION_INTENT_CREATED",
+    "ORDER_EXPIRED_BEFORE_ARRIVAL",
+    "ORDER_ARRIVED",
+    "ORDER_SUBMITTED",
+}
+MARKET_MECHANISM_TRACE_TYPES = {
+    "RISK_CHECK",
+    "ORDER_REJECTED_MARKET_HALTED",
+    "TRADE_EXECUTED",
+}
 
 
 @dataclass(slots=True, frozen=True)
@@ -140,7 +174,10 @@ class SimulationState:
     protectedUnfilled: int = 0
     orderCounter: int = 0
     traceCounter: int = 0
+    tracePhaseCounters: dict[tuple[int, str], int] = field(default_factory=dict)
     importantTraceIds: set[str] = field(default_factory=set)
+    orderSummaryCounter: int = 0
+    orderExecutionSummaries: dict[str, dict[str, Any]] = field(default_factory=dict)
     recordedTradeCount: int = 0
     ledgerPositions: dict[str, int] = field(default_factory=dict)
     ledgerCashChangeCents: dict[str, int] = field(default_factory=dict)
@@ -149,6 +186,11 @@ class SimulationState:
     cognitiveOrderCount: int = 0
     cognitiveAssignments: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     cognitiveUseCount: dict[str, int] = field(default_factory=dict)
+    validCognitiveSignalsConsumed: int = 0
+    cognitiveChangedIntentCount: int = 0
+    cognitiveInfluencedOrderCount: int = 0
+    cognitiveRiskBlockedCount: int = 0
+    cognitiveNoActionCount: int = 0
     latestInformationTraceByAgent: dict[str, str] = field(default_factory=dict)
     receiptTraceIds: dict[str, str] = field(default_factory=dict)
     factTraceId: str | None = None
@@ -215,7 +257,7 @@ def runScenario(
     )
     _initializeFlows(state)
     _initializeLedger(state)
-    _recordTrace(
+    configurationTraceId = _recordTrace(
         state,
         step=0,
         eventType="SCENARIO_CONFIGURATION_APPLIED",
@@ -224,6 +266,19 @@ def runScenario(
         summary="The simulator resolved market and population fields into executable mechanisms.",
         summaryZh="仿真器已将市场与人口字段解析为可执行机制。",
         payload=_runtimeConfiguration(state),
+    )
+    _recordTrace(
+        state,
+        step=0,
+        eventType="REGISTERED_INTERVENTION_APPLIED",
+        agentId=None,
+        parentTraceId=configurationTraceId,
+        summary="The run applied its registered intervention parameter at the declared value.",
+        summaryZh="本次运行已按声明值应用唯一注册干预参数。",
+        payload={
+            "parameter": state.parameter,
+            "value": state.value,
+        },
     )
 
     agentById = {agent.agentId: agent for agent in population}
@@ -464,6 +519,7 @@ def runScenario(
         "systemMetrics": systemMetrics,
         "eventQueueAudit": eventQueueAudit,
         "traces": state.traces,
+        "orderExecutionSummary": _finalizeOrderExecutionSummaries(state),
         "invariants": invariants,
     }
     eventLogHash = hashlib.sha256(
@@ -1450,6 +1506,7 @@ def _recordHaltRejection(
     agentId: str,
     parentTraceId: str | None,
     quantity: int,
+    cognitiveEffect: Mapping[str, Any] | None = None,
 ) -> None:
     _recordTrace(
         state,
@@ -1463,6 +1520,9 @@ def _recordHaltRejection(
             "requestedQuantity": quantity,
             "marketState": state.marketState,
             "haltCount": state.haltCount,
+            **dict(cognitiveEffect or {}),
+            "riskDecision": "MARKET_HALTED",
+            "noActionReason": "MARKET_HALTED",
         },
     )
 
@@ -1585,6 +1645,7 @@ def _submitSystemFlow(
         timeInForce=TimeInForce.IOC,
         maxOrderQuantity=1_000,
         maxAbsolutePosition=500_000,
+        trackExecutionSummary=True,
     )
     riskTraceId = _recordRiskTrace(
         state,
@@ -1611,6 +1672,7 @@ def _submitSystemFlow(
             "reasonCode": reason,
         },
     )
+    _linkOrderTrace(state, orderId, orderTraceId)
     _applyTrades(state, report.trades, agentById, orderTraceId)
     state.protectedUnfilled += quantity - sum(trade.quantity for trade in report.trades)
     _releaseIocRemainder(state, report)
@@ -1707,6 +1769,58 @@ def _activateAgents(
         if not cognitiveReady and activationDraw > activationProbability:
             continue
 
+        cognitiveEffect: dict[str, Any] = {}
+        if cognitiveReady and cognitiveSignal is not None:
+            shadowIntent = _ruleShadowIntent(state, agent, context, step)
+            intent = makeCognitiveOrderIntent(agent, context, cognitiveSignal)
+            state.cognitiveUseCount[agent.agentId] = cognitiveUseIndex + 1
+            fallbackUsed = bool(cognitiveSignal.get("fallbackUsed", False))
+            validModelSignal = _validModelCognitiveSignal(cognitiveSignal)
+            changedIntent = _intentsDiffer(intent, shadowIntent)
+            noActionReason = _cognitiveNoActionReason(cognitiveSignal, intent)
+            decisionId = (
+                intent.sourceDecisionId
+                if intent is not None
+                else _optionalString(cognitiveSignal.get("decisionId"))
+            )
+            if validModelSignal:
+                state.validCognitiveSignalsConsumed += 1
+                if changedIntent:
+                    state.cognitiveChangedIntentCount += 1
+                if intent is None:
+                    state.cognitiveNoActionCount += 1
+            cognitiveEffect = {
+                "decisionId": decisionId,
+                "validModelSignal": validModelSignal,
+                "shadowIntent": _serializeIntent(shadowIntent),
+                "changedIntent": changedIntent,
+                "noActionReason": noActionReason,
+                "riskDecision": None,
+            }
+            beliefPayload = {
+                "source": ("RULE_FALLBACK_BELIEF_SIGNAL" if fallbackUsed else "LLM_BELIEF_SIGNAL"),
+                "decisionRound": cognitiveSignal.get("decisionRound"),
+                "activeFromStep": activeFromStep,
+                "direction": cognitiveSignal.get("direction"),
+                "actionPreference": cognitiveSignal.get("actionPreference"),
+                "evidenceIds": cognitiveSignal.get("evidenceIds", []),
+                "confidence": cognitiveSignal.get("confidence"),
+                "uncertainty": cognitiveSignal.get("uncertainty"),
+                "fallbackUsed": fallbackUsed,
+                "repairUsed": bool(cognitiveSignal.get("repairUsed", False)),
+                "failureReason": cognitiveSignal.get("failureReason"),
+                "failureCodes": cognitiveSignal.get("failureCodes", []),
+                **cognitiveEffect,
+            }
+        else:
+            intent = _ruleShadowIntent(state, agent, context, step)
+            beliefPayload = {
+                "source": "RULE_AGENT",
+                "agentType": agent.agentType.value,
+                "actionPreference": intent.side.value if intent is not None else "HOLD",
+                "confidence": round(intent.urgency, 6) if intent is not None else 0.0,
+            }
+
         parentTraceId = state.latestInformationTraceByAgent.get(agent.agentId)
         observationTraceId = _recordTrace(
             state,
@@ -1723,41 +1837,9 @@ def _activateAgents(
                 "sentiment": round(sentiment, 6),
                 "networkEvidenceAvailable": parentTraceId is not None,
                 "cognitive": cognitiveReady,
+                **cognitiveEffect,
             },
         )
-        if cognitiveReady and cognitiveSignal is not None:
-            intent = makeCognitiveOrderIntent(agent, context, cognitiveSignal)
-            state.cognitiveUseCount[agent.agentId] = cognitiveUseIndex + 1
-            fallbackUsed = bool(cognitiveSignal.get("fallbackUsed", False))
-            beliefPayload = {
-                "source": ("RULE_FALLBACK_BELIEF_SIGNAL" if fallbackUsed else "LLM_BELIEF_SIGNAL"),
-                "decisionId": cognitiveSignal.get("decisionId"),
-                "decisionRound": cognitiveSignal.get("decisionRound"),
-                "activeFromStep": activeFromStep,
-                "direction": cognitiveSignal.get("direction"),
-                "actionPreference": cognitiveSignal.get("actionPreference"),
-                "evidenceIds": cognitiveSignal.get("evidenceIds", []),
-                "confidence": cognitiveSignal.get("confidence"),
-                "uncertainty": cognitiveSignal.get("uncertainty"),
-                "fallbackUsed": fallbackUsed,
-                "repairUsed": bool(cognitiveSignal.get("repairUsed", False)),
-                "failureReason": cognitiveSignal.get("failureReason"),
-                "failureCodes": cognitiveSignal.get("failureCodes", []),
-            }
-        else:
-            behaviorRandom = random.Random(
-                _derivedSeed(state.seed, f"behavior:{step}:{agent.agentId}")
-            )
-            orderSizeRandom = random.Random(
-                _derivedSeed(state.seed, f"orderSize:{step}:{agent.agentId}")
-            )
-            intent = makeOrderIntent(agent, context, behaviorRandom, orderSizeRandom)
-            beliefPayload = {
-                "source": "RULE_AGENT",
-                "agentType": agent.agentType.value,
-                "actionPreference": intent.side.value if intent is not None else "HOLD",
-                "confidence": round(intent.urgency, 6) if intent is not None else 0.0,
-            }
 
         if intent is not None and intent.limitPriceTicks is not None:
             intent = replace(
@@ -1788,7 +1870,12 @@ def _activateAgents(
                 parentTraceId=beliefTraceId,
                 summary="Deterministic policy produced a no-order intent.",
                 summaryZh="确定性策略生成了不下单意图。",
-                payload={"proposedQuantity": 0, "status": "NO_ORDER"},
+                payload={
+                    "proposedQuantity": 0,
+                    "status": "NO_ORDER",
+                    "cognitive": cognitiveReady,
+                    **cognitiveEffect,
+                },
             )
             continue
 
@@ -1809,6 +1896,7 @@ def _activateAgents(
                 "generatedLimitPriceTicks": intent.limitPriceTicks,
                 "policyTrace": list(intent.policyTrace),
                 "cognitive": intent.cognitive,
+                **cognitiveEffect,
             },
         )
         arrivalTimestampMs = activationTimestampMs + state.runtime.latencyMs
@@ -1827,6 +1915,9 @@ def _activateAgents(
                     "latencyMs": state.runtime.latencyMs,
                     "arrivalTimestampMs": arrivalTimestampMs,
                     "simulationEndTimestampMs": simulationEndTimestamp,
+                    **cognitiveEffect,
+                    "riskDecision": "NOT_REACHED",
+                    "noActionReason": "ORDER_EXPIRED_BEFORE_ARRIVAL",
                 },
             )
             continue
@@ -1844,6 +1935,7 @@ def _activateAgents(
                 "activationTimestampMs": activationTimestampMs,
                 "arrivalTimestampMs": arrivalTimestampMs,
                 "latencyMs": state.runtime.latencyMs,
+                "cognitiveEffect": cognitiveEffect,
             },
             eventId=f"agent-arrival-{state.latencyScheduledOrders:08d}",
         )
@@ -1861,14 +1953,22 @@ def _processAgentOrderArrival(
     if not isinstance(intent, OrderIntent):
         raise RuntimeError("scheduled agent order contains an invalid intent")
     intentTraceId = str(payload["intentTraceId"])
+    rawCognitiveEffect = payload.get("cognitiveEffect")
+    cognitiveEffect = dict(rawCognitiveEffect) if isinstance(rawCognitiveEffect, Mapping) else {}
     if state.marketState == "HALTED":
         state.haltRejectedOrders += 1
+        if (
+            cognitiveEffect.get("validModelSignal") is True
+            and cognitiveEffect.get("changedIntent") is True
+        ):
+            state.cognitiveRiskBlockedCount += 1
         _recordHaltRejection(
             state,
             step,
             agentId,
             intentTraceId,
             intent.quantity,
+            cognitiveEffect=cognitiveEffect,
         )
         return
     _recordTrace(
@@ -1884,6 +1984,7 @@ def _processAgentOrderArrival(
             "activationTimestampMs": payload["activationTimestampMs"],
             "arrivalTimestampMs": payload["arrivalTimestampMs"],
             "latencyMs": payload["latencyMs"],
+            **cognitiveEffect,
         },
     )
     _submitAgentIntent(
@@ -1894,6 +1995,7 @@ def _processAgentOrderArrival(
         intentTraceId,
         agentById,
         int(payload["referencePriceTicks"]),
+        cognitiveEffect,
     )
 
 
@@ -1918,6 +2020,84 @@ def _activationProbability(
     return max(0.0, min(1.0, probability))
 
 
+def _ruleShadowIntent(
+    state: SimulationState,
+    agent: AgentState,
+    context: MarketContext,
+    step: int,
+) -> OrderIntent | None:
+    """以规则路径原本会使用的同一上下文和确定性随机流生成影子意图。"""
+
+    behaviorRandom = random.Random(_derivedSeed(state.seed, f"behavior:{step}:{agent.agentId}"))
+    orderSizeRandom = random.Random(_derivedSeed(state.seed, f"orderSize:{step}:{agent.agentId}"))
+    return makeOrderIntent(agent, context, behaviorRandom, orderSizeRandom)
+
+
+def _serializeIntent(intent: OrderIntent | None) -> dict[str, Any]:
+    if intent is None:
+        return {
+            "status": "NO_ORDER",
+            "side": None,
+            "quantity": 0,
+            "reasonCode": None,
+        }
+    return {
+        "status": "ORDER",
+        "side": intent.side.value,
+        "quantity": intent.quantity,
+        "reasonCode": intent.reason,
+    }
+
+
+def _intentsDiffer(
+    cognitiveIntent: OrderIntent | None,
+    shadowIntent: OrderIntent | None,
+) -> bool:
+    if cognitiveIntent is None or shadowIntent is None:
+        return cognitiveIntent is not shadowIntent
+    return (
+        cognitiveIntent.side is not shadowIntent.side
+        or cognitiveIntent.quantity != shadowIntent.quantity
+    )
+
+
+def _validModelCognitiveSignal(signal: Mapping[str, Any]) -> bool:
+    actionPreference = signal.get("actionPreference")
+    return (
+        bool(_optionalString(signal.get("decisionId")))
+        and signal.get("fallbackUsed") is not True
+        and not signal.get("failureReason")
+        and not signal.get("failureCodes")
+        and actionPreference
+        in {
+            "INCREASE",
+            "REDUCE",
+            "HOLD",
+            "EXIT",
+            "ABSTAIN",
+            "POST_ONLY",
+        }
+    )
+
+
+def _cognitiveNoActionReason(
+    signal: Mapping[str, Any],
+    intent: OrderIntent | None,
+) -> str | None:
+    if intent is not None:
+        return None
+    actionPreference = signal.get("actionPreference")
+    if actionPreference == "HOLD":
+        return "COGNITIVE_HOLD"
+    if actionPreference == "ABSTAIN":
+        return "COGNITIVE_ABSTAIN"
+    return "COGNITIVE_POLICY_NO_ORDER"
+
+
+def _optionalString(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
 def _submitAgentIntent(
     state: SimulationState,
     step: int,
@@ -1926,6 +2106,7 @@ def _submitAgentIntent(
     intentTraceId: str,
     agentById: dict[str, AgentState],
     referencePriceTicks: int,
+    cognitiveEffect: Mapping[str, Any],
 ) -> None:
     _cancelAgentOrders(state, agent.agentId)
     state.orderCounter += 1
@@ -1970,6 +2151,15 @@ def _submitAgentIntent(
         timeInForce=timeInForce,
         maxOrderQuantity=80,
         maxAbsolutePosition=agent.maxAbsolutePosition,
+        trackExecutionSummary=(
+            len(state.orderExecutionSummaries) < 240
+            or (
+                len(state.orderExecutionSummaries) < 480
+                and (
+                    intent.cognitive or intent.forced or intent.reason == "stop-loss-triggered-sell"
+                )
+            )
+        ),
     )
     riskTraceId = _recordRiskTrace(
         state,
@@ -1977,14 +2167,25 @@ def _submitAgentIntent(
         agentId=agent.agentId,
         parentTraceId=intentTraceId,
         risk=risk,
+        cognitiveEffect=cognitiveEffect,
     )
     flow = state.agentFlows[agent.agentType.value]
     if report is None:
         flow["riskRejectedCount"] += 1
+        if (
+            cognitiveEffect.get("validModelSignal") is True
+            and cognitiveEffect.get("changedIntent") is True
+        ):
+            state.cognitiveRiskBlockedCount += 1
         return
     flow["orderCount"] += 1
     if intent.cognitive:
         state.cognitiveOrderCount += 1
+        if (
+            cognitiveEffect.get("validModelSignal") is True
+            and cognitiveEffect.get("changedIntent") is True
+        ):
+            state.cognitiveInfluencedOrderCount += 1
     orderTraceId = _recordTrace(
         state,
         step=step,
@@ -2003,9 +2204,18 @@ def _submitAgentIntent(
             "limitPriceTicks": priceTicks,
             "reasonCode": intent.reason,
             "cognitive": intent.cognitive,
+            **cognitiveEffect,
+            "riskDecision": risk.decision.value,
         },
     )
-    _applyTrades(state, report.trades, agentById, orderTraceId)
+    _linkOrderTrace(state, orderId, orderTraceId)
+    _applyTrades(
+        state,
+        report.trades,
+        agentById,
+        orderTraceId,
+        cognitiveEffect=cognitiveEffect,
+    )
     executedQuantity = sum(
         trade.quantity for trade in report.trades if trade.takerAgentId == agent.agentId
     )
@@ -2032,6 +2242,7 @@ def _submitLimitWithRisk(
     maxOrderQuantity: int,
     maxAbsolutePosition: int,
     allowShortSelling: bool | None = None,
+    trackExecutionSummary: bool = False,
 ) -> tuple[ExecutionReport | None, OrderRiskResult]:
     if state.ledger is None:
         risk = OrderRiskResult(
@@ -2055,6 +2266,20 @@ def _submitLimitWithRisk(
         )
     if risk.decision is RiskDecision.REJECT:
         state.ledgerRejectedOrders += 1
+        if trackExecutionSummary:
+            _recordOrderExecutionSummary(
+                state,
+                orderId=orderId,
+                agentId=agentId,
+                side=side,
+                priceTicks=priceTicks,
+                requestedQuantity=quantity,
+                approvedQuantity=0,
+                step=step,
+                timeInForce=timeInForce,
+                riskDecision=risk.decision,
+                rejected=True,
+            )
         return None, risk
     if risk.decision is RiskDecision.MODIFY:
         state.ledgerModifiedOrders += 1
@@ -2067,6 +2292,20 @@ def _submitLimitWithRisk(
         step=step,
         timeInForce=timeInForce,
     )
+    if trackExecutionSummary:
+        _recordOrderExecutionSummary(
+            state,
+            orderId=orderId,
+            agentId=agentId,
+            side=side,
+            priceTicks=priceTicks,
+            requestedQuantity=quantity,
+            approvedQuantity=report.order.quantity,
+            step=step,
+            timeInForce=timeInForce,
+            riskDecision=risk.decision,
+            rejected=False,
+        )
     return report, risk
 
 
@@ -2077,6 +2316,7 @@ def _recordRiskTrace(
     agentId: str,
     parentTraceId: str | None,
     risk: OrderRiskResult,
+    cognitiveEffect: Mapping[str, Any] | None = None,
 ) -> str:
     return _recordTrace(
         state,
@@ -2092,6 +2332,13 @@ def _recordRiskTrace(
             "approvedQuantity": risk.approvedQuantity,
             "modifications": list(risk.modifications),
             "rejectionReason": risk.rejectionReason,
+            **dict(cognitiveEffect or {}),
+            "riskDecision": risk.decision.value,
+            "noActionReason": (
+                "RISK_REJECTED"
+                if risk.decision is RiskDecision.REJECT
+                else (cognitiveEffect or {}).get("noActionReason")
+            ),
         },
     )
 
@@ -2104,6 +2351,7 @@ def _cancelAgentOrders(state: SimulationState, agentId: str) -> int:
     for orderId in orderIds:
         if state.orderBook.cancelOrder(orderId):
             cancelled += 1
+            _closeOrderExecutionSummary(state, orderId, closure="CANCELLED")
             if state.ledger is not None and orderId in state.ledger.reservations:
                 state.ledger.releaseOrder(orderId)
     return cancelled
@@ -2111,6 +2359,7 @@ def _cancelAgentOrders(state: SimulationState, agentId: str) -> int:
 
 def _releaseIocRemainder(state: SimulationState, report: ExecutionReport) -> None:
     orderId = report.order.orderId
+    _closeOrderExecutionSummary(state, orderId, closure="IOC_EXPIRED")
     if state.ledger is not None and orderId in state.ledger.reservations:
         state.ledger.releaseOrder(orderId)
 
@@ -2140,6 +2389,8 @@ def _applyTrades(
     trades: list[Trade],
     agentById: dict[str, AgentState],
     parentTraceId: str,
+    *,
+    cognitiveEffect: Mapping[str, Any] | None = None,
 ) -> None:
     for trade in trades:
         if trade.buyerAgentId == trade.sellerAgentId:
@@ -2187,7 +2438,7 @@ def _applyTrades(
             state.totalBuyVolume += trade.quantity
         else:
             state.totalSellVolume += trade.quantity
-        _recordTrace(
+        tradeTraceId = _recordTrace(
             state,
             step=trade.step,
             eventType="TRADE_EXECUTED",
@@ -2204,8 +2455,11 @@ def _applyTrades(
                 "takerAgentId": trade.takerAgentId,
                 "buyOrderId": trade.buyOrderId,
                 "sellOrderId": trade.sellOrderId,
+                **dict(cognitiveEffect or {}),
             },
         )
+        _recordOrderFill(state, trade.buyOrderId, trade, tradeTraceId)
+        _recordOrderFill(state, trade.sellOrderId, trade, tradeTraceId)
 
 
 def _syncAgentFromLedger(state: SimulationState, agent: AgentState | None) -> None:
@@ -2397,6 +2651,7 @@ def _calculateMetrics(
         "forcedLiquidationVolume": state.forcedLiquidationVolume,
         "ledgerRejectedOrders": state.ledgerRejectedOrders,
         "cognitiveOrderCount": state.cognitiveOrderCount,
+        **_cognitiveEffectMetrics(state),
         "benchmarkReturnPct": round(benchmarkReturnPct, 6),
         "abnormalReturnPct": round(
             assetReturnPct - state.runtime.benchmarkBeta * benchmarkReturnPct,
@@ -2446,12 +2701,40 @@ def _systemMetrics(
         "cognitiveOrders": state.cognitiveOrderCount,
         "cognitiveSignalsConsumed": sum(state.cognitiveUseCount.values()),
         "cognitiveAgentsUsed": len(state.cognitiveUseCount),
+        **_cognitiveEffectMetrics(state),
         "feeBps": state.runtime.tradeFeeBps,
         "feeCollectorCashCents": state.ledger.feeCollectorCashCents if state.ledger else 0,
         "volatilityHaltCount": state.haltCount,
         "haltedSteps": state.haltedSteps,
         "latencyScheduledOrders": state.latencyScheduledOrders,
         "latencyExpiredOrders": state.latencyExpiredOrders,
+    }
+
+
+def _cognitiveEffectMetrics(state: SimulationState) -> dict[str, int | float]:
+    validDecisionCount = sum(
+        _validModelCognitiveSignal(signal)
+        for signals in state.cognitiveAssignments.values()
+        for signal in signals
+    )
+    consumedCount = sum(state.cognitiveUseCount.values())
+    validConsumedCount = state.validCognitiveSignalsConsumed
+    return {
+        "validCognitionDecisionCount": validDecisionCount,
+        "cognitionSignalConsumedCount": consumedCount,
+        "validCognitionSignalConsumedCount": validConsumedCount,
+        "cognitionChangedIntentCount": state.cognitiveChangedIntentCount,
+        "cognitionInfluencedOrderCount": state.cognitiveInfluencedOrderCount,
+        "cognitionRiskBlockedCount": state.cognitiveRiskBlockedCount,
+        "cognitionNoActionCount": state.cognitiveNoActionCount,
+        "cognitionEffectRate": round(
+            state.cognitiveChangedIntentCount / max(validConsumedCount, 1),
+            6,
+        ),
+        "cognitionOrderEffectRate": round(
+            state.cognitiveInfluencedOrderCount / max(validConsumedCount, 1),
+            6,
+        ),
     }
 
 
@@ -2515,6 +2798,148 @@ def _validateLedgerInvariants(state: SimulationState) -> dict[str, int | bool]:
     }
 
 
+def _recordOrderExecutionSummary(
+    state: SimulationState,
+    *,
+    orderId: str,
+    agentId: str,
+    side: Side,
+    priceTicks: int,
+    requestedQuantity: int,
+    approvedQuantity: int,
+    step: int,
+    timeInForce: TimeInForce,
+    riskDecision: RiskDecision,
+    rejected: bool,
+) -> None:
+    if orderId in state.orderExecutionSummaries:
+        raise RuntimeError(f"duplicate order execution summary: {orderId}")
+    state.orderSummaryCounter += 1
+    state.orderExecutionSummaries[orderId] = {
+        "orderId": orderId,
+        "orderTraceId": None,
+        "agentId": agentId,
+        "side": side.value,
+        "submissionStep": step,
+        "submissionSequence": state.orderSummaryCounter,
+        "timeInForce": timeInForce.value,
+        "limitPriceTicks": priceTicks,
+        "limitPrice": round(priceTicks / state.runtime.priceScale, 4),
+        "requestedQuantity": requestedQuantity,
+        "approvedQuantity": approvedQuantity,
+        "unapprovedQuantity": requestedQuantity - approvedQuantity,
+        "cumulativeFilledQuantity": 0,
+        "remainingQuantity": approvedQuantity,
+        "vwapPriceTicks": None,
+        "vwapPrice": None,
+        "fillCount": 0,
+        "tradeIds": [],
+        "tradeTraceIds": [],
+        "riskDecision": riskDecision.value,
+        "finalStatus": "REJECTED" if rejected else "RESTING",
+        "terminal": rejected,
+        "closure": "RISK_REJECTED" if rejected else None,
+        "_executedNotionalTicks": 0,
+    }
+
+
+def _linkOrderTrace(state: SimulationState, orderId: str, traceId: str) -> None:
+    summary = state.orderExecutionSummaries.get(orderId)
+    if summary is None:
+        return
+    summary["orderTraceId"] = traceId
+
+
+def _recordOrderFill(
+    state: SimulationState,
+    orderId: str,
+    trade: Trade,
+    tradeTraceId: str,
+) -> None:
+    summary = state.orderExecutionSummaries.get(orderId)
+    if summary is None:
+        return
+    cumulativeQuantity = int(summary["cumulativeFilledQuantity"]) + trade.quantity
+    approvedQuantity = int(summary["approvedQuantity"])
+    if cumulativeQuantity > approvedQuantity:
+        raise RuntimeError(f"order execution exceeds approved quantity: {orderId}")
+    executedNotionalTicks = int(summary["_executedNotionalTicks"]) + (
+        trade.priceTicks * trade.quantity
+    )
+    summary["_executedNotionalTicks"] = executedNotionalTicks
+    summary["cumulativeFilledQuantity"] = cumulativeQuantity
+    summary["remainingQuantity"] = approvedQuantity - cumulativeQuantity
+    vwapPriceTicks = round(executedNotionalTicks / cumulativeQuantity, 6)
+    summary["vwapPriceTicks"] = vwapPriceTicks
+    summary["vwapPrice"] = round(vwapPriceTicks / state.runtime.priceScale, 4)
+    summary["fillCount"] = int(summary["fillCount"]) + 1
+    summary["tradeIds"].append(trade.tradeId)
+    summary["tradeTraceIds"].append(tradeTraceId)
+    if cumulativeQuantity == approvedQuantity:
+        summary["finalStatus"] = "FILLED"
+        summary["terminal"] = True
+        summary["closure"] = "FILLED"
+    else:
+        summary["finalStatus"] = "PARTIALLY_FILLED"
+
+
+def _closeOrderExecutionSummary(
+    state: SimulationState,
+    orderId: str,
+    *,
+    closure: str,
+) -> None:
+    summary = state.orderExecutionSummaries.get(orderId)
+    if summary is None:
+        return
+    if summary["finalStatus"] == "REJECTED":
+        return
+    filledQuantity = int(summary["cumulativeFilledQuantity"])
+    remainingQuantity = int(summary["remainingQuantity"])
+    summary["terminal"] = True
+    summary["closure"] = "FILLED" if remainingQuantity == 0 else closure
+    if remainingQuantity == 0:
+        summary["finalStatus"] = "FILLED"
+    elif filledQuantity > 0:
+        summary["finalStatus"] = f"PARTIALLY_FILLED_{closure}"
+    else:
+        summary["finalStatus"] = f"UNFILLED_{closure}"
+
+
+def _finalizeOrderExecutionSummaries(state: SimulationState) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for summary in sorted(
+        state.orderExecutionSummaries.values(),
+        key=lambda item: int(item["submissionSequence"]),
+    ):
+        publicSummary = {key: value for key, value in summary.items() if not key.startswith("_")}
+        if not bool(publicSummary["terminal"]):
+            publicSummary["finalStatus"] = (
+                "PARTIALLY_FILLED_AT_SIMULATION_END"
+                if int(publicSummary["cumulativeFilledQuantity"]) > 0
+                else "RESTING_AT_SIMULATION_END"
+            )
+            publicSummary["closure"] = "SIMULATION_ENDED"
+        summaries.append(publicSummary)
+    return summaries
+
+
+def _tracePhase(eventType: str) -> str:
+    return TRACE_PHASE_BY_EVENT_TYPE.get(eventType, "MECHANISM")
+
+
+def _traceSourceLayer(eventType: str) -> str:
+    if eventType == "REGISTERED_INTERVENTION_APPLIED":
+        return "REGISTERED_INTERVENTION"
+    if eventType in EVENT_PACK_TRACE_TYPES:
+        return "EVENT_PACK_TRIGGER"
+    if eventType in AGENT_BEHAVIOR_TRACE_TYPES:
+        return "AGENT_BEHAVIOR"
+    if eventType in MARKET_MECHANISM_TRACE_TYPES:
+        return "DETERMINISTIC_MARKET_MECHANISM"
+    return "SCENARIO_MECHANISM"
+
+
 def _recordTrace(
     state: SimulationState,
     *,
@@ -2527,6 +2952,10 @@ def _recordTrace(
     payload: dict[str, Any],
 ) -> str:
     state.traceCounter += 1
+    phase = _tracePhase(eventType)
+    phaseCounterKey = (step, phase)
+    phaseSequence = state.tracePhaseCounters.get(phaseCounterKey, 0) + 1
+    state.tracePhaseCounters[phaseCounterKey] = phaseSequence
     traceDigest = hashlib.blake2s(
         f"{state.seed}:{step}:{state.traceCounter}:{eventType}".encode(),
         digest_size=8,
@@ -2553,9 +2982,14 @@ def _recordTrace(
             {
                 "traceId": traceId,
                 "parentTraceId": parentTraceId,
+                "globalSequence": state.traceCounter,
                 "step": step,
+                "phase": phase,
+                "phaseSequence": phaseSequence,
                 "eventType": eventType,
                 "agentId": agentId,
+                "sourceLayer": _traceSourceLayer(eventType),
+                "isInterventionDifference": False,
                 "summary": summary,
                 "summaryZh": summaryZh,
                 "important": isImportant,

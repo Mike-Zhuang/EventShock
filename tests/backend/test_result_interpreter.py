@@ -24,11 +24,13 @@ from backend.app.cognition import (
 from backend.app.cognition.gateway import validateEvidenceReferences
 from backend.app.cognition.result_interpreter import (
     DEFAULT_RESULT_TOOLS,
+    INITIAL_RESULT_TOOLS,
     MAX_TOOL_CONTEXT_BYTES,
     buildResultIndex,
     executeResultTools,
     toolResultsPayload,
 )
+from backend.app.cognition.result_semantics import SemanticViolationCode
 from backend.app.cognition.streaming import ModelStreamProgress, ModelStreamStage
 from backend.app.schemas import ResultInterpretationChatRequest
 
@@ -160,6 +162,42 @@ def answerWithReferences(
         ),
         grounding_references=references,
         follow_up_suggestions=("Which interval matters most?",),
+    )
+
+
+def metricAnswer(statement: str) -> ResultInterpretationAnswer:
+    return ResultInterpretationAnswer(
+        answer=f"{statement} [result:metric-summary]",
+        grounding_references=("result:metric-summary",),
+        follow_up_suggestions=("Which limitation matters most?",),
+    )
+
+
+def validPrimaryAnswer(
+    references: tuple[str, ...],
+    *,
+    includeSummary: bool,
+    language: str = "en",
+) -> ResultInterpretationAnswer:
+    citations = " ".join(f"[{reference}]" for reference in references)
+    if language == "zh-CN":
+        answer = (
+            f"maxSpreadBps 的配对中位变化上升 1.5，95% 区间为 [-0.2, 3.1]，且跨过零。{citations}"
+        )
+    else:
+        answer = (
+            "The maxSpreadBps paired median increased by 1.5, and its 95% interval "
+            f"[-0.2, 3.1] crosses zero. {citations}"
+        )
+    return ResultInterpretationAnswer(
+        answer=answer,
+        analysis_summary=(
+            "Checked the paired design, result boundary, and selected evidence slices."
+            if includeSummary
+            else None
+        ),
+        grounding_references=references,
+        follow_up_suggestions=("Which limitation matters most?",),
     )
 
 
@@ -336,10 +374,10 @@ def test_all_tools_remain_within_aggregate_context_limit_for_large_result() -> N
     assert any(item.truncated for item in toolResults)
 
 
-def test_initial_interpretation_uses_all_read_only_tools_and_one_model_call() -> None:
+def test_initial_interpretation_uses_bounded_summary_tools_and_one_model_call() -> None:
     references = ("result:overview", "result:metric-summary", "result:limitations")
     service, harness = configuredService(
-        [FakeOutcome(answerWithReferences(references, includeSummary=True))]
+        [FakeOutcome(validPrimaryAnswer(references, includeSummary=True))]
     )
 
     run = asyncio.run(
@@ -356,10 +394,10 @@ def test_initial_interpretation_uses_all_read_only_tools_and_one_model_call() ->
     assert run.model_calls == 1
     assert run.planner_used is False
     assert run.usage.totalTokens == 150
-    assert len(run.tool_activity) == len(ResultEvidenceTool)
+    assert {activity.tool for activity in run.tool_activity} == set(INITIAL_RESULT_TOOLS)
     assert harness.schemas == [ResultInterpretationAnswer]
     assert harness.requests[0].allowedEvidenceIds == {
-        f"result:{tool.value.lower().replace('_', '-')}" for tool in ResultEvidenceTool
+        f"result:{tool.value.lower().replace('_', '-')}" for tool in INITIAL_RESULT_TOOLS
     }
     assert "SECRET RAW SOURCE BODY" not in harness.requests[0].userContent
     assert all(gateway.closed for gateway in harness.gateways)
@@ -368,6 +406,105 @@ def test_initial_interpretation_uses_all_read_only_tools_and_one_model_call() ->
     assert all(policy.max_transport_attempts == 1 for policy in harness.policies)
     assert harness.caches == [None]
     assert harness.requests[0].samplingConfig.max_tokens == 4_096
+    assert run.semantic_validation_status == "PASSED"
+    assert run.deterministic_fallback_used is False
+    assert run.semantic_violation_codes == ()
+
+
+def test_semantically_invalid_answer_is_repaired_once_before_return() -> None:
+    rejectedAnswer = metricAnswer("The maxSpreadBps paired median decreased by 1.5.")
+    repairedAnswer = metricAnswer(
+        "The maxSpreadBps paired median increased by 1.5, while the 95% interval "
+        "[-0.2, 3.1] crosses zero."
+    )
+    service, harness = configuredService([FakeOutcome(rejectedAnswer), FakeOutcome(repairedAnswer)])
+
+    run = asyncio.run(
+        service.interpretExperimentResult(
+            sessionId=SESSION_ID,
+            result=sampleResult(),
+            messages=({"role": "user", "content": "Explain the primary result."},),
+            language="en",
+            initial=True,
+            includeAnalysisSummary=False,
+        )
+    )
+
+    assert run.interpretation.answer.endswith(repairedAnswer.answer)
+    assert rejectedAnswer.answer not in run.interpretation.answer
+    assert run.semantic_validation_status == "REPAIRED"
+    assert run.deterministic_fallback_used is False
+    assert run.semantic_violation_codes == (SemanticViolationCode.DIRECTION_MISMATCH.value,)
+    assert run.repair_used is True
+    assert run.model_calls == 2
+    assert run.usage.totalTokens == 300
+    assert harness.schemas == [ResultInterpretationAnswer, ResultInterpretationAnswer]
+    assert "DIRECTION_MISMATCH" in harness.requests[1].userContent
+    assert "REJECTED_CANDIDATE_JSON" in harness.requests[1].userContent
+    assert harness.requests[1].allowedEvidenceIds == harness.requests[0].allowedEvidenceIds
+
+
+def test_semantic_repair_failure_returns_deterministic_fallback_only() -> None:
+    rejectedAnswer = metricAnswer("The maxSpreadBps paired median decreased by 1.5.")
+    service, harness = configuredService([FakeOutcome(rejectedAnswer), FakeOutcome(rejectedAnswer)])
+
+    run = asyncio.run(
+        service.interpretExperimentResult(
+            sessionId=SESSION_ID,
+            result=sampleResult(),
+            messages=({"role": "user", "content": "Explain the primary result."},),
+            language="en",
+            initial=True,
+            includeAnalysisSummary=True,
+        )
+    )
+
+    assert run.semantic_validation_status == "DETERMINISTIC_FALLBACK"
+    assert run.deterministic_fallback_used is True
+    assert run.semantic_violation_codes == (SemanticViolationCode.DIRECTION_MISMATCH.value,)
+    assert rejectedAnswer.answer not in run.interpretation.answer
+    assert "## Server-verified results" in run.interpretation.answer
+    assert set(run.interpretation.grounding_references) <= {
+        activity.evidence_id for activity in run.tool_activity
+    }
+    assert run.model_calls == 2
+    assert len(harness.requests) == 2
+
+
+def test_semantic_repair_gateway_error_also_uses_deterministic_fallback() -> None:
+    rejectedAnswer = metricAnswer("The maxSpreadBps paired median decreased by 1.5.")
+    service, _harness = configuredService(
+        [
+            FakeOutcome(rejectedAnswer),
+            FakeOutcome(
+                ModelGatewayError(
+                    FailureCode.MODEL_TIMEOUT,
+                    "semantic repair timed out",
+                    retryable=True,
+                    attempts=1,
+                    uncertainBillableAttempts=1,
+                )
+            ),
+        ]
+    )
+
+    run = asyncio.run(
+        service.interpretExperimentResult(
+            sessionId=SESSION_ID,
+            result=sampleResult(),
+            messages=({"role": "user", "content": "Explain the primary result."},),
+            language="en",
+            initial=True,
+            includeAnalysisSummary=False,
+        )
+    )
+
+    assert run.semantic_validation_status == "DETERMINISTIC_FALLBACK"
+    assert run.deterministic_fallback_used is True
+    assert run.failure_codes == (FailureCode.MODEL_TIMEOUT.value,)
+    assert run.transport_attempts == 2
+    assert run.uncertain_billable_attempts == 1
+    assert rejectedAnswer.answer not in run.interpretation.answer
 
 
 def test_follow_up_plans_tools_and_keeps_mandatory_boundary_slices() -> None:
@@ -420,8 +557,10 @@ def test_follow_up_plans_tools_and_keeps_mandatory_boundary_slices() -> None:
     ]
     assert [request.samplingConfig.thinking_enabled for request in harness.requests] == [
         False,
-        True,
+        False,
     ]
+    assert run.thinking_preference_enabled is True
+    assert run.thinking_enabled is False
 
 
 def test_follow_up_planner_failure_falls_back_to_all_bounded_tools() -> None:
@@ -477,7 +616,7 @@ def test_follow_up_planner_failure_falls_back_to_all_bounded_tools() -> None:
 def test_requested_reviewable_summary_has_safe_deterministic_fallback() -> None:
     references = ("result:overview",)
     service, _harness = configuredService(
-        [FakeOutcome(answerWithReferences(references, includeSummary=False))]
+        [FakeOutcome(validPrimaryAnswer(references, includeSummary=False, language="zh-CN"))]
     )
 
     run = asyncio.run(

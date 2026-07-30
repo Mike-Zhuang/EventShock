@@ -37,6 +37,7 @@ _SAFE_ASSISTANT_MESSAGE_FIELDS = frozenset(
         "toolActivity",
         "provider",
         "model",
+        "thinkingPreferenceEnabled",
         "thinkingEnabled",
         "streamed",
         "promptTokens",
@@ -50,6 +51,9 @@ _SAFE_ASSISTANT_MESSAGE_FIELDS = frozenset(
         "repairUsed",
         "plannerUsed",
         "plannerFallbackUsed",
+        "semanticValidationStatus",
+        "deterministicFallbackUsed",
+        "semanticViolationCodes",
         "failureCodes",
         "promptVersion",
         "latencyMs",
@@ -171,6 +175,7 @@ class Database:
                     completed_pairs INTEGER NOT NULL DEFAULT 0,
                     total_pairs INTEGER NOT NULL,
                     cancel_requested INTEGER NOT NULL DEFAULT 0,
+                    cognition_fallback_requested INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     started_at TEXT,
@@ -241,6 +246,21 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_study_runs_session_created
                 ON study_runs(session_id, created_at DESC);
+                CREATE TABLE IF NOT EXISTS cognition_telemetry (
+                    scope TEXT PRIMARY KEY CHECK(scope='site-wide'),
+                    calls INTEGER NOT NULL DEFAULT 0,
+                    cache_hits INTEGER NOT NULL DEFAULT 0,
+                    fallbacks INTEGER NOT NULL DEFAULT 0,
+                    invalid_outputs INTEGER NOT NULL DEFAULT 0,
+                    structured_successes INTEGER NOT NULL DEFAULT 0,
+                    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                    completion_tokens INTEGER NOT NULL DEFAULT 0,
+                    cached_tokens INTEGER NOT NULL DEFAULT 0,
+                    total_latency_ms REAL NOT NULL DEFAULT 0,
+                    failure_category_counts_json TEXT NOT NULL DEFAULT '{}',
+                    observed_since TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             # 旧版以匿名浏览器 session_id 作为所有权。新增 owner_user_id 后保留
@@ -279,6 +299,11 @@ class Database:
                 )
             if "invalidation_reason" not in experimentColumns:
                 connection.execute("ALTER TABLE experiments ADD COLUMN invalidation_reason TEXT")
+            if "cognition_fallback_requested" not in experimentColumns:
+                connection.execute(
+                    "ALTER TABLE experiments ADD COLUMN "
+                    "cognition_fallback_requested INTEGER NOT NULL DEFAULT 0"
+                )
             now = utcNow()
             connection.execute(
                 """
@@ -339,6 +364,104 @@ class Database:
                 return connection.execute("SELECT 1").fetchone()[0] == 1
         except sqlite3.Error:
             return False
+
+    def loadCognitionTelemetry(self) -> dict[str, Any] | None:
+        """读取不含会话、正文或凭据标签的站点级认知安全聚合。"""
+
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM cognition_telemetry WHERE scope='site-wide'"
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "calls": int(row["calls"]),
+            "cacheHits": int(row["cache_hits"]),
+            "fallbacks": int(row["fallbacks"]),
+            "invalidOutputs": int(row["invalid_outputs"]),
+            "structuredSuccesses": int(row["structured_successes"]),
+            "promptTokens": int(row["prompt_tokens"]),
+            "completionTokens": int(row["completion_tokens"]),
+            "cachedTokens": int(row["cached_tokens"]),
+            "totalLatencyMs": float(row["total_latency_ms"]),
+            "failureCategoryCounts": json.loads(row["failure_category_counts_json"]),
+            "observedSince": row["observed_since"],
+            "updatedAt": row["updated_at"],
+        }
+
+    def recordCognitionTelemetry(self, delta: dict[str, Any]) -> None:
+        """原子累加关键认知指标；只接受固定数值字段和失败类别计数。"""
+
+        integerFields = (
+            "calls",
+            "cacheHits",
+            "fallbacks",
+            "invalidOutputs",
+            "structuredSuccesses",
+            "promptTokens",
+            "completionTokens",
+            "cachedTokens",
+        )
+        increments = {name: max(0, int(delta.get(name, 0))) for name in integerFields}
+        latencyIncrement = max(0.0, float(delta.get("totalLatencyMs", 0.0)))
+        rawCategories = delta.get("failureCategoryCounts")
+        categoryIncrements = {
+            str(name): max(0, int(count))
+            for name, count in (rawCategories.items() if isinstance(rawCategories, dict) else ())
+            if (
+                isinstance(name, str)
+                and re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", name)
+                and isinstance(count, int)
+                and not isinstance(count, bool)
+            )
+        }
+        now = utcNow()
+        with self.writeLock, self.connection() as connection:
+            row = connection.execute(
+                "SELECT failure_category_counts_json FROM cognition_telemetry "
+                "WHERE scope='site-wide'"
+            ).fetchone()
+            currentCategories = (
+                json.loads(row["failure_category_counts_json"]) if row is not None else {}
+            )
+            for name, increment in categoryIncrements.items():
+                currentCategories[name] = max(0, int(currentCategories.get(name, 0))) + increment
+            connection.execute(
+                """
+                INSERT INTO cognition_telemetry(
+                    scope, calls, cache_hits, fallbacks, invalid_outputs,
+                    structured_successes, prompt_tokens, completion_tokens,
+                    cached_tokens, total_latency_ms, failure_category_counts_json,
+                    observed_since, updated_at
+                ) VALUES ('site-wide', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scope) DO UPDATE SET
+                    calls=calls+excluded.calls,
+                    cache_hits=cache_hits+excluded.cache_hits,
+                    fallbacks=fallbacks+excluded.fallbacks,
+                    invalid_outputs=invalid_outputs+excluded.invalid_outputs,
+                    structured_successes=structured_successes+excluded.structured_successes,
+                    prompt_tokens=prompt_tokens+excluded.prompt_tokens,
+                    completion_tokens=completion_tokens+excluded.completion_tokens,
+                    cached_tokens=cached_tokens+excluded.cached_tokens,
+                    total_latency_ms=total_latency_ms+excluded.total_latency_ms,
+                    failure_category_counts_json=excluded.failure_category_counts_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    increments["calls"],
+                    increments["cacheHits"],
+                    increments["fallbacks"],
+                    increments["invalidOutputs"],
+                    increments["structuredSuccesses"],
+                    increments["promptTokens"],
+                    increments["completionTokens"],
+                    increments["cachedTokens"],
+                    latencyIncrement,
+                    json.dumps(currentCategories, sort_keys=True, separators=(",", ":")),
+                    now,
+                    now,
+                ),
+            )
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
@@ -997,7 +1120,7 @@ class Database:
                 SET status='QUEUED', error_code=NULL, progress=0,
                     completed_pairs=CASE WHEN status='READY' THEN 0 ELSE completed_pairs END,
                     checkpoint_blob=CASE WHEN status='READY' THEN NULL ELSE checkpoint_blob END,
-                    cancel_requested=0, started_at=NULL,
+                    cancel_requested=0, cognition_fallback_requested=0, started_at=NULL,
                     completed_at=NULL, updated_at=?
                 WHERE id=? AND COALESCE(owner_user_id, session_id)=?
                   AND status IN ('READY', 'FAILED_RETRYABLE')
@@ -1605,6 +1728,7 @@ class Database:
             "progress",
             "completed_pairs",
             "cancel_requested",
+            "cognition_fallback_requested",
             "started_at",
             "completed_at",
             "runtime_json",
@@ -1643,6 +1767,17 @@ class Database:
             ).fetchone()
         return bool(row and row["cancel_requested"])
 
+    def cognitionFallbackRequested(self, experimentId: str, ownerUserId: str) -> bool:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT cognition_fallback_requested FROM experiments
+                WHERE id=? AND COALESCE(owner_user_id, session_id)=?
+                """,
+                (experimentId, ownerUserId),
+            ).fetchone()
+        return bool(row and row["cognition_fallback_requested"])
+
     @staticmethod
     def _experimentFromRow(
         row: sqlite3.Row,
@@ -1661,6 +1796,7 @@ class Database:
             "completedPairs": row["completed_pairs"],
             "totalPairs": row["total_pairs"],
             "cancelRequested": bool(row["cancel_requested"]),
+            "cognitionFallbackRequested": bool(row["cognition_fallback_requested"]),
             "createdAt": row["created_at"],
             "updatedAt": row["updated_at"],
             "startedAt": row["started_at"],

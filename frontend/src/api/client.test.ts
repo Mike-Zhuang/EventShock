@@ -55,6 +55,139 @@ describe('API client event stream', () => {
     expect(window.localStorage.getItem('eventshockCsrfToken')).toBeNull();
   });
 
+  it('requests a cognition-only rule continuation without cancelling the experiment', async () => {
+    window.localStorage.setItem('eventshockSessionId', 'test-session');
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: 'exp-hybrid',
+      status: 'RUNNING',
+      cognition_fallback_requested: true,
+      request: {
+        eventPackId: 'pack-1',
+        intervention: {
+          parameter: 'marketMakerCapacity',
+          baselineValue: 1,
+          interventionValue: 0.5,
+        },
+        seedCount: 10,
+        populationSize: 56,
+        steps: 120,
+      },
+      progress: 0.02,
+      logs: [],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const experiment = await api.continueCognitionWithRules('exp-hybrid');
+
+    expect(experiment.cognitionFallbackRequested).toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/experiments/exp-hybrid/cognition/continue-with-rules',
+      expect.objectContaining({ method: 'POST' }),
+    );
+  });
+
+  it('re-verifies account export and deletion with explicit same-origin payloads', async () => {
+    window.localStorage.setItem('eventshockSessionId', 'test-session');
+    setCsrfToken('csrf-memory-only');
+    const responses = [
+      new Response(JSON.stringify({
+        schema_version: 'account_data_export_v1.0.0',
+        generated_at: '2026-07-29T12:00:00Z',
+        retention_notice: 'Backups follow normal retention.',
+        excluded_secrets: ['password hashes', 'session tokens'],
+        data: {
+          account: [{ id: 'user-1', email: 'analyst@example.com' }],
+          preferences: [],
+        },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+      new Response(JSON.stringify({
+        deleted: true,
+        deleted_record_count: 17,
+        backup_retention_notice: 'Backups follow normal retention.',
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    ];
+    const fetchMock = vi.fn(async () => {
+      const response = responses.shift();
+      if (!response) throw new Error('Unexpected account API request.');
+      return response;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const exported = await api.exportAccountData({
+      currentPassword: 'Current password 123!',
+    });
+    const deleted = await api.deleteAccount({
+      currentPassword: 'Current password 123!',
+      confirmation: 'DELETE',
+    });
+
+    expect(exported).toMatchObject({
+      schemaVersion: 'account_data_export_v1.0.0',
+      data: { account: [{ id: 'user-1' }] },
+    });
+    expect(deleted).toEqual({
+      deleted: true,
+      deletedRecordCount: 17,
+      backupRetentionNotice: 'Backups follow normal retention.',
+    });
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      '/api/v1/account/data-export',
+      expect.objectContaining({
+        method: 'POST',
+        credentials: 'same-origin',
+        body: JSON.stringify({ password: 'Current password 123!' }),
+        headers: expect.objectContaining({
+          'X-CSRF-Token': 'csrf-memory-only',
+          'X-Session-ID': 'test-session',
+        }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/v1/account',
+      expect.objectContaining({
+        method: 'DELETE',
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          password: 'Current password 123!',
+          confirmation: 'DELETE',
+        }),
+        headers: expect.objectContaining({
+          'X-CSRF-Token': 'csrf-memory-only',
+          'X-Session-ID': 'test-session',
+        }),
+      }),
+    );
+  });
+
+  it('does not expire the session when current-password re-verification returns 401', async () => {
+    const listener = vi.fn();
+    window.addEventListener(AUTH_SESSION_EXPIRED_EVENT, listener);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({
+        error: {
+          code: 'AUTHENTICATION_FAILED',
+          message: 'Invalid current password.',
+        },
+      }),
+      { status: 401, headers: { 'Content-Type': 'application/json' } },
+    )));
+
+    await expect(api.exportAccountData({
+      currentPassword: 'dummy-incorrect-password',
+    })).rejects.toMatchObject({
+      status: 401,
+      code: 'AUTHENTICATION_FAILED',
+    });
+
+    expect(listener).not.toHaveBeenCalled();
+    window.removeEventListener(AUTH_SESSION_EXPIRED_EVENT, listener);
+  });
+
   it('broadcasts session expiry when an authenticated business request returns 401', async () => {
     const listener = vi.fn();
     window.addEventListener(AUTH_SESSION_EXPIRED_EVENT, listener);
@@ -67,6 +200,41 @@ describe('API client event stream', () => {
 
     expect(listener).toHaveBeenCalledTimes(1);
     window.removeEventListener(AUTH_SESSION_EXPIRED_EVENT, listener);
+  });
+
+  it('loads the read-only governance deployment evidence endpoint', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      schema_version: '1.0.0',
+      deployed_commit: 'a'.repeat(40),
+      health_commit: 'a'.repeat(40),
+      github_main_commit: 'b'.repeat(40),
+      required_checks: [
+        { name: 'Backend / Python 3.12.13', status: 'PASS' },
+        { name: 'Frontend / Node 22', status: 'PENDING' },
+        { name: 'Production container', status: 'UNKNOWN' },
+      ],
+      required_checks_status: 'FAIL',
+      last_sync_result: 'FAILED',
+      status_source: 'RESTRICTED_STATUS_FILE',
+      status_file_state: 'VERIFIED',
+      observed_at: '2026-07-29T10:07:00Z',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const status = await api.getDeploymentStatus();
+
+    expect(status).toMatchObject({
+      deployedCommit: 'a'.repeat(40),
+      githubMainCommit: 'b'.repeat(40),
+      requiredChecksStatus: 'FAIL',
+      lastSyncResult: 'FAILED',
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/governance/deployment-status',
+      expect.objectContaining({
+        credentials: 'same-origin',
+      }),
+    );
   });
 
   it('submits one acknowledged bulk-approval request with the reviewed queue snapshot', async () => {
@@ -325,6 +493,94 @@ describe('API client event stream', () => {
       '/api/v1/guided-workflows/guided-12345678/advance',
       expect.objectContaining({
         body: JSON.stringify({ expectedVersion: 3, acknowledgedHumanReview: true }),
+      }),
+    );
+  });
+
+  it('loads, recovers, and archives guided operations through explicit endpoints', async () => {
+    const operation = {
+      schemaVersion: '1.0.0',
+      workflowId: 'guided-12345678',
+      clientRequestId: 'guided-request-12345678',
+      expectedVersion: 1,
+      status: 'UNKNOWN',
+      errorCode: 'MODEL_TIMEOUT',
+      requestMessage: 'Study one bounded event.',
+      language: 'en',
+      cachedProposalAvailable: false,
+      supersedesClientRequestId: null,
+      authorizedRetryClientRequestId: null,
+      recoveryOptions: ['ABANDON_AND_AUTHORIZE_RETRY'],
+      providerRequestId: 'guided-provider-1',
+      httpResponseReceived: false,
+      usageReceived: false,
+      parseCompleted: false,
+      failureStage: 'PROVIDER_RESPONSE_FAILED',
+      createdAt: '2026-07-29T10:00:00Z',
+      updatedAt: '2026-07-29T10:01:00Z',
+    };
+    const archivedWorkflow = {
+      schemaVersion: '1.0.0',
+      id: operation.workflowId,
+      stage: 'EVENT_GOAL',
+      status: 'ARCHIVED',
+      version: 2,
+      language: 'en',
+      draft: { searchQueries: [] },
+      pendingProposal: null,
+      pendingProposalId: null,
+      messages: [],
+      createdAt: '2026-07-29T10:00:00Z',
+      updatedAt: '2026-07-29T10:02:00Z',
+    };
+    const responses = [
+      { items: [operation] },
+      {
+        kind: 'OPERATION',
+        operation: {
+          ...operation,
+          status: 'ABANDONED_BY_USER',
+          authorizedRetryClientRequestId: 'guided-retry-12345678',
+          recoveryOptions: [],
+        },
+      },
+      archivedWorkflow,
+    ];
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(api.getGuidedTurnOperations(operation.workflowId))
+      .resolves.toMatchObject([{ status: 'UNKNOWN', providerRequestId: 'guided-provider-1' }]);
+    await expect(api.recoverGuidedTurn(
+      operation.workflowId,
+      operation.clientRequestId,
+      {
+        recoveryRequestId: 'recovery-request-12345678',
+        action: 'ABANDON_AND_AUTHORIZE_RETRY',
+        expectedVersion: 1,
+        newClientRequestId: 'guided-retry-12345678',
+      },
+    )).resolves.toMatchObject({
+      kind: 'OPERATION',
+      operation: { status: 'ABANDONED_BY_USER' },
+    });
+    await expect(api.archiveGuidedWorkflow(operation.workflowId, 1))
+      .resolves.toMatchObject({ status: 'ARCHIVED' });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/v1/guided-workflows/guided-12345678/operations/guided-request-12345678/recover',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          recoveryRequestId: 'recovery-request-12345678',
+          action: 'ABANDON_AND_AUTHORIZE_RETRY',
+          expectedVersion: 1,
+          newClientRequestId: 'guided-retry-12345678',
+        }),
       }),
     );
   });

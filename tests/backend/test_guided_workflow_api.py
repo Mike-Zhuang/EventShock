@@ -12,6 +12,7 @@ from backend.app.guided_workflow import (
     GuidedProposalActionRequest,
     GuidedStage,
     GuidedTurnRequest,
+    GuidedWorkflowConflictError,
     GuidedWorkflowProposal,
     GuidedWorkflowService,
 )
@@ -301,16 +302,47 @@ class FakeGuidedCognition:
         workflow: Any,
         latestUserMessage: str,
         language: str,
+        progressObserver: Any = None,
     ) -> GuidedWorkflowProposal:
         del sessionId, latestUserMessage, language
         self.providerCalls += 1
+        if progressObserver is not None:
+            progressObserver(
+                "PROVIDER_DISPATCHED",
+                {
+                    "providerRequestId": f"fake-guided-{self.providerCalls}",
+                    "httpResponseReceived": None,
+                    "usageReceived": None,
+                    "parseCompleted": False,
+                },
+            )
         if self.fail:
+            if progressObserver is not None:
+                progressObserver(
+                    "PROVIDER_RESPONSE_FAILED",
+                    {
+                        "providerRequestId": f"fake-guided-{self.providerCalls}",
+                        "httpResponseReceived": False,
+                        "usageReceived": False,
+                        "parseCompleted": False,
+                    },
+                )
             raise ModelGatewayError(
                 FailureCode.MODEL_TIMEOUT,
                 "simulated provider timeout",
                 retryable=True,
                 attempts=1,
                 uncertainBillableAttempts=1,
+            )
+        if progressObserver is not None:
+            progressObserver(
+                "PROVIDER_RESPONSE_VALIDATED",
+                {
+                    "providerRequestId": f"fake-guided-{self.providerCalls}",
+                    "httpResponseReceived": True,
+                    "usageReceived": True,
+                    "parseCompleted": True,
+                },
             )
         return GuidedWorkflowProposal(
             stage=workflow.stage,
@@ -446,7 +478,22 @@ def test_guided_turn_claim_prevents_duplicate_provider_calls_and_audits(
             },
         )
         assert applied.status_code == 200
-        assert applied.json()["version"] == firstResponse["version"] + 1
+        appliedResponse = applied.json()
+        assert appliedResponse["version"] == firstResponse["version"] + 1
+        assert len(appliedResponse["archivedProposals"]) == 1
+        archivedProposal = appliedResponse["archivedProposals"][0]
+        assert archivedProposal["schemaVersion"] == "guided_archived_proposal_v1.0.0"
+        assert archivedProposal["id"] == firstResponse["pendingProposalId"]
+        assert archivedProposal["proposal"] == firstResponse["pendingProposal"]
+        assert archivedProposal["status"] == "APPLIED"
+        assert archivedProposal["reason"] == "APPLIED_BY_HUMAN"
+        assert datetime.fromisoformat(archivedProposal["archivedAt"]).tzinfo is not None
+        refreshed = client.get(
+            f"/api/v1/guided-workflows/{workflow['id']}",
+            headers=_headers(owner),
+        )
+        assert refreshed.status_code == 200
+        assert refreshed.json()["archivedProposals"] == appliedResponse["archivedProposals"]
 
         replay = client.post(
             f"/api/v1/guided-workflows/{workflow['id']}/turn",
@@ -515,6 +562,248 @@ def test_guided_unknown_provider_outcome_is_not_automatically_retried(
         )
         assert bypassAttempt.status_code == 409
         assert fakeCognition.providerCalls == 1
+
+
+def test_guided_cached_proposal_recovery_commits_without_second_provider_call(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    owner = "guided-cached-recovery"
+    with TestClient(createApp(dataDir=tmp_path)) as client:
+        fakeCognition = FakeGuidedCognition()
+        client.app.state.cognitionService = fakeCognition
+        service: GuidedWorkflowService = client.app.state.guidedWorkflowService
+        repository = service.repository
+        originalCompleteTurn = repository.completeTurn
+        commitAttempts = 0
+
+        def failFirstCommit(**kwargs: Any):
+            nonlocal commitAttempts
+            commitAttempts += 1
+            if commitAttempts == 1:
+                raise GuidedWorkflowConflictError("simulated database commit interruption")
+            return originalCompleteTurn(**kwargs)
+
+        monkeypatch.setattr(repository, "completeTurn", failFirstCommit)
+        workflow = client.post(
+            "/api/v1/guided-workflows",
+            headers=_headers(owner),
+            json={"language": "en"},
+        ).json()
+        turnPayload = {
+            "message": "Study a bounded event with reviewed public evidence.",
+            "language": "en",
+            "expectedVersion": 1,
+            "clientRequestId": "guided-cached-recovery-turn-001",
+        }
+        interrupted = client.post(
+            f"/api/v1/guided-workflows/{workflow['id']}/turn",
+            headers=_headers(owner),
+            json=turnPayload,
+        )
+        assert interrupted.status_code == 409
+        assert fakeCognition.providerCalls == 1
+
+        operations = client.get(
+            f"/api/v1/guided-workflows/{workflow['id']}/operations",
+            headers=_headers(owner),
+        )
+        assert operations.status_code == 200
+        unknownOperation = operations.json()["items"][0]
+        assert unknownOperation["status"] == "UNKNOWN"
+        assert unknownOperation["requestMessage"] == turnPayload["message"]
+        assert unknownOperation["providerRequestId"] == "fake-guided-1"
+        assert unknownOperation["httpResponseReceived"] is True
+        assert unknownOperation["usageReceived"] is True
+        assert unknownOperation["parseCompleted"] is True
+        assert unknownOperation["failureStage"] == "DATABASE_COMMIT_PENDING"
+        assert unknownOperation["cachedProposalAvailable"] is True
+        assert unknownOperation["recoveryOptions"] == [
+            "RETRY_CACHED_COMMIT",
+            "ABANDON_AND_AUTHORIZE_RETRY",
+        ]
+
+        recovered = client.post(
+            (
+                f"/api/v1/guided-workflows/{workflow['id']}/operations/"
+                f"{turnPayload['clientRequestId']}/recover"
+            ),
+            headers=_headers(owner),
+            json={
+                "recoveryRequestId": "guided-cached-recovery-action-001",
+                "action": "RETRY_CACHED_COMMIT",
+                "expectedVersion": 1,
+            },
+        )
+        assert recovered.status_code == 200
+        assert recovered.json()["kind"] == "WORKFLOW"
+        recoveredWorkflow = recovered.json()["workflow"]
+        assert recoveredWorkflow["version"] == 2
+        assert recoveredWorkflow["pendingProposal"] is not None
+        assert fakeCognition.providerCalls == 1
+        assert _auditActionCount(client, owner, "TURN_PROPOSED") == 1
+
+        repeated = client.post(
+            (
+                f"/api/v1/guided-workflows/{workflow['id']}/operations/"
+                f"{turnPayload['clientRequestId']}/recover"
+            ),
+            headers=_headers(owner),
+            json={
+                "recoveryRequestId": "guided-cached-recovery-action-001",
+                "action": "RETRY_CACHED_COMMIT",
+                "expectedVersion": 1,
+            },
+        )
+        assert repeated.status_code == 200
+        assert repeated.json() == recovered.json()
+        assert fakeCognition.providerCalls == 1
+        assert _auditActionCount(client, owner, "TURN_PROPOSED") == 1
+
+
+def test_guided_unknown_provider_call_requires_abandon_and_exact_authorized_retry(
+    tmp_path: Path,
+) -> None:
+    owner = "guided-abandon-retry"
+    with TestClient(createApp(dataDir=tmp_path)) as client:
+        fakeCognition = FakeGuidedCognition(fail=True)
+        client.app.state.cognitionService = fakeCognition
+        workflow = client.post(
+            "/api/v1/guided-workflows",
+            headers=_headers(owner),
+            json={"language": "en"},
+        ).json()
+        originalClientRequestId = "guided-abandon-original-001"
+        authorizedClientRequestId = "guided-abandon-authorized-002"
+        turnPayload = {
+            "message": "Study a bounded event using reviewed public evidence.",
+            "language": "en",
+            "expectedVersion": 1,
+            "clientRequestId": originalClientRequestId,
+        }
+        failed = client.post(
+            f"/api/v1/guided-workflows/{workflow['id']}/turn",
+            headers=_headers(owner),
+            json=turnPayload,
+        )
+        assert failed.status_code == 504
+        assert fakeCognition.providerCalls == 1
+
+        beforeRecovery = client.get(
+            f"/api/v1/guided-workflows/{workflow['id']}/operations",
+            headers=_headers(owner),
+        ).json()["items"]
+        assert beforeRecovery[0]["requestMessage"] == turnPayload["message"]
+        assert beforeRecovery[0]["providerRequestId"] == "fake-guided-1"
+        assert beforeRecovery[0]["httpResponseReceived"] is False
+        assert beforeRecovery[0]["usageReceived"] is False
+        assert beforeRecovery[0]["parseCompleted"] is False
+        assert beforeRecovery[0]["failureStage"] == "PROVIDER_RESPONSE_FAILED"
+        assert beforeRecovery[0]["cachedProposalAvailable"] is False
+        assert beforeRecovery[0]["recoveryOptions"] == ["ABANDON_AND_AUTHORIZE_RETRY"]
+
+        recoveryPayload = {
+            "recoveryRequestId": "guided-abandon-recovery-001",
+            "action": "ABANDON_AND_AUTHORIZE_RETRY",
+            "expectedVersion": 1,
+            "newClientRequestId": authorizedClientRequestId,
+        }
+        abandoned = client.post(
+            (
+                f"/api/v1/guided-workflows/{workflow['id']}/operations/"
+                f"{originalClientRequestId}/recover"
+            ),
+            headers=_headers(owner),
+            json=recoveryPayload,
+        )
+        assert abandoned.status_code == 200
+        assert abandoned.json()["kind"] == "OPERATION"
+        assert abandoned.json()["operation"]["status"] == "ABANDONED_BY_USER"
+        assert (
+            abandoned.json()["operation"]["authorizedRetryClientRequestId"]
+            == authorizedClientRequestId
+        )
+        repeatedAbandon = client.post(
+            (
+                f"/api/v1/guided-workflows/{workflow['id']}/operations/"
+                f"{originalClientRequestId}/recover"
+            ),
+            headers=_headers(owner),
+            json=recoveryPayload,
+        )
+        assert repeatedAbandon.status_code == 200
+        assert repeatedAbandon.json() == abandoned.json()
+
+        wrongRetry = client.post(
+            f"/api/v1/guided-workflows/{workflow['id']}/turn",
+            headers=_headers(owner),
+            json={**turnPayload, "clientRequestId": "guided-abandon-wrong-003"},
+        )
+        assert wrongRetry.status_code == 409
+        assert fakeCognition.providerCalls == 1
+
+        fakeCognition.fail = False
+        authorizedRetry = client.post(
+            f"/api/v1/guided-workflows/{workflow['id']}/turn",
+            headers=_headers(owner),
+            json={**turnPayload, "clientRequestId": authorizedClientRequestId},
+        )
+        assert authorizedRetry.status_code == 200
+        assert authorizedRetry.json()["version"] == 2
+        assert fakeCognition.providerCalls == 2
+
+        finalOperations = client.get(
+            f"/api/v1/guided-workflows/{workflow['id']}/operations",
+            headers=_headers(owner),
+        ).json()["items"]
+        assert [operation["status"] for operation in finalOperations] == [
+            "ABANDONED_BY_USER",
+            "SUCCEEDED",
+        ]
+        assert finalOperations[1]["supersedesClientRequestId"] == originalClientRequestId
+
+
+def test_guided_workflow_archive_is_soft_and_removes_it_from_default_list(
+    tmp_path: Path,
+) -> None:
+    owner = "guided-soft-archive"
+    with TestClient(createApp(dataDir=tmp_path)) as client:
+        workflow = client.post(
+            "/api/v1/guided-workflows",
+            headers=_headers(owner),
+            json={"language": "en"},
+        ).json()
+        archived = client.post(
+            f"/api/v1/guided-workflows/{workflow['id']}/archive",
+            headers=_headers(owner),
+            json={"expectedVersion": workflow["version"]},
+        )
+        listed = client.get(
+            "/api/v1/guided-workflows",
+            headers=_headers(owner),
+        )
+        fetched = client.get(
+            f"/api/v1/guided-workflows/{workflow['id']}",
+            headers=_headers(owner),
+        )
+        rejectedTurn = client.post(
+            f"/api/v1/guided-workflows/{workflow['id']}/turn",
+            headers=_headers(owner),
+            json={
+                "message": "This archived workflow must remain immutable.",
+                "language": "en",
+                "expectedVersion": archived.json()["version"],
+                "clientRequestId": "guided-archive-rejected-turn-001",
+            },
+        )
+
+    assert archived.status_code == 200
+    assert archived.json()["status"] == "ARCHIVED"
+    assert archived.json()["version"] == workflow["version"] + 1
+    assert listed.json()["items"] == []
+    assert fetched.status_code == 200
+    assert fetched.json()["status"] == "ARCHIVED"
+    assert rejectedTurn.status_code == 409
 
 
 def test_guided_links_reject_fake_and_cross_owner_artifacts_without_audit(

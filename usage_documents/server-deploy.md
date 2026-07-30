@@ -37,6 +37,7 @@ Internet :80/:443
 - UFW 启用时，注册工具只允许动态识别出的 Caddy Docker bridge 及其 subnet 访问 host-gateway 的 `18080`；该规则是容器到宿主机的内部通道，不是公网端口放行。
 - 实验状态接口使用 SSE；宝塔 Nginx 的 EventShock 代理配置必须关闭响应缓冲，保留长连接相关请求头，并且不能缓存 `/api/v1/experiments/*/events`。
 - SQLite 保存在 Docker 命名卷 `eventshock-data`；重新构建应用镜像不会删除该卷。
+- 最小部署证据也保存在同一持久卷的 `/data/deployment-status.json`。同步脚本在宿主机侧原子替换该文件，应用只通过治理 GET 接口读取，不提供写接口；容器重启或镜像切换不会删除它。
 - 长期认证随机密钥与 SMTP 密码只保存在服务器 `/opt/eventshock/shared/secrets`，以只读文件挂载给固定 UID `10001` 的应用；真实值不进入 Git、Compose 环境变量、镜像或部署日志。
 - 每个发布目录都生成独立的 `.release.env`，应用镜像标签形如 `eventshock-app:<release-id>`。上一版本不会因下一次构建而被同名镜像覆盖。
 
@@ -145,6 +146,8 @@ git rev-parse '@{upstream}'
 
 GitHub 页面上的检查结果才是该提交的远程门禁证据。本地测试通过不能代替这三项检查，服务器也不会通过跳过检查来“抢先”部署。
 
+同步脚本把这三项检查的逐项状态写入持久化部署证据。只有 GitHub API 对目标 SHA 返回已完成且结论为 `success` 时才写 `PASS`；缺失或未完成写 `PENDING`，失败结论写 `FAIL`，API 本身不可验证时写 `UNKNOWN`。状态文件只包含部署 SHA、GitHub `main` SHA、分支、三项检查、同步/部署时间、结果和受限失败码，不包含日志正文、HTTP 响应、Token、Cookie 或密钥。
+
 ## 5. 首次安装 GitHub 同步入口
 
 本节用于当前服务器已有可用 EventShock 发布目录的情况。安装脚本把同步入口、宝塔任务包装器和宝塔注册工具安装到不可变运维版本目录，并让 `/opt/eventshock/bin` 原子指向该目录；同时创建 root 专用配置。它不会直接写系统 crontab。
@@ -188,6 +191,7 @@ unset smtpPassword
 ```dotenv
 EVENTSHOCK_AUTH_REQUIRED=true
 EVENTSHOCK_AUTH_COOKIE_SECURE=true
+EVENTSHOCK_DEPLOYMENT_STATUS_FILE=/data/deployment-status.json
 EVENTSHOCK_ADMIN_EMAIL=admin@example.com
 EVENTSHOCK_SMTP_HOST=smtp.example.com
 EVENTSHOCK_SMTP_PORT=465
@@ -195,6 +199,8 @@ EVENTSHOCK_SMTP_USERNAME=sender@example.com
 EVENTSHOCK_SMTP_SENDER=sender@example.com
 EVENTSHOCK_SECRETS_DIR=/opt/eventshock/shared/secrets
 ```
+
+旧服务器的共享 `.env` 不会被安装器覆盖，升级时必须人工补入上述固定部署状态路径；部署脚本会在构建前校验它，缺失或指向其他路径都会安全终止。
 
 首次发布还需要一个只允许 root 读取的一次性管理员初始密码。它不挂载为应用可读密钥，也不设置成环境变量；新版本通过容器健康检查后，部署脚本用标准输入把它交给管理员引导命令，事务成功后立即删除：
 
@@ -298,7 +304,8 @@ sudo grep -E 'NO_CHANGE|WAIT_CI|CI_BLOCKED|RUNTIME_(DRIFT|SELF_HEAL_)|TARGET_SEL
 12. 若 root 专用的一次性管理员密码文件存在，通过容器标准输入执行幂等管理员引导；成功后删除文件，失败则触发整次发布回滚。
 13. 在容器内确认配置的管理员确实存在，且六类历史业务记录的未归属数量全部为零；遗漏 `.once` 文件或迁移不完整都会阻断发布。
 14. 再次修复并验证宝塔代理，要求公网 `/api/health` 同时返回 `status=ok` 与目标 40 位 `releaseCommit`。
-15. 成功后才写同步状态，并把 `/opt/eventshock/bin` 原子切换到目标 commit 的不可变运维脚本目录；失败时先验证宝塔代理和上一版本公网 SHA，再恢复上一发布目录。
+15. 在 CI 通过、等待、失败、部署成功和 `NO_CHANGE` 分支原子更新 `eventshock-data` 卷中的 `deployment-status.json`。`NO_CHANGE` 只在 SHA 一致时沿用同一目标的既有三项 `PASS` 证据，并更新同步时间；没有可验证旧证据时保持 `UNKNOWN`，绝不补写 `PASS`。
+16. 成功后才写传统同步状态，并把 `/opt/eventshock/bin` 原子切换到目标 commit 的不可变运维脚本目录；失败时先验证宝塔代理和上一版本公网 SHA，再恢复上一发布目录。部署证据文件为 `0644`、不可由组或其他用户写入，应用 UID `10001` 可读。
 
 同一目标 SHA 部署失败后会进入有界退避：第一次至少等待 30 分钟，后续失败至少等待 60 分钟；分支出现新的 SHA 后自动解除。这样 10 分钟计划任务仍会持续记录状态，但不会反复构建一个已知失败版本。应用发布和运维脚本各保留最近 5 个不可变版本，当前版本不会被清理。
 
@@ -312,7 +319,11 @@ sudo readlink -f /opt/eventshock/current
 sudo cat /opt/eventshock/shared/github-sync.state
 sudo /opt/eventshock/current/scripts/compose-current.sh ps
 curl --fail --show-error https://eventshock.mikezhuang.cn/api/health
+curl --fail --show-error \
+  https://eventshock.mikezhuang.cn/api/v1/governance/deployment-status | jq
 ```
+
+治理接口以运行中进程的 `releaseCommit` 为权威，并把持久证据仅作为 CI、GitHub `main` 和同步结果的补充。`commitAlignment` 不是 `MATCH`、`requiredChecksStatus` 不是 `PASS`，或 `statusFileState` 不是 `VERIFIED` 时，不得声称生产版本与 GitHub 已完全对齐。文件异常会返回受限错误码而不会回显原始内容。
 
 查看容器日志：
 
@@ -500,6 +511,51 @@ IP 回退没有 HTTPS，只用于排查；问题解决后必须恢复域名。�
 - 在线备份使用临时数据库并在原子替换后清理该临时文件及其 `-wal`、`-shm` sidecar；不得通过通配符删除其他发布正在使用的文件。认证所有权迁移前还应额外建立一份固定名称、不会被三份滚动窗口删除的人工备份，并执行 `PRAGMA quick_check`。
 - 代码发布目录与唯一镜像默认保留最近 5 个版本，同时始终保留当前版本和直接回滚目标；清理失败只记录警告，不影响已经验证成功的版本。
 - 服务器是单实例 MVP，不提供高可用。至少在重要演示前使用 SQLite 在线备份能力创建站外备份；不要在应用写入期间直接复制数据库文件。
+
+### 11.1 受控整机重启回归
+
+安装 GitHub 同步入口时会同时安装并启用
+`eventshock-restart-verification.service`。该单元平时因不存在待验证状态而跳过；
+只有负责人先在维护窗口准备证据后，才会在下一次开机自动执行验证。
+
+先创建一个只允许 root 读取的临时 Netscape Cookie 文件。它应对应专门的测试账号，
+且账号至少拥有一条已完成实验。Cookie 值不会被复制进证据文件，验证完成后应立即删除：
+
+```bash
+sudo chown root:root /root/eventshock-restart.cookies
+sudo chmod 0600 /root/eventshock-restart.cookies
+sudo /opt/eventshock/bin/verify-restart-recovery.sh prepare \
+  --cookie-file /root/eventshock-restart.cookies \
+  --experiment-id exp-xxxxxxxxxxxxxxxx
+```
+
+`prepare` 默认**不会重启**。它只记录当前 release SHA、宝塔 access log 与
+`site_total` 基线，并验证 Cookie 文件权限。核对当前没有课堂演示或运行中实验、已经
+进入维护窗口后，才允许使用下面的双重确认：
+
+```bash
+sudo env \
+  EVENTSHOCK_REBOOT_CONFIRMATION=REBOOT_EVENTSHOCK_PRODUCTION_IN_MAINTENANCE_WINDOW \
+  /opt/eventshock/bin/verify-restart-recovery.sh prepare \
+  --cookie-file /root/eventshock-restart.cookies \
+  --experiment-id exp-xxxxxxxxxxxxxxxx \
+  --reboot
+```
+
+开机后，systemd 会在 Docker、Nginx 和网络就绪后自动检查：
+
+- 当前不可变发布、app/caddy 健康状态和 40 位 release SHA；
+- Nginx 对 Docker 的启动依赖与失败重试；
+- `18000`/`18080` 私网监听边界；
+- Caddy → 宝塔 Nginx → 应用内部代理链；
+- 公网 `/api/health` 与宝塔 access log、`site_total` 增量；
+- 宝塔原生十分钟任务、启用状态和日志路径；
+- 登录会话、实验历史和实验 SSE。
+
+脱敏 JSON 证据写入 `/opt/eventshock/shared/logs/restart-verification-*.json`。
+任何检查失败或未提供认证 Cookie 时，状态只能是 `FAIL` 或 `INCOMPLETE`，待验证状态
+会保留以便修复后重新执行 `verify`；只有全部检查为 `PASS` 才会清除待验证状态。
+实际重启及其证据仍属于维护窗口外部门禁，脚本存在不能替代一次真实执行。
 
 如需停止服务但保留数据：
 

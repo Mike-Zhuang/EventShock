@@ -49,21 +49,24 @@ import {
   clearFactoryGuidedHandoff,
   readFactoryGuidedHandoff,
 } from '../guided-handoff';
+import {
+  IMPACT_CHANNEL_DEFINITIONS,
+  impactChannelDisplay,
+} from '../impact-channels';
 import { useI18n } from '../i18n';
 import { useWorkflow } from '../state/workflow-context';
 
 const FACTORY_BUILD_STORAGE_KEY = 'eventshock:last-factory-build-id';
 const MAX_PASTE_SOURCES = 24;
-const IMPACT_CHANNELS = [
-  'belief',
-  'socialAmplification',
-  'liquidity',
-  'passiveFlow',
-  'stopLoss',
-  'informationLatency',
-] as const;
 
 type FactoryErrorSection = 'general' | 'paste' | 'search' | 'review' | 'materialize';
+type FactorySourceFilter =
+  | 'ALL'
+  | 'DISCOVERY_CLUES'
+  | 'AWAITING_READ'
+  | 'PENDING_EVIDENCE'
+  | 'APPROVED_EVIDENCE'
+  | 'EXCLUDED';
 type MaterializeValidationField =
   | 'sourceReview'
   | 'title'
@@ -109,6 +112,7 @@ function factoryErrorSection(action: string): FactoryErrorSection {
     action.startsWith('reader-')
     || action.startsWith('review-')
     || action.startsWith('raw-')
+    || action.startsWith('selection-')
   ) return 'review';
   if (action === 'materialize' || action === 'guided-link-pack') return 'materialize';
   return 'general';
@@ -134,6 +138,18 @@ function factoryErrorMessage(error: unknown, isZh: boolean): string {
     EVENT_PACK_FACTORY_READER_SOURCE_NOT_ALLOWED: {
       en: 'Reader can only open an approved search result from this build. Refresh the source list and review the discovery result first.',
       zh: 'Reader 只能读取当前任务中已经人工批准的搜索结果。请刷新来源列表并先审核该发现线索。',
+    },
+    EVENT_PACK_FACTORY_READER_SOURCE_IDENTITY_INVALID: {
+      en: 'Reader can only open a discovery result created by this build. Refresh the source list and choose a search result from this build.',
+      zh: 'Reader 只能读取当前构建任务生成的发现线索。请刷新来源列表，并选择本任务中的搜索结果。',
+    },
+    EVENT_PACK_FACTORY_UNSAFE_SOURCE_URL: {
+      en: 'This address was blocked by the public-web safety boundary. Use a credential-free public HTTPS URL on port 443; localhost, private-network and ambiguous addresses are not accepted.',
+      zh: '该地址被公网网页安全边界阻止。请使用不含凭据、端口为 443 的公开 HTTPS 地址；localhost、私网地址和歧义地址均不接受。',
+    },
+    EVENT_PACK_FACTORY_READER_AUTHENTICATION_FAILED: {
+      en: 'Reader could not authenticate. Re-enter the temporary Zhipu API key in AI configuration, test it, and retry.',
+      zh: 'Reader 鉴权失败。请在“AI 配置”中重新填写本次会话的智谱 API Key，测试通过后重试。',
     },
     EVENT_PACK_FACTORY_BUILD_NOT_READY: {
       en: 'At least one approved pasted or Reader full-text source is required before claim extraction.',
@@ -273,6 +289,8 @@ function SourceCard({
   busy,
   readerEvidenceExists,
   onReview,
+  onSelection,
+  onPermanentDelete,
   onReader,
   onLoadRawText,
   onSaveRawText,
@@ -281,7 +299,9 @@ function SourceCard({
   isZh: boolean;
   busy: boolean;
   readerEvidenceExists: boolean;
-  onReview: (source: EventPackFactorySource, status: 'APPROVED' | 'REJECTED') => void;
+  onReview: (source: EventPackFactorySource, status: 'APPROVED') => void;
+  onSelection: (source: EventPackFactorySource, included: boolean) => void;
+  onPermanentDelete: (source: EventPackFactorySource) => void;
   onReader: (source: EventPackFactorySource) => void;
   onLoadRawText: (
     source: EventPackFactorySource,
@@ -292,7 +312,10 @@ function SourceCard({
   ) => Promise<EventPackFactorySourceRawText | undefined>;
 }) {
   const discoveryOnly = source.evidenceRole === 'DISCOVERY_ONLY';
-  const readerAvailable = source.kind === 'SEARCH_RESULT' && source.reviewStatus === 'APPROVED';
+  const excluded = source.selectionStatus === 'EXCLUDED';
+  const readerAvailable = source.kind === 'SEARCH_RESULT'
+    && source.reviewStatus === 'APPROVED'
+    && !excluded;
   const rawTextAvailable = !discoveryOnly && source.reviewStatus !== 'REJECTED';
   const [rawText, setRawText] = useState<EventPackFactorySourceRawText>();
   const [rawDraft, setRawDraft] = useState('');
@@ -353,8 +376,15 @@ function SourceCard({
           {source.securityDecision === 'REVIEW' ? (
             <Tag type="warm-gray" size="sm">{isZh ? '内容需谨慎复核' : 'Content review required'}</Tag>
           ) : null}
+          {excluded ? (
+            <Tag type="gray" size="sm">{isZh ? '已排除，可重新加入' : 'Excluded; can be restored'}</Tag>
+          ) : null}
         </div>
-        <span>{source.kind.replaceAll('_', ' ')}</span>
+        <span>{source.kind === 'PASTE'
+          ? isZh ? '粘贴原文' : 'Pasted text'
+          : source.kind === 'READER'
+            ? isZh ? 'Reader 全文' : 'Reader full text'
+            : isZh ? '搜索线索' : 'Search clue'}</span>
       </header>
       <h3>{source.title}</h3>
       <p className="factory-source__publisher">{source.publisher}</p>
@@ -363,7 +393,37 @@ function SourceCard({
         <div><dt>{isZh ? '可见时间' : 'Known at'}</dt><dd>{new Intl.DateTimeFormat(isZh ? 'zh-CN' : 'en', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(source.knownAt))}</dd></div>
         <div><dt>{isZh ? '内容长度' : 'Content length'}</dt><dd>{source.contentLength.toLocaleString()} {isZh ? '字符' : 'characters'}</dd></div>
         <div><dt>{isZh ? '内容哈希' : 'Content hash'}</dt><dd><code title={source.contentHash}>{source.contentHash.slice(0, 16)}</code></dd></div>
+        <div><dt>{isZh ? '来源审查' : 'Source review'}</dt><dd>{source.officialHost
+          ? `${isZh ? '官方域名' : 'Official host'} · ${source.officialHost}`
+          : source.sourceReviewLabel}</dd></div>
       </dl>
+      {source.securityFindings.length > 0 ? (
+        <details className="factory-source__security">
+          <summary>{isZh
+            ? `安全发现（${source.securityFindings.length}）`
+            : `Safety findings (${source.securityFindings.length})`}</summary>
+          <p>{isZh
+            ? '仅显示分类、字段位置与建议动作；不会回显命中的原文。'
+            : 'Only category, field location, and a recommended action are shown; matched text is never echoed.'}</p>
+          <ul>
+            {source.securityFindings.map((finding, index) => (
+              <li key={`${finding.field}-${finding.offset}-${finding.code}-${index}`}>
+                <strong>{finding.riskCategory ?? finding.code}</strong>
+                <span>{finding.severity} · {finding.field} · {finding.offset}</span>
+                <span>{finding.recommendedAction}</span>
+              </li>
+            ))}
+          </ul>
+          <div className="factory-source__security-actions">
+            {rawTextAvailable ? (
+              <a href={`#factory-raw-panel-${source.id}`}>
+                {isZh ? '查看并编辑原文' : 'Review and edit raw text'}
+              </a>
+            ) : null}
+            <a href="#factory-data-handling">{isZh ? '查看数据处理规则' : 'Review data-handling policy'}</a>
+          </div>
+        </details>
+      ) : null}
       {source.url ? (
         <a href={source.url} target="_blank" rel="noopener noreferrer nofollow">
           <Globe size={16} aria-hidden="true" />
@@ -378,6 +438,7 @@ function SourceCard({
       ) : null}
       {rawTextAvailable ? (
         <details
+          id={`factory-raw-panel-${source.id}`}
           className="factory-source__raw-text"
           onToggle={(event) => {
             if (event.currentTarget.open) void loadRawText();
@@ -429,19 +490,37 @@ function SourceCard({
           kind="ghost"
           size="sm"
           renderIcon={Check}
-          disabled={busy || source.reviewStatus === 'APPROVED'}
+          disabled={busy || source.reviewStatus === 'APPROVED' || excluded}
           onClick={() => onReview(source, 'APPROVED')}
         >
-          {isZh ? '人工批准' : 'Approve source'}
+          {discoveryOnly
+            ? isZh ? '允许读取全文' : 'Allow full-text retrieval'
+            : isZh ? '人工批准证据' : 'Approve evidence'}
+        </Button>
+        <Button
+          kind="ghost"
+          size="sm"
+          renderIcon={X}
+          disabled={busy || source.reviewStatus === 'REJECTED'}
+          onClick={() => onSelection(source, excluded)}
+        >
+          {excluded
+            ? isZh ? '重新加入当前证据集' : 'Restore to current evidence set'
+            : isZh ? '从当前证据集排除' : 'Exclude from current evidence set'}
         </Button>
         <Button
           kind="danger--ghost"
           size="sm"
-          renderIcon={X}
-          disabled={busy || source.reviewStatus === 'REJECTED'}
-          onClick={() => onReview(source, 'REJECTED')}
+          renderIcon={Trash}
+          disabled={busy || source.reviewStatus === 'REJECTED' || discoveryOnly}
+          onClick={() => {
+            const confirmed = window.confirm(isZh
+              ? '这是不可逆操作：服务器会永久删除该来源原文；审计记录只保留哈希、长度与删除事实。若以后需要使用，必须重新导入。确认删除原文？'
+              : 'This is irreversible: the server will permanently delete the source text. Audit keeps only the hash, length, and deletion event. Reuse requires a fresh import. Delete the raw text?');
+            if (confirmed) onPermanentDelete(source);
+          }}
         >
-          {isZh ? '拒绝' : 'Reject'}
+          {isZh ? '永久删除原文' : 'Permanently delete raw text'}
         </Button>
         {readerAvailable ? (
           <Button
@@ -477,6 +556,7 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
   const [buildTitleError, setBuildTitleError] = useState<string>();
   const [pasteErrors, setPasteErrors] = useState<Record<string, PasteValidationErrors>>({});
   const [searchQueryError, setSearchQueryError] = useState<string>();
+  const [sourceFilter, setSourceFilter] = useState<FactorySourceFilter>('ALL');
   const [buildTitle, setBuildTitle] = useState(guidedHandoff?.eventMetadata.title ?? '');
   const [pasteDrafts, setPasteDrafts] = useState<PasteDraft[]>([newPasteDraft(0)]);
   const [searchQuery, setSearchQuery] = useState(
@@ -929,6 +1009,34 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
     });
   };
 
+  const setSourceIncluded = async (
+    source: EventPackFactorySource,
+    included: boolean,
+  ) => {
+    if (!snapshot) return;
+    await run(`selection-${source.id}`, async () => {
+      await api.setFactorySourceIncluded(
+        snapshot.build.id,
+        source.id,
+        snapshot.build.revision,
+        included,
+      );
+      await refreshSnapshot(snapshot.build.id);
+    });
+  };
+
+  const permanentlyDeleteSourceText = async (source: EventPackFactorySource) => {
+    if (!snapshot) return;
+    await run(`raw-delete-${source.id}`, async () => {
+      await api.permanentlyDeleteFactorySourceText(
+        snapshot.build.id,
+        source.id,
+        snapshot.build.revision,
+      );
+      await refreshSnapshot(snapshot.build.id);
+    });
+  };
+
   const readSource = async (source: EventPackFactorySource) => {
     if (!snapshot) return;
     const operation = `reader:${source.id}`;
@@ -1005,8 +1113,8 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
         : 'Approve at least one pasted or Reader full-text source in step 3. Search snippets are discovery-only and cannot serve as evidence.';
     } else if (pendingEvidenceSources.length > 0) {
       validationErrors.sourceReview = isZh
-        ? `还有 ${pendingEvidenceSources.length} 个全文证据来源等待人工批准或拒绝。`
-        : `${pendingEvidenceSources.length} full-text evidence source(s) still need an explicit approve or reject decision.`;
+        ? `还有 ${pendingEvidenceSources.length} 个当前证据集中的全文来源等待人工批准；不使用时可先从当前证据集排除。`
+        : `${pendingEvidenceSources.length} full-text source(s) in the current evidence set still need approval; exclude any source you do not want to use.`;
     }
     if (materializeTitle.trim().length < 3) {
       validationErrors.title = isZh
@@ -1149,13 +1257,35 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
   };
 
   const approvedEvidence = snapshot?.sources.filter(
-    (source) => source.evidenceRole === 'EVIDENCE' && source.reviewStatus === 'APPROVED',
+    (source) => source.evidenceRole === 'EVIDENCE'
+      && source.reviewStatus === 'APPROVED'
+      && source.selectionStatus !== 'EXCLUDED',
   ) ?? [];
   const pendingEvidenceSources = snapshot?.sources.filter(
-    (source) => source.evidenceRole === 'EVIDENCE' && source.reviewStatus === 'PENDING',
+    (source) => source.evidenceRole === 'EVIDENCE'
+      && source.reviewStatus === 'PENDING'
+      && source.selectionStatus !== 'EXCLUDED',
   ) ?? [];
   const pendingSources = snapshot?.sources.filter((source) => source.reviewStatus === 'PENDING') ?? [];
   const rejectedSources = snapshot?.sources.filter((source) => source.reviewStatus === 'REJECTED') ?? [];
+  const excludedSources = snapshot?.sources.filter(
+    (source) => source.selectionStatus === 'EXCLUDED' && source.reviewStatus !== 'REJECTED',
+  ) ?? [];
+  const filteredSources = snapshot?.sources.filter((source) => {
+    if (sourceFilter === 'ALL') return true;
+    if (sourceFilter === 'EXCLUDED') return source.selectionStatus === 'EXCLUDED';
+    if (source.selectionStatus === 'EXCLUDED') return false;
+    if (sourceFilter === 'DISCOVERY_CLUES') {
+      return source.evidenceRole === 'DISCOVERY_ONLY' && source.reviewStatus === 'PENDING';
+    }
+    if (sourceFilter === 'AWAITING_READ') {
+      return source.evidenceRole === 'DISCOVERY_ONLY' && source.reviewStatus === 'APPROVED';
+    }
+    if (sourceFilter === 'PENDING_EVIDENCE') {
+      return source.evidenceRole === 'EVIDENCE' && source.reviewStatus === 'PENDING';
+    }
+    return source.evidenceRole === 'EVIDENCE' && source.reviewStatus === 'APPROVED';
+  }) ?? [];
   const activeEvidenceCount = snapshot?.sources.filter(
     (source) => source.evidenceRole === 'EVIDENCE' && source.reviewStatus !== 'REJECTED',
   ).length ?? 0;
@@ -1169,7 +1299,7 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
   const evidenceReviewFingerprint = useMemo(
     () => (snapshot?.sources ?? [])
       .filter((source) => source.evidenceRole === 'EVIDENCE')
-      .map((source) => `${source.id}:${source.contentHash}:${source.reviewStatus}`)
+      .map((source) => `${source.id}:${source.contentHash}:${source.reviewStatus}:${source.selectionStatus}`)
       .sort()
       .join('|'),
     [snapshot?.sources],
@@ -1351,8 +1481,8 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
         hideCloseButton
         title={isZh ? '来源与费用边界' : 'Source and cost boundary'}
         subtitle={isZh
-          ? '联网检索和网页读取可能产生供应商费用，并可能遗漏、延迟或错误。Reader 价格尚未在本项目中核实，使用前请查看供应商控制台。请勿提交秘密或个人信息；所有来源仍必须打开原网页并人工核对。'
-          : 'Search and Reader calls may incur provider charges and may be incomplete, delayed, or wrong. Reader pricing has not been verified by this project; check the provider console before use. Do not submit secrets or personal data; open the original page and review every source.'}
+          ? '联网检索和网页读取可能产生供应商费用，并可能遗漏、延迟或错误。应用会拒绝明显的本地、私网及非 HTTPS 地址，但 Reader 的目标 DNS、网络连接和网页重定向由智谱执行，本应用无法固定或逐跳复核供应商连接。Reader 价格也尚未在本项目中核实。请勿提交秘密或个人信息，并务必打开原网页核对 Reader 返回的来源身份和正文。'
+          : 'Search and Reader calls may incur provider charges and may be incomplete, delayed, or wrong. The application blocks obvious local, private-network and non-HTTPS addresses, but Zhipu performs target DNS resolution, network access and webpage redirects; this application cannot pin or revalidate those provider-side hops. Reader pricing is also unverified. Do not submit secrets or personal data, and open the original page to verify the returned source identity and text.'}
       />
 
       <div className="factory-layout">
@@ -1591,8 +1721,8 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
                   <div>
                     <h2 id="factory-review-heading" tabIndex={-1}>{isZh ? '3. 逐个审核来源' : '3. Review every source'}</h2>
                     <p>{isZh
-                      ? '先批准搜索线索再读取全文；Reader 返回的全文证据仍是新的待审核对象。任何批准都不能代替打开原网页核对。'
-                      : 'Approve a discovery result before reading the full page. Reader evidence returns as a new pending object and still needs review. Approval never replaces checking the original page.'}</p>
+                      ? '先允许 Reader 读取搜索线索的全文；这不是证据批准。Reader 返回的全文会成为新的待审核证据，旧线索无需逐个拒绝。'
+                      : 'Allow Reader to retrieve a discovery result; this is not evidence approval. The returned full text becomes a separate pending evidence item, and old clues do not need to be rejected.'}</p>
                   </div>
                   <Button kind="ghost" size="sm" renderIcon={ArrowClockwise} disabled={Boolean(busyAction)} onClick={() => void refreshSnapshot(snapshot.build.id)}>
                     {isZh ? '刷新' : 'Refresh'}
@@ -1609,11 +1739,33 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
                   />
                 ) : null}
                 {renderActionError('review')}
+                <ol className="factory-source-chain" aria-label={isZh ? '来源转换链' : 'Source conversion chain'}>
+                  <li><strong>{isZh ? '搜索线索' : 'Search clue'}</strong><span>{isZh ? '仅用于发现' : 'Discovery only'}</span></li>
+                  <li><strong>{isZh ? '允许读取' : 'Read allowed'}</strong><span>{isZh ? '授权 Reader 获取全文' : 'Authorizes Reader retrieval'}</span></li>
+                  <li><strong>{isZh ? '全文证据' : 'Full-text evidence'}</strong><span>{isZh ? '独立扫描与人工审核' : 'Separate scan and human review'}</span></li>
+                  <li><strong>{isZh ? '批准证据' : 'Approved evidence'}</strong><span>{isZh ? '才可支持候选主张' : 'May support candidate claims'}</span></li>
+                  <li><strong>{isZh ? '候选主张' : 'Candidate claim'}</strong><span>{isZh ? '仍需事件包审核' : 'Still requires Event Pack review'}</span></li>
+                </ol>
+                <div className="factory-source-filter">
+                  <Select
+                    id="factory-source-filter"
+                    labelText={isZh ? '按来源状态筛选' : 'Filter by source status'}
+                    value={sourceFilter}
+                    onChange={(event) => setSourceFilter(event.target.value as FactorySourceFilter)}
+                  >
+                    <SelectItem value="ALL" text={isZh ? `全部（${snapshot.sources.length}）` : `All (${snapshot.sources.length})`} />
+                    <SelectItem value="DISCOVERY_CLUES" text={isZh ? '发现线索' : 'Discovery clues'} />
+                    <SelectItem value="AWAITING_READ" text={isZh ? '等待读取全文' : 'Awaiting full-text read'} />
+                    <SelectItem value="PENDING_EVIDENCE" text={isZh ? '待审核证据' : 'Pending evidence'} />
+                    <SelectItem value="APPROVED_EVIDENCE" text={isZh ? '已批准证据' : 'Approved evidence'} />
+                    <SelectItem value="EXCLUDED" text={isZh ? `已排除（${excludedSources.length}）` : `Excluded (${excludedSources.length})`} />
+                  </Select>
+                </div>
                 {snapshot.sources.length === 0 ? (
                   <EmptyState title={isZh ? '还没有来源' : 'No sources yet'} body={isZh ? '从上方粘贴原文或执行一次联网搜索。' : 'Paste source text or run a web search above.'} />
                 ) : (
                   <div className="factory-source-list">
-                    {snapshot.sources.map((source) => (
+                    {filteredSources.map((source) => (
                       <SourceCard
                         key={source.id}
                         source={source}
@@ -1623,6 +1775,8 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
                           (candidate) => candidate.parentSourceId === source.id,
                         )}
                         onReview={(item, status) => void review(item, status)}
+                        onSelection={(item, included) => void setSourceIncluded(item, included)}
+                        onPermanentDelete={(item) => void permanentlyDeleteSourceText(item)}
                         onReader={(item) => void readSource(item)}
                         onLoadRawText={loadRawText}
                         onSaveRawText={saveRawText}
@@ -1632,9 +1786,15 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
                 )}
                 {rejectedSources.length > 0 ? (
                   <p className="factory-rejected-note">{isZh
-                    ? `${rejectedSources.length} 个来源已拒绝并保留在审计历史中。`
-                    : `${rejectedSources.length} rejected source(s) remain in the audit history.`}</p>
+                    ? `${rejectedSources.length} 个来源的原文已永久删除；审计历史只保留删除事实。`
+                    : `${rejectedSources.length} source text payload(s) were permanently deleted; audit retains only the deletion event.`}</p>
                 ) : null}
+                <aside id="factory-data-handling" className="factory-data-handling">
+                  <strong>{isZh ? '排除与删除是两种不同操作' : 'Exclusion and deletion are different actions'}</strong>
+                  <p>{isZh
+                    ? '“从当前证据集排除”保留原文、安全摘要与审核历史，可随时重新加入；“永久删除原文”不可撤销，只保留哈希、长度和审计事件。所有未物化构建仍受页面所示计划清理时间约束。'
+                    : 'Excluding from the current evidence set retains raw text, safety metadata, and review history so the source can be restored. Permanently deleting raw text is irreversible and retains only hash, length, and the audit event. Unmaterialized builds remain subject to the displayed scheduled-deletion time.'}</p>
+                </aside>
               </section>
 
               <section className="factory-section factory-materialize" aria-labelledby="factory-materialize-heading">
@@ -1743,20 +1903,28 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
                     tabIndex={-1}
                   >
                     <legend>{isZh ? '需要抽取的影响通道' : 'Impact channels to extract'}</legend>
-                    {IMPACT_CHANNELS.map((channel) => (
-                      <Checkbox
-                        key={channel}
-                        id={`factory-impact-${channel}`}
-                        labelText={channel}
-                        checked={impactChannels.includes(channel)}
-                        onChange={(_event, stateValue) => {
-                          setImpactChannels((current) => stateValue.checked
-                            ? [...current, channel]
-                            : current.filter((item) => item !== channel));
-                          if (stateValue.checked) clearMaterializeError('impactChannels');
-                        }}
-                      />
-                    ))}
+                    {IMPACT_CHANNEL_DEFINITIONS.map(({ id: channel }) => {
+                      const display = impactChannelDisplay(channel, language);
+                      return (
+                        <Checkbox
+                          key={channel}
+                          id={`factory-impact-${channel}`}
+                          labelText={(
+                            <span className="factory-impact-channel-label">
+                              <strong>{display.name}</strong>
+                              <small>{display.description}</small>
+                            </span>
+                          )}
+                          checked={impactChannels.includes(channel)}
+                          onChange={(_event, stateValue) => {
+                            setImpactChannels((current) => stateValue.checked
+                              ? [...current, channel]
+                              : current.filter((item) => item !== channel));
+                            if (stateValue.checked) clearMaterializeError('impactChannels');
+                          }}
+                        />
+                      );
+                    })}
                     {materializeErrors.impactChannels ? (
                       <p id="factory-impact-channels-error" className="factory-field-error">
                         {materializeErrors.impactChannels}

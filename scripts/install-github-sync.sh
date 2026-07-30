@@ -65,6 +65,7 @@ for scriptName in \
   register-baota-task.py \
   register-baota-site.py \
   install-nginx-systemd-override.sh \
+  verify-restart-recovery.sh \
   install-github-sync.sh; do
   install -m 0755 \
     "${SOURCE_ROOT}/scripts/${scriptName}" \
@@ -108,6 +109,24 @@ cat >/etc/logrotate.d/eventshock-github-sync <<'EOF'
 }
 EOF
 chmod 0644 /etc/logrotate.d/eventshock-github-sync
+
+[[ ! -L /etc/systemd/system/eventshock-restart-verification.service ]] \
+  || fail "重启验证 systemd 单元不能是符号链接。"
+cat >/etc/systemd/system/eventshock-restart-verification.service <<'EOF'
+[Unit]
+Description=EventShock controlled restart recovery verification
+After=docker.service nginx.service network-online.target
+Wants=docker.service nginx.service network-online.target
+ConditionPathExists=/var/lib/eventshock-restart-verification/pending.json
+
+[Service]
+Type=oneshot
+ExecStart=/opt/eventshock/bin/verify-restart-recovery.sh verify
+TimeoutStartSec=360
+EOF
+chmod 0644 /etc/systemd/system/eventshock-restart-verification.service
+systemctl daemon-reload
+systemctl enable eventshock-restart-verification.service >/dev/null
 
 printf '[eventshock-sync-install] 已安装：%s\n' "${BIN_DIR}/sync-from-github.sh"
 printf '[eventshock-sync-install] 宝塔任务入口：%s\n' "${BIN_DIR}/baota-eventshock-task.sh"

@@ -1,4 +1,11 @@
-import { Button, DefinitionTooltip, InlineNotification, SkeletonText, Tag } from '@carbon/react';
+import {
+  Button,
+  InlineNotification,
+  Popover,
+  PopoverContent,
+  SkeletonText,
+  Tag,
+} from '@carbon/react';
 import {
   ArrowClockwise,
   CheckCircle,
@@ -8,7 +15,15 @@ import {
   Info,
   WarningCircle,
 } from '@phosphor-icons/react';
-import type { ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
+import { GITHUB_ISSUE_CHOOSER_URL } from '../external-links';
 import { translateStatus, useI18n } from '../i18n';
 import type { PageGuideContent } from '../page-guidance';
 import { useWorkflow, type RequestState } from '../state/workflow-context';
@@ -73,6 +88,10 @@ export function ExplainedLabel({
   );
 }
 
+type ParameterHelpOpenMode = 'hover' | 'focus' | 'click';
+
+let closeActiveParameterHelp: (() => void) | undefined;
+
 export function ParameterHelp({
   label,
   explanation,
@@ -81,22 +100,113 @@ export function ParameterHelp({
   explanation: string;
 }) {
   const { language } = useI18n();
+  const [openMode, setOpenMode] = useState<ParameterHelpOpenMode>();
+  const popoverRef = useRef<HTMLSpanElement>(null);
+  const pointerFocusRef = useRef(false);
+  const tooltipId = useId();
+  const open = openMode !== undefined;
   const genericLabel = language === 'zh-CN' ? '查看参数说明' : 'View parameter help';
   const accessibilityLabel = label
     ? language === 'zh-CN' ? `查看“${label}”的参数说明` : `View parameter help for ${label}`
     : genericLabel;
 
+  const close = useCallback(() => {
+    setOpenMode(undefined);
+    if (closeActiveParameterHelp === close) closeActiveParameterHelp = undefined;
+  }, []);
+
+  const openWithMode = useCallback((mode: ParameterHelpOpenMode) => {
+    if (closeActiveParameterHelp && closeActiveParameterHelp !== close) {
+      closeActiveParameterHelp();
+    }
+    closeActiveParameterHelp = close;
+    setOpenMode(mode);
+  }, [close]);
+
+  useEffect(() => () => {
+    if (closeActiveParameterHelp === close) closeActiveParameterHelp = undefined;
+  }, [close]);
+
+  useEffect(() => {
+    close();
+  }, [close, explanation, label]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close();
+    };
+    const closeOnOutsidePointerDown = (event: PointerEvent) => {
+      if (
+        event.target instanceof Node
+        && !popoverRef.current?.contains(event.target)
+      ) {
+        close();
+      }
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('hashchange', close);
+    window.addEventListener('popstate', close);
+    document.addEventListener('pointerdown', closeOnOutsidePointerDown, true);
+    return () => {
+      window.removeEventListener('keydown', closeOnEscape);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('hashchange', close);
+      window.removeEventListener('popstate', close);
+      document.removeEventListener('pointerdown', closeOnOutsidePointerDown, true);
+    };
+  }, [close, open]);
+
   return (
-    <DefinitionTooltip
-      definition={explanation}
+    <Popover
+      ref={popoverRef}
       align="top"
       autoAlign
-      openOnHover
-      aria-label={accessibilityLabel}
-      triggerClassName="explained-label__trigger"
+      caret
+      dropShadow
+      open={open}
+      onRequestClose={close}
     >
-      <Info size={15} weight="fill" aria-hidden="true" />
-    </DefinitionTooltip>
+      <button
+        type="button"
+        className="explained-label__trigger"
+        aria-label={accessibilityLabel}
+        aria-describedby={tooltipId}
+        aria-expanded={open}
+        onBlur={() => {
+          pointerFocusRef.current = false;
+          close();
+        }}
+        onClick={() => {
+          if (openMode === 'click') close();
+          else openWithMode('click');
+        }}
+        onFocus={() => {
+          if (!pointerFocusRef.current && openMode !== 'click') openWithMode('focus');
+        }}
+        onMouseEnter={() => {
+          if (openMode === undefined) openWithMode('hover');
+        }}
+        onMouseLeave={() => {
+          if (openMode === 'hover') close();
+        }}
+        onPointerCancel={() => {
+          pointerFocusRef.current = false;
+        }}
+        onPointerDown={() => {
+          pointerFocusRef.current = true;
+        }}
+        onPointerUp={() => {
+          pointerFocusRef.current = false;
+        }}
+      >
+        <Info size={15} weight="fill" aria-hidden="true" />
+      </button>
+      <PopoverContent id={tooltipId} role="tooltip" className="parameter-help-content">
+        {explanation}
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -139,24 +249,63 @@ export function ErrorPanel({
   body,
   detail,
   onRetry,
+  savedState,
+  costState,
+  dataSafety,
+  nextStep,
+  traceId,
 }: {
   title?: string;
   body?: string;
   detail?: string;
   onRetry?: () => void;
+  savedState?: string;
+  costState?: string;
+  dataSafety?: string;
+  nextStep?: string;
+  traceId?: string;
 }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
+  const isZh = language === 'zh-CN';
+  const inferredTraceId = traceId
+    ?? detail?.match(/(?:trace(?:\s*id)?|追踪(?:号| ID)?)[:：]\s*([A-Za-z0-9_-]+)/i)?.[1];
   return (
     <section className="state-panel state-panel--error" role="alert">
       <div className="state-panel__icon" aria-hidden="true"><WarningCircle size={28} weight="duotone" /></div>
       <h2>{title ?? t('common.errorTitle')}</h2>
       <p>{body ?? t('common.errorFallback')}</p>
+      <dl className="state-panel__impact">
+        <div>
+          <dt>{isZh ? '保存状态' : 'Save status'}</dt>
+          <dd>{savedState ?? (isZh ? '未确认成功；请以重新加载后的服务器状态为准。' : 'Not confirmed; rely on the server state after reloading.')}</dd>
+        </div>
+        <div>
+          <dt>{isZh ? '费用状态' : 'Cost status'}</dt>
+          <dd>{costState ?? (isZh ? '当前错误没有提供费用结论；付费请求请先查历史再重试。' : 'This error provides no cost conclusion; check history before retrying a paid request.')}</dd>
+        </div>
+        <div>
+          <dt>{isZh ? '数据安全' : 'Data safety'}</dt>
+          <dd>{dataSafety ?? (isZh ? '此处不显示敏感请求内容；不要把 Key、Cookie 或完整请求头提交到 Issue。' : 'Sensitive request content is not shown here; never put keys, cookies, or full headers in an issue.')}</dd>
+        </div>
+        <div>
+          <dt>{isZh ? '下一步' : 'Next step'}</dt>
+          <dd>{nextStep ?? (onRetry
+            ? isZh ? '确认配置和网络后重试一次；仍失败时携带脱敏追踪号提交 Issue。' : 'Verify configuration and network, retry once, then file an issue with a redacted trace ID.'
+            : isZh ? '重新加载当前页面核对状态；仍失败时携带脱敏追踪号提交 Issue。' : 'Reload this page to verify state, then file an issue with a redacted trace ID.')}</dd>
+        </div>
+      </dl>
       {detail ? <details><summary>{t('common.details')}</summary><code>{detail}</code></details> : null}
-      {onRetry ? (
-        <Button kind="tertiary" size="sm" renderIcon={ArrowClockwise} onClick={onRetry}>
-          {t('common.retry')}
-        </Button>
-      ) : null}
+      <div className="state-panel__actions">
+        {onRetry ? (
+          <Button kind="tertiary" size="sm" renderIcon={ArrowClockwise} onClick={onRetry}>
+            {t('common.retry')}
+          </Button>
+        ) : null}
+        <a href={GITHUB_ISSUE_CHOOSER_URL} target="_blank" rel="noopener noreferrer">
+          {isZh ? '提交脱敏 Issue' : 'File a redacted issue'}
+        </a>
+      </div>
+      {inferredTraceId ? <p className="state-panel__trace">{isZh ? '追踪号' : 'Trace ID'}: <code>{inferredTraceId}</code></p> : null}
     </section>
   );
 }

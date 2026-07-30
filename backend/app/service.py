@@ -42,8 +42,17 @@ from backend.app.cognition import (
     estimateReservation,
 )
 from backend.app.cognition.pricing import getTokenPrice
+from backend.app.cognition.result_semantics import (
+    buildResultFactCatalog,
+    strongestMetricFacts,
+)
+from backend.app.cognition.streaming import ModelStreamProgress, ModelStreamStage
 from backend.app.database import Database, utcNow
 from backend.app.errors import ApiError
+from backend.app.event_pack_claims import (
+    ALLOWED_IMPACT_CHANNELS,
+    extractRuleFallbackClaims,
+)
 from backend.app.export import buildParquetArtifacts
 from backend.app.schemas import (
     BulkClaimApprovalRequest,
@@ -71,6 +80,36 @@ MAX_RUNTIME_LOG_ENTRIES = 200
 EXPERIMENT_CHECKPOINT_SCHEMA_VERSION = "1.0.0"
 COGNITION_PILOT_SCHEDULE_MODE = "CLOSED_LOOP_PILOT_FROZEN_FOR_MATCHED_SEEDS"
 MODEL_GENERATED_SOCIAL_LABEL = "[MODEL-GENERATED — NOT NEW EVIDENCE]"
+SIMULATION_ENGINE_VERSION = "eventshock-simulation-0.3.0"
+NO_EXTERNAL_COGNITION_REASON = "no external cognition requested"
+BULK_APPROVAL_MIN_CONFIDENCE = 0.75
+
+
+def _cognitionFailureCategory(code: str) -> str:
+    if code in {"MODEL_AUTHENTICATION_ERROR", "MODEL_PERMISSION_ERROR", "LLM_CREDENTIAL_EXPIRED"}:
+        return "AUTHENTICATION"
+    if code in {"MODEL_TIMEOUT", "MODEL_OVERLOADED"}:
+        return "AVAILABILITY"
+    if code == "MODEL_TRANSPORT_ERROR":
+        return "TRANSPORT"
+    if code == "MODEL_RATE_LIMITED":
+        return "RATE_LIMIT"
+    if code == "MODEL_QUOTA_EXHAUSTED":
+        return "QUOTA"
+    if code in {"MODEL_PRICING_UNAVAILABLE", "MODEL_COST_BUDGET_EXCEEDED"}:
+        return "COST_CONTROL"
+    if code in {
+        "MODEL_RESPONSE_INVALID",
+        "SCHEMA_INVALID",
+        "EVIDENCE_ID_UNKNOWN",
+        "ACTION_NOT_ALLOWED",
+    }:
+        return "STRUCTURED_VALIDATION"
+    if code in {"REFUSAL", "CONTENT_FILTERED", "PROMPT_DISCLOSURE_BLOCKED"}:
+        return "SAFETY_OR_REFUSAL"
+    if code in {"FALLBACK_USED", "RULE_FALLBACK_USED"}:
+        return "RULE_FALLBACK"
+    return "OTHER"
 
 
 def _defaultContentSecuritySummary() -> dict[str, Any]:
@@ -86,6 +125,11 @@ def _defaultContentSecuritySummary() -> dict[str, Any]:
         "findings": [],
         "sources": [],
         "rawContentRetained": False,
+        "modelInputSummary": {
+            "retainedFieldCount": 0,
+            "removedFieldCount": 0,
+            "redactedFieldCount": 0,
+        },
     }
 
 
@@ -108,6 +152,86 @@ def _contentSecurityAuditSummary(
             }
         ),
         "rawContentRetained": False,
+        "modelInputSummary": value.get(
+            "modelInputSummary",
+            {
+                "retainedFieldCount": 0,
+                "removedFieldCount": 0,
+                "redactedFieldCount": 0,
+            },
+        ),
+    }
+
+
+def _claimBulkApprovalExclusionReasons(
+    eventPack: dict[str, Any],
+    claim: dict[str, Any],
+) -> list[str]:
+    """服务端统一判定批量审核资格，避免客户端提示与实际写入规则漂移。"""
+
+    # 仓库内置案例由版本化清单人工策展，不属于 Factory/模型抽取队列；
+    # 质量门禁只约束可重抽取的自定义 Event Pack，保持既有案例审核契约。
+    if eventPack.get("editableExtraction") is False:
+        return []
+
+    reasons: list[str] = []
+    confidence = claim.get("confidence")
+    if not isinstance(confidence, (int, float)) or float(confidence) < BULK_APPROVAL_MIN_CONFIDENCE:
+        reasons.append("LOW_CONFIDENCE")
+    channels = claim.get("impactChannels")
+    if not isinstance(channels, list) or len(channels) > 1:
+        reasons.append("MULTIPLE_IMPACT_CHANNELS")
+
+    extraction = eventPack.get("extraction")
+    contentSecurity = extraction.get("contentSecurity") if isinstance(extraction, dict) else None
+    securitySources = contentSecurity.get("sources") if isinstance(contentSecurity, dict) else None
+    reviewSourceIds = {
+        str(source.get("sourceId"))
+        for source in securitySources or []
+        if isinstance(source, dict) and source.get("decision") == "REVIEW"
+    }
+    claimSourceIds = {
+        str(sourceId) for sourceId in claim.get("sourceIds", []) if isinstance(sourceId, str)
+    }
+    if reviewSourceIds & claimSourceIds:
+        reasons.append("CONTENT_SAFETY_REVIEW")
+
+    if str(claim.get("sourceTier", "")).upper() != "OFFICIAL":
+        reasons.append("NON_OFFICIAL_SOURCE")
+    if claim.get("bulkApprovalEligible", True) is not True:
+        reasons.append("EXTRACTION_NOT_ELIGIBLE")
+    return list(dict.fromkeys(reasons))
+
+
+def _annotateClaimBulkApprovalMetadata(eventPack: dict[str, Any]) -> None:
+    for claim in eventPack.get("claims", []):
+        if not isinstance(claim, dict):
+            continue
+        reasons = _claimBulkApprovalExclusionReasons(eventPack, claim)
+        claim["bulkApprovalEligible"] = not reasons
+        claim["bulkApprovalExclusionReasons"] = reasons
+        claim["bulkApprovalMinimumConfidence"] = BULK_APPROVAL_MIN_CONFIDENCE
+
+
+def _extractionQualityMetadata(
+    extractionMode: str,
+    claims: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """把抽取质量与批量审核权限写入不可含糊的服务端契约。"""
+
+    ruleFallback = "RULE_FALLBACK" in extractionMode or extractionMode in {
+        "RULE_ONLY",
+        "RULE_FALLBACK",
+    }
+    bulkApprovalAllowed = not ruleFallback and all(
+        claim.get("bulkApprovalEligible", True) is not False for claim in claims
+    )
+    return {
+        "qualityTier": (
+            "RULE_FALLBACK_REVIEW_REQUIRED" if ruleFallback else "MODEL_EXTRACTED_REVIEW_REQUIRED"
+        ),
+        "bulkApprovalAllowed": bulkApprovalAllowed,
+        "confidenceMeaning": "EXTRACTION_FIDELITY_NOT_EVENT_PROBABILITY",
     }
 
 
@@ -181,6 +305,7 @@ class EventPackService:
             eventPack["frozenAt"] = None
         eventPack["editableExtraction"] = eventPackId not in self.canonicalPacks
         eventPack["sessionScoped"] = True
+        _annotateClaimBulkApprovalMetadata(eventPack)
         return eventPack
 
     def createEventPack(
@@ -203,6 +328,7 @@ class EventPackService:
             raise ValueError("eventPackId must be a valid custom immutable identifier")
         sourceRecords = [self._sourceRecord(source) for source in requestData.sources]
         extractedClaims = claims or self.extractCandidateClaims(requestData, maximumClaims=16)
+        extractionQuality = _extractionQualityMetadata(extractionMode, extractedClaims)
         manifest = {
             "schemaVersion": "1.0.0",
             "id": eventPackId,
@@ -232,6 +358,7 @@ class EventPackService:
                 "humanReviewRequired": True,
                 "generatedAt": utcNow(),
                 "contentSecurity": contentSecurity or _defaultContentSecuritySummary(),
+                **extractionQuality,
             },
             "mechanismRules": {"clarificationClaimId": "claim-clarification"},
             "defaultExperiment": {
@@ -311,11 +438,13 @@ class EventPackService:
             eventPack.pop("status", None)
             eventPack.pop("frozenAt", None)
             eventPack.pop("sessionScoped", None)
+            extractionQuality = _extractionQualityMetadata(extractionMode, claims)
             eventPack["extraction"] = {
                 "mode": extractionMode,
                 "humanReviewRequired": True,
                 "generatedAt": utcNow(),
                 "contentSecurity": contentSecurity or _defaultContentSecuritySummary(),
+                **extractionQuality,
             }
             eventPack["sources"] = sourceRecords
             retainedTimeline = [
@@ -384,52 +513,24 @@ class EventPackService:
         self,
         requestData: EventPackCreateRequest,
         maximumClaims: int,
+        requestedImpactChannels: tuple[str, ...] = ALLOWED_IMPACT_CHANNELS,
     ) -> list[dict[str, Any]]:
-        """无外部模型时的确定性候选抽取；结果仍必须逐条人工审核。"""
-        candidates: list[dict[str, Any]] = []
-        seenTexts: set[str] = set()
-        for source in requestData.sources:
-            sentences = re.split(r"(?<=[.!?。！？])\s+|\n+", source.rawText)
-            for sentence in sentences:
-                normalizedText = " ".join(sentence.split()).strip()
-                if len(normalizedText) < 20 or normalizedText in seenTexts:
-                    continue
-                seenTexts.add(normalizedText)
-                claimDigest = hashlib.blake2s(
-                    f"{source.sourceId}:{normalizedText}".encode(), digest_size=8
-                ).hexdigest()
-                claimType = (
-                    "FACT"
-                    if source.sourceType == "OFFICIAL"
-                    else "ATTRIBUTED_ESTIMATE"
-                    if source.sourceType == "ESTIMATE"
-                    else "CLAIM"
-                )
-                candidates.append(
-                    {
-                        "claimId": f"claim-{claimDigest}",
-                        "text": normalizedText[:1_000],
-                        "textZh": normalizedText[:1_000],
-                        "claimType": claimType,
-                        "sourceIds": [source.sourceId],
-                        "sourceTier": source.sourceType,
-                        "publishedAt": source.publishedAt.isoformat(),
-                        "knownAt": source.knownAt.isoformat(),
-                        "confidence": 0.9 if source.sourceType == "OFFICIAL" else 0.65,
-                        "impactChannels": ["belief", "liquidity"],
-                        "reviewStatus": "AI_PROPOSED",
-                        "isRequired": len(candidates) == 0,
-                        "evidenceQuote": normalizedText[:500],
-                        "synthetic": False,
-                    }
-                )
-                if len(candidates) >= maximumClaims:
-                    return candidates
+        """无外部模型时只生成可读、去重且标明低质量边界的候选主张。"""
+
+        candidates = extractRuleFallbackClaims(
+            requestData.sources,
+            maximumClaims=maximumClaims,
+            requestedImpactChannels=requestedImpactChannels,
+        )
         if not candidates:
             raise ApiError(
                 "NO_EXTRACTABLE_CLAIMS",
                 422,
-                "No source sentence was long enough to create a reviewable claim.",
+                (
+                    "No complete source sentence passed the deterministic claim-quality "
+                    "gate. Add a source containing complete factual sentences or enable "
+                    "a tested structured-output model."
+                ),
             )
         return candidates
 
@@ -453,15 +554,34 @@ class EventPackService:
             if claim is None:
                 raise ApiError("CLAIM_NOT_FOUND", 404, "The claim does not exist.")
             claim["reviewStatus"] = review.reviewStatus.value
-            claim["reviewedBy"] = sessionId
-            claim["reviewedAt"] = utcNow()
-            claim["reviewRationale"] = review.rationale
+            if review.reviewStatus.value == "AI_PROPOSED":
+                claim.pop("reviewedBy", None)
+                claim.pop("reviewedAt", None)
+                claim.pop("reviewRationale", None)
+            else:
+                claim["reviewedBy"] = sessionId
+                claim["reviewedAt"] = utcNow()
+                claim["reviewRationale"] = review.rationale
             if review.editedText:
                 claim["originalText"] = claim["text"]
                 claim["text"] = review.editedText
             if review.editedTextZh:
                 claim["originalTextZh"] = claim.get("textZh")
                 claim["textZh"] = review.editedTextZh
+            if review.editedImpactChannels is not None:
+                claim["originalImpactChannels"] = list(claim.get("impactChannels", []))
+                claim["originalImpactChannelRationale"] = list(
+                    claim.get("impactChannelRationale", [])
+                )
+                claim["impactChannels"] = list(review.editedImpactChannels)
+                claim["impactChannelRationale"] = [
+                    item.model_dump(mode="json")
+                    for item in (review.editedImpactChannelRationale or [])
+                ]
+                claim["channelMappingIsInference"] = any(
+                    item.evidenceType == "MECHANISM_HYPOTHESIS"
+                    for item in (review.editedImpactChannelRationale or [])
+                )
             self.database.saveEventPackDraftWithAudit(
                 sessionId,
                 eventPackId,
@@ -469,7 +589,12 @@ class EventPackService:
                 auditEntityType="CLAIM",
                 auditEntityId=claimId,
                 auditAction=review.reviewStatus.value,
-                auditPayload={"eventPackId": eventPackId, "rationale": review.rationale},
+                auditPayload={
+                    "eventPackId": eventPackId,
+                    "rationale": review.rationale,
+                    "impactChannelsEdited": review.editedImpactChannels is not None,
+                    "impactChannels": review.editedImpactChannels,
+                },
             )
             return self.getEventPack(eventPackId, sessionId)
 
@@ -495,36 +620,73 @@ class EventPackService:
                     409,
                     "The Event Pack does not contain any pending claims.",
                 )
-
-            proposedClaimIds = [claim["claimId"] for claim in proposedClaims]
-            if len(proposedClaimIds) != len(approval.expectedClaimIds) or set(
-                proposedClaimIds
+            eligibleClaims = [
+                claim
+                for claim in proposedClaims
+                if not _claimBulkApprovalExclusionReasons(eventPack, claim)
+            ]
+            eligibleClaimIds = [claim["claimId"] for claim in eligibleClaims]
+            if not eligibleClaims:
+                raise ApiError(
+                    "NO_BULK_APPROVAL_ELIGIBLE_CLAIMS",
+                    409,
+                    (
+                        "No pending claim satisfies the bulk-approval quality gate. "
+                        "Review low-confidence, multi-channel, safety-review, and "
+                        "non-official claims individually."
+                    ),
+                )
+            if len(eligibleClaimIds) != len(approval.expectedClaimIds) or set(
+                eligibleClaimIds
             ) != set(approval.expectedClaimIds):
                 raise ApiError(
                     "CLAIM_QUEUE_CHANGED",
                     409,
-                    "The pending claim queue changed. Reload it and confirm bulk approval again.",
+                    (
+                        "The bulk-eligible claim queue changed. Reload it and confirm "
+                        "bulk approval again."
+                    ),
                 )
 
             reviewedAt = utcNow()
-            for claim in proposedClaims:
+            for claim in eligibleClaims:
                 claim["reviewStatus"] = "HUMAN_APPROVED"
                 claim["reviewedBy"] = sessionId
                 claim["reviewedAt"] = reviewedAt
                 claim["reviewRationale"] = approval.rationale
 
+            auditPayload: dict[str, Any] = {
+                "claimCount": len(eligibleClaimIds),
+                "claimIds": eligibleClaimIds,
+                "reviewStatus": "HUMAN_APPROVED",
+                "warningAcknowledged": approval.acknowledgedBulkApproval,
+                "rationale": approval.rationale,
+            }
+            if eventPack.get("editableExtraction") is not False:
+                auditPayload.update(
+                    {
+                        "excludedPendingCount": len(proposedClaims) - len(eligibleClaims),
+                        "exclusionReasonCounts": {
+                            reason: sum(
+                                reason in _claimBulkApprovalExclusionReasons(eventPack, claim)
+                                for claim in proposedClaims
+                            )
+                            for reason in (
+                                "LOW_CONFIDENCE",
+                                "MULTIPLE_IMPACT_CHANNELS",
+                                "CONTENT_SAFETY_REVIEW",
+                                "NON_OFFICIAL_SOURCE",
+                                "EXTRACTION_NOT_ELIGIBLE",
+                            )
+                        },
+                    }
+                )
             self.database.saveEventPackDraftWithAudit(
                 sessionId,
                 eventPackId,
                 eventPack["claims"],
                 auditAction="BULK_CLAIMS_APPROVED",
-                auditPayload={
-                    "claimCount": len(proposedClaimIds),
-                    "claimIds": proposedClaimIds,
-                    "reviewStatus": "HUMAN_APPROVED",
-                    "warningAcknowledged": approval.acknowledgedBulkApproval,
-                    "rationale": approval.rationale,
-                },
+                auditPayload=auditPayload,
             )
             return self.getEventPack(eventPackId, sessionId)
 
@@ -585,11 +747,17 @@ class EventPackService:
         errors: list[dict[str, str]] = []
         warnings: list[dict[str, str]] = []
         checks: list[dict[str, str]] = []
+        degradationReasons: list[str] = []
         tokenPrice = None
         minimumReservationUsd: float | None = None
+        configView = None
 
         def addCheck(code: str, status: str, message: str) -> None:
             checks.append({"code": code, "status": status, "message": message})
+
+        def addDegradationReason(code: str) -> None:
+            if code not in degradationReasons:
+                degradationReasons.append(code)
 
         try:
             eventPack = self.getEventPack(requestData.eventPackId, sessionId)
@@ -840,6 +1008,7 @@ class EventPackService:
                 else None
             )
             if configView is None or not configView.configured:
+                addDegradationReason("LLM_CREDENTIAL_NOT_CONFIGURED")
                 status = "WARN" if requestData.llmPolicy.fallbackToRules else "FAIL"
                 message = (
                     "No session LLM credential is configured; this run will use the "
@@ -854,6 +1023,7 @@ class EventPackService:
                 configView.provider != requestData.llmPolicy.provider
                 or configView.model != requestData.llmPolicy.modelId
             ):
+                addDegradationReason("LLM_PROVIDER_MODEL_CONFIG_MISMATCH")
                 errors.append(
                     {
                         "code": "LLM_PROVIDER_MODEL_CONFIG_MISMATCH",
@@ -874,6 +1044,7 @@ class EventPackService:
                     "The selected structured-output model is configured for this session.",
                 )
             if requestData.llmPolicy.representativeAgentCount > requestData.llmPolicy.callBudget:
+                addDegradationReason("LLM_CALL_BUDGET_TOO_SMALL")
                 errors.append(
                     {
                         "code": "LLM_CALL_BUDGET_TOO_SMALL",
@@ -902,6 +1073,7 @@ class EventPackService:
             except ValueError:
                 tokenPrice = None
             if tokenPrice is None:
+                addDegradationReason("LLM_PRICE_UNAVAILABLE")
                 status = "WARN" if requestData.llmPolicy.fallbackToRules else "FAIL"
                 message = (
                     "No verified public token price is available; the runtime will fail "
@@ -930,6 +1102,7 @@ class EventPackService:
                         provider=requestData.llmPolicy.provider,
                     )
                 except (ModelGatewayError, ValueError) as error:
+                    addDegradationReason("LLM_OUTPUT_LIMIT_UNAVAILABLE")
                     status = "WARN" if requestData.llmPolicy.fallbackToRules else "FAIL"
                     message = (
                         "The model has no verified executable output limit; the runtime will "
@@ -949,6 +1122,7 @@ class EventPackService:
                 else:
                     minimumReservationUsd = float(reservation.maximumUsd)
                     if reservation.maximumUsd > requestData.llmPolicy.maxCostUsd:
+                        addDegradationReason("LLM_COST_CAP_INSUFFICIENT")
                         status = "WARN" if requestData.llmPolicy.fallbackToRules else "FAIL"
                         message = (
                             "The configured cap is below the worst-case reservation for one "
@@ -1007,8 +1181,37 @@ class EventPackService:
                     ),
                 }
             )
+        llmModeRequested = requestData.llmPolicy.mode.value == "HYBRID_LLM"
+        degradationCodes = set(degradationReasons)
+        structuralErrors = [error for error in errors if error["code"] not in degradationCodes]
+        structurallyRunnable = not structuralErrors
+        requestedCognitionRunnable = structurallyRunnable and (
+            not llmModeRequested or not degradationReasons
+        )
+        simulationRunnable = structurallyRunnable and (
+            requestedCognitionRunnable
+            or (
+                llmModeRequested
+                and requestData.llmPolicy.fallbackToRules
+                and bool(degradationReasons)
+            )
+        )
+        effectiveCognitionMode = (
+            "HYBRID_LLM"
+            if llmModeRequested and requestedCognitionRunnable
+            else "RULE_ONLY"
+            if simulationRunnable
+            else "UNAVAILABLE"
+        )
         return {
             "valid": not errors,
+            "simulationRunnable": simulationRunnable,
+            "requestedCognitionRunnable": requestedCognitionRunnable,
+            "effectiveCognitionMode": effectiveCognitionMode,
+            "degradationReasons": degradationReasons,
+            "requiresExplicitRuleFallbackConfirmation": (
+                llmModeRequested and structurallyRunnable and not requestedCognitionRunnable
+            ),
             "errors": errors,
             "warnings": warnings,
             "checks": checks,
@@ -1038,6 +1241,12 @@ class EventPackService:
                 else "UNAVAILABLE_FAIL_CLOSED"
             ),
             "llmMinimumCallReservationUsd": minimumReservationUsd,
+            "thinkingPreferenceEnabled": (
+                configView.thinking_enabled
+                if configView is not None and configView.configured
+                else None
+            ),
+            "thinkingEnabled": False,
             "interpretationBoundary": "MECHANISM_DEMONSTRATION_NOT_FORECAST",
         }
 
@@ -1173,6 +1382,19 @@ class ExperimentService:
             sessionId,
             credentialSessionId,
         )
+        if validation["requiresExplicitRuleFallbackConfirmation"]:
+            raise ApiError(
+                "HYBRID_LLM_DEGRADATION_REQUIRES_RULE_ONLY",
+                409,
+                (
+                    "The requested hybrid cognition route cannot run as configured. "
+                    "Explicitly change llmPolicy.mode to RULE_ONLY before creating the experiment."
+                ),
+                details={
+                    "degradationReasons": validation["degradationReasons"],
+                    "effectiveCognitionMode": validation["effectiveCognitionMode"],
+                },
+            )
         if not validation["valid"]:
             raise ApiError(
                 validation["errors"][0]["code"],
@@ -1292,6 +1514,53 @@ class ExperimentService:
             experimentId,
             "RUN_CANCEL_REQUESTED",
             {"previousStatus": experiment["status"]},
+        )
+        return self.publicExperiment(self.getExperiment(experimentId, sessionId))
+
+    def continueCognitionWithRules(
+        self,
+        experimentId: str,
+        sessionId: str,
+    ) -> dict[str, Any]:
+        experiment = self.getExperiment(experimentId, sessionId)
+        if experiment.get("cognitionFallbackRequested"):
+            return self.publicExperiment(experiment)
+        runtime = copy.deepcopy(experiment.get("runtime") or {})
+        if (
+            experiment["status"] not in ACTIVE_STATUSES
+            or runtime.get("phase") != "COGNITION"
+            or experiment["request"].get("llmPolicy", {}).get("mode") != "HYBRID_LLM"
+        ):
+            raise ApiError(
+                "COGNITION_RULE_CONTINUATION_UNAVAILABLE",
+                409,
+                "Rule continuation is available only while hybrid cognition is preparing.",
+            )
+        cognitionProgress = copy.deepcopy(runtime.get("cognitionProgress") or {})
+        cognitionProgress.update(
+            {
+                "status": "RULE_CONTINUATION_REQUESTED",
+                "userRequestedRuleContinuation": True,
+                "updatedAt": utcNow(),
+            }
+        )
+        runtime["cognitionProgress"] = cognitionProgress
+        self.database.updateExperiment(
+            experimentId,
+            sessionId,
+            cognition_fallback_requested=1,
+            runtime_json=runtime,
+        )
+        self.database.appendAuditEvent(
+            sessionId,
+            "EXPERIMENT",
+            experimentId,
+            "COGNITION_RULE_CONTINUATION_REQUESTED",
+            {
+                "attemptedCalls": int(cognitionProgress.get("attemptedCalls", 0)),
+                "completedCalls": int(cognitionProgress.get("completedCalls", 0)),
+                "preserveValidatedSignals": True,
+            },
         )
         return self.publicExperiment(self.getExperiment(experimentId, sessionId))
 
@@ -1493,6 +1762,8 @@ class ExperimentService:
                     runtime,
                     "INFO",
                     f"Resumed from a verified checkpoint after {completedPairs} matched pairs.",
+                    code="EXPERIMENT_RESUMED_FROM_CHECKPOINT",
+                    parameters={"completedPairs": completedPairs},
                 )
                 self.database.updateExperiment(
                     experimentId,
@@ -1528,6 +1799,7 @@ class ExperimentService:
                     "phase": "COGNITION",
                     "pairIndex": 0,
                     "currentSeed": None,
+                    "lastCompletedSeed": runtime.get("lastCompletedSeed"),
                     "baseline": None,
                     "intervention": None,
                     "resumedFromCheckpoint": False,
@@ -1538,6 +1810,7 @@ class ExperimentService:
                     runtime,
                     "INFO",
                     "Preparing deterministic rule or frozen hybrid cognition signals.",
+                    code="COGNITION_PREPARATION_STARTED",
                 )
                 self.database.updateExperiment(
                     experimentId,
@@ -1548,16 +1821,92 @@ class ExperimentService:
                     runtime_json=runtime,
                     started_at=utcNow(),
                 )
+
+                def persistCognitionProgress(progressState: dict[str, Any]) -> None:
+                    runtime["phase"] = "COGNITION"
+                    runtime["cognitionProgress"] = copy.deepcopy(progressState)
+                    plannedCalls = max(0, int(progressState.get("plannedCalls", 0)))
+                    completedCalls = max(0, int(progressState.get("completedCalls", 0)))
+                    cognitionFraction = completedCalls / plannedCalls if plannedCalls > 0 else 0.0
+                    self.database.updateExperiment(
+                        experimentId,
+                        sessionId,
+                        progress=min(0.035, cognitionFraction * 0.035),
+                        runtime_json=runtime,
+                    )
+
                 cognitionRun = self._prepareCognitiveSignals(
                     experimentId,
                     credentialSessionId,
                     requestData,
                     eventPack,
+                    progressCallback=persistCognitionProgress,
+                    ruleContinuationRequested=lambda: self.database.cognitionFallbackRequested(
+                        experimentId, sessionId
+                    ),
+                )
+                runtime["cognitionProgress"] = {
+                    **copy.deepcopy(runtime.get("cognitionProgress") or {}),
+                    "status": (
+                        "COMPLETED_WITH_RULE_CONTINUATION"
+                        if cognitionRun.get("userRequestedRuleContinuation")
+                        else "COMPLETED"
+                    ),
+                    "plannedCalls": int(cognitionRun.get("plannedCalls", 0)),
+                    "attemptedCalls": int(cognitionRun.get("attemptedCalls", 0)),
+                    "completedCalls": int(cognitionRun.get("calls", 0)),
+                    "fallbackCount": int(cognitionRun.get("fallbackCount", 0)),
+                    "totalTokens": int(cognitionRun.get("totalTokens", 0)),
+                    "structuredValidCalls": int(cognitionRun.get("structuredValidCalls", 0)),
+                    "structuredSuccessRate": float(cognitionRun.get("structuredSuccessRate", 0.0)),
+                    "structuredSuccessThreshold": float(
+                        cognitionRun.get("structuredSuccessThreshold", 0.95)
+                    ),
+                    "structuredSuccessGateStatus": cognitionRun.get(
+                        "structuredSuccessGateStatus",
+                        "NOT_EVALUATED",
+                    ),
+                    "failureCategoryCounts": copy.deepcopy(
+                        cognitionRun.get("failureCategoryCounts", {})
+                    ),
+                    "currentCostUsd": float(
+                        cognitionRun.get("costBudget", {}).get(
+                            "chargedUsdUpperBound",
+                            0.0,
+                        )
+                    ),
+                    "activeReservationUsd": float(
+                        cognitionRun.get("costBudget", {}).get(
+                            "activeReservationUsd",
+                            0.0,
+                        )
+                    ),
+                    "resolvedMode": cognitionRun.get("resolvedMode"),
+                    "failureCode": cognitionRun.get("failureCode"),
+                    "userRequestedRuleContinuation": bool(
+                        cognitionRun.get("userRequestedRuleContinuation")
+                    ),
+                }
+                self._appendRuntimeLog(
+                    runtime,
+                    "INFO",
+                    "Cognition preparation completed.",
+                    code="COGNITION_PREPARATION_COMPLETED",
+                    parameters={
+                        "resolvedMode": cognitionRun.get("resolvedMode"),
+                        "attemptedCalls": int(cognitionRun.get("attemptedCalls", 0)),
+                        "completedCalls": int(cognitionRun.get("calls", 0)),
+                        "fallbackCount": int(cognitionRun.get("fallbackCount", 0)),
+                        "userRequestedRuleContinuation": bool(
+                            cognitionRun.get("userRequestedRuleContinuation")
+                        ),
+                    },
                 )
                 self.database.updateExperiment(
                     experimentId,
                     sessionId,
                     progress=0.04,
+                    runtime_json=runtime,
                     checkpoint_blob=self._checkpointPayload(
                         requestHash=requestHash,
                         eventPackHash=eventPackHash,
@@ -1616,6 +1965,8 @@ class ExperimentService:
                     "INFO",
                     f"Baseline path started for matched pair {index + 1}.",
                     seed=seed,
+                    code="BASELINE_PATH_STARTED",
+                    parameters={"pairIndex": index + 1},
                 )
                 self.database.updateExperiment(experimentId, sessionId, runtime_json=runtime)
                 commonArguments = {
@@ -1655,6 +2006,8 @@ class ExperimentService:
                     "INFO",
                     f"Intervention path started for matched pair {index + 1}.",
                     seed=seed,
+                    code="INTERVENTION_PATH_STARTED",
+                    parameters={"pairIndex": index + 1},
                 )
                 self.database.updateExperiment(experimentId, sessionId, runtime_json=runtime)
                 interventionRun = runScenario(
@@ -1687,11 +2040,14 @@ class ExperimentService:
                     previous=stoppingDecision,
                 )
                 runtime["checkpointPairs"] = len(baselineRuns)
+                runtime["lastCompletedSeed"] = seed
                 self._appendRuntimeLog(
                     runtime,
                     "INFO",
                     f"Matched pair {index + 1} completed and checkpointed.",
                     seed=seed,
+                    code="MATCHED_PAIR_COMPLETED",
+                    parameters={"pairIndex": index + 1},
                 )
                 self.database.updateExperiment(
                     experimentId,
@@ -1724,6 +2080,7 @@ class ExperimentService:
                 runtime,
                 "INFO",
                 "Aggregating paired distributions, uncertainty, traces, and diagnostics.",
+                code="RESULT_AGGREGATION_STARTED",
             )
             self.database.updateExperiment(
                 experimentId,
@@ -1749,6 +2106,8 @@ class ExperimentService:
                 runtime,
                 "INFO",
                 f"Experiment completed with {len(baselineRuns)} valid matched pairs.",
+                code="EXPERIMENT_COMPLETED",
+                parameters={"completedPairs": len(baselineRuns)},
             )
             self.database.updateExperiment(
                 experimentId,
@@ -1782,6 +2141,7 @@ class ExperimentService:
                     "The experiment stopped because a deterministic runtime or checkpoint "
                     "invariant failed."
                 ),
+                code="EXPERIMENT_FAILED",
             )
             self.database.updateExperiment(
                 experimentId,
@@ -1801,21 +2161,36 @@ class ExperimentService:
 
     @staticmethod
     def _initialStoppingDecision(requestData: dict[str, Any]) -> dict[str, Any]:
+        stoppingRule = requestData["stoppingRule"]
+        hasTarget = stoppingRule.get("targetCiHalfWidth") is not None
+        conditionCodes = [
+            "MINIMUM_PAIRS_REACHED",
+            "MAXIMUM_PAIRS_REACHED" if hasTarget else "FIXED_PAIR_COUNT_REACHED",
+        ]
+        if hasTarget:
+            conditionCodes.append("TARGET_CI_HALF_WIDTH_REACHED")
         return {
-            "mode": (
-                "TARGET_CI_HALF_WIDTH"
-                if requestData["stoppingRule"].get("targetCiHalfWidth") is not None
-                else "FIXED_PAIR_COUNT"
-            ),
+            "mode": ("TARGET_CI_HALF_WIDTH" if hasTarget else "FIXED_PAIR_COUNT"),
             "triggered": False,
             "reason": "MAXIMUM_PAIRS_REACHED",
+            "primaryReason": "MAXIMUM_PAIRS_REACHED",
+            "reasons": [],
             "primaryOutcome": requestData["primaryOutcome"],
-            "minimumPairs": requestData["stoppingRule"]["minimumPairs"],
+            "minimumPairs": stoppingRule["minimumPairs"],
             "maximumPairs": requestData["seedCount"],
-            "targetCiHalfWidth": requestData["stoppingRule"].get("targetCiHalfWidth"),
+            "targetCiHalfWidth": stoppingRule.get("targetCiHalfWidth"),
             "observedCiHalfWidth": None,
             "bootstrapInterval95": None,
             "completedPairs": 0,
+            "conditionEvaluations": [
+                {
+                    "code": code,
+                    "evaluationOrder": index,
+                    "satisfied": False,
+                    "firstSatisfiedAtPair": None,
+                }
+                for index, code in enumerate(conditionCodes, start=1)
+            ],
         }
 
     @staticmethod
@@ -1932,6 +2307,8 @@ class ExperimentService:
             "WARNING",
             f"Cancellation was applied during {during}.",
             seed=runtime.get("currentSeed"),
+            code="EXPERIMENT_CANCELLED",
+            parameters={"during": during},
         )
         self.database.updateExperiment(
             experimentId,
@@ -1957,6 +2334,8 @@ class ExperimentService:
         message: str,
         *,
         seed: int | None = None,
+        code: str | None = None,
+        parameters: dict[str, Any] | None = None,
     ) -> None:
         logs = runtime.setdefault("logs", [])
         entry: dict[str, Any] = {
@@ -1966,6 +2345,10 @@ class ExperimentService:
         }
         if seed is not None:
             entry["seed"] = seed
+        if code is not None:
+            entry["code"] = code
+        if parameters:
+            entry["parameters"] = copy.deepcopy(parameters)
         logs.append(entry)
         if len(logs) > MAX_RUNTIME_LOG_ENTRIES:
             del logs[: len(logs) - MAX_RUNTIME_LOG_ENTRIES]
@@ -1976,17 +2359,27 @@ class ExperimentService:
         credentialSessionId: str,
         requestData: dict[str, Any],
         eventPack: dict[str, Any],
+        *,
+        progressCallback: Callable[[dict[str, Any]], None] | None = None,
+        ruleContinuationRequested: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         llmPolicy = requestData.get("llmPolicy", {})
         mode = llmPolicy.get("mode", "RULE_ONLY")
+        hybridRequested = mode == "HYBRID_LLM"
         fallbackAllowed = bool(llmPolicy.get("fallbackToRules", True))
         costBudget = ModelCostBudget(float(llmPolicy.get("maxCostUsd", 10.0)))
+        policyProvider = str(llmPolicy.get("provider", "zhipu"))
+        policyModel = str(llmPolicy.get("modelId", "glm-5.2"))
         baseMetadata = {
             "requestedMode": mode,
             "resolvedMode": "RULE_ONLY",
-            "provider": llmPolicy.get("provider", "zhipu"),
-            "requestedModel": llmPolicy.get("modelId", "glm-5.2"),
+            "externalModelUsed": False,
+            "provider": None,
+            "requestedProvider": policyProvider if hybridRequested else None,
+            "requestedModel": policyModel if hybridRequested else None,
             "resolvedModel": None,
+            "configuredButUnusedProvider": None,
+            "configuredButUnusedModel": None,
             "promptVersion": "belief_v1.0.0",
             "promptSchemaVersion": "belief_decision_v1.0.0",
             "calls": 0,
@@ -2004,8 +2397,75 @@ class ExperimentService:
             "decisionScheduleMode": "NONE",
             "plannedCalls": 0,
             "attemptedCalls": 0,
+            "structuredValidCalls": 0,
+            "structuredSuccessRate": 0.0,
+            "structuredSuccessThreshold": 0.95,
+            "structuredSuccessGateStatus": "NOT_EVALUATED",
+            "failureCategoryCounts": {},
         }
-        if mode != "HYBRID_LLM":
+
+        def reportProgress(
+            status: str,
+            *,
+            plannedCalls: int = 0,
+            attemptedCalls: int = 0,
+            completedCalls: int = 0,
+            fallbackCount: int = 0,
+            totalTokens: int = 0,
+            structuredValidCalls: int = 0,
+            failureCategoryCounts: dict[str, int] | None = None,
+            decisionRound: int | None = None,
+            representativeIndex: int | None = None,
+            failureCode: str | None = None,
+            modelStage: str | None = None,
+            streamChunkCount: int = 0,
+            answerChunkCount: int = 0,
+            reasoningChunkCount: int = 0,
+            repairAttempted: bool = False,
+        ) -> None:
+            if progressCallback is None:
+                return
+            budgetSnapshot = costBudget.snapshot()
+            progressCallback(
+                {
+                    "status": status,
+                    "plannedCalls": plannedCalls,
+                    "attemptedCalls": attemptedCalls,
+                    "completedCalls": completedCalls,
+                    "fallbackCount": fallbackCount,
+                    "totalTokens": totalTokens,
+                    "structuredValidCalls": structuredValidCalls,
+                    "structuredSuccessRate": (
+                        structuredValidCalls / attemptedCalls if attemptedCalls else 0.0
+                    ),
+                    "structuredSuccessThreshold": 0.95,
+                    "failureCategoryCounts": dict(sorted((failureCategoryCounts or {}).items())),
+                    "currentCostUsd": float(budgetSnapshot["chargedUsdUpperBound"])
+                    + float(budgetSnapshot["activeReservationUsd"]),
+                    "settledCostUsd": float(budgetSnapshot["chargedUsdUpperBound"]),
+                    "activeReservationUsd": float(budgetSnapshot["activeReservationUsd"]),
+                    "decisionRound": decisionRound,
+                    "representativeIndex": representativeIndex,
+                    "failureCode": failureCode,
+                    "modelStage": modelStage,
+                    "streamChunkCount": streamChunkCount,
+                    "answerChunkCount": answerChunkCount,
+                    "reasoningChunkCount": reasoningChunkCount,
+                    "repairAttempted": repairAttempted,
+                    "updatedAt": utcNow(),
+                }
+            )
+
+        if not hybridRequested:
+            reportProgress("NOT_APPLICABLE")
+            runtimeConfig = (
+                self.cognition.getConfig(credentialSessionId)
+                if self.cognition is not None
+                else None
+            )
+            if runtimeConfig is not None and runtimeConfig.configured:
+                baseMetadata["configuredButUnusedProvider"] = runtimeConfig.provider
+                baseMetadata["configuredButUnusedModel"] = runtimeConfig.model
             return baseMetadata
         runtimeConfig = (
             self.cognition.getConfig(credentialSessionId) if self.cognition is not None else None
@@ -2018,8 +2478,8 @@ class ExperimentService:
                 "resolvedMode": "RULE_FALLBACK",
                 "failureCode": "LLM_CREDENTIAL_NOT_CONFIGURED",
             }
-        requestedProvider = str(llmPolicy.get("provider", "zhipu"))
-        requestedModel = str(llmPolicy.get("modelId", "glm-5.2"))
+        requestedProvider = policyProvider
+        requestedModel = policyModel
         configuredProvider = str(getattr(runtimeConfig, "provider", "zhipu"))
         configuredModel = str(getattr(runtimeConfig, "model", requestedModel))
         if configuredProvider != requestedProvider or configuredModel != requestedModel:
@@ -2031,6 +2491,8 @@ class ExperimentService:
                 **baseMetadata,
                 "resolvedMode": "RULE_FALLBACK",
                 "failureCode": "LLM_PROVIDER_MODEL_CONFIG_MISMATCH",
+                "configuredButUnusedProvider": configuredProvider,
+                "configuredButUnusedModel": configuredModel,
             }
 
         asOf = _parseUtc(eventPack.get("asOf"))
@@ -2070,6 +2532,7 @@ class ExperimentService:
         decisionInterval = int(llmPolicy.get("decisionIntervalSteps", 12))
         decisionRounds = math.ceil(int(requestData.get("steps", 120)) / decisionInterval)
         plannedCalls = min(callBudget, representativeCount * decisionRounds)
+        reportProgress("INITIALIZING_PILOT", plannedCalls=plannedCalls)
         if representativeCount == 0 or plannedCalls == 0:
             return {
                 **baseMetadata,
@@ -2128,6 +2591,11 @@ class ExperimentService:
         resolvedModel: str | None = None
         failureCode: str | None = None
         attemptedCalls = 0
+        completedCalls = 0
+        structuredValidCalls = 0
+        failureCategoryCounts: dict[str, int] = {}
+        repeatedFailureCounts: dict[str, int] = {}
+        userRequestedRuleContinuation = False
         try:
             currentPilot = self._runCognitionPilot(
                 requestData=requestData,
@@ -2143,6 +2611,7 @@ class ExperimentService:
                     signalCount=0,
                 )
             ]
+            reportProgress("PILOT_READY", plannedCalls=plannedCalls)
         except Exception as error:
             # pilot 是模型与正式配对实验之间的安全边界；无法验证时绝不让模型信号进入市场。
             LOGGER.exception("Closed-loop cognition pilot initialization failed")
@@ -2150,6 +2619,11 @@ class ExperimentService:
                 raise RuntimeError(
                     "closed-loop cognition pilot initialization failed while fallback was disabled"
                 ) from error
+            reportProgress(
+                "FAILED_CLOSED",
+                plannedCalls=plannedCalls,
+                failureCode="CLOSED_LOOP_PILOT_FAILED",
+            )
             return {
                 **baseMetadata,
                 "resolvedMode": "RULE_FALLBACK",
@@ -2193,6 +2667,23 @@ class ExperimentService:
             boundedSocialFeed = tuple([*humanReviewedSocial, *modelGeneratedSocial][:24])
 
             for representativeIndex in range(callsThisRound):
+                if ruleContinuationRequested is not None and ruleContinuationRequested():
+                    userRequestedRuleContinuation = True
+                    failureCode = "COGNITION_RULE_CONTINUATION_REQUESTED"
+                    reportProgress(
+                        "RULE_CONTINUATION_REQUESTED",
+                        plannedCalls=plannedCalls,
+                        attemptedCalls=attemptedCalls,
+                        completedCalls=completedCalls,
+                        fallbackCount=fallbackCount,
+                        totalTokens=totalTokens,
+                        structuredValidCalls=structuredValidCalls,
+                        failureCategoryCounts=failureCategoryCounts,
+                        decisionRound=decisionRound,
+                        representativeIndex=representativeIndex,
+                        failureCode=failureCode,
+                    )
+                    break
                 agentId = f"llm-agent-{representativeIndex:03d}"
                 priorSignals = [item for item in signals if item["agentId"] == agentId]
                 memory = (
@@ -2258,15 +2749,68 @@ class ExperimentService:
                     allowed_actions=tuple(ActionPreference),
                 )
                 attemptedCalls += 1
-                try:
-                    run = asyncio.run(
-                        self.cognition.generateBeliefDecision(
-                            sessionId=credentialSessionId,
-                            observation=observation,
-                            costBudget=costBudget,
-                            allowRuleFallback=fallbackAllowed,
-                        )
+                reportProgress(
+                    "MODEL_CALL_IN_PROGRESS",
+                    plannedCalls=plannedCalls,
+                    attemptedCalls=attemptedCalls,
+                    completedCalls=completedCalls,
+                    fallbackCount=fallbackCount,
+                    totalTokens=totalTokens,
+                    structuredValidCalls=structuredValidCalls,
+                    failureCategoryCounts=failureCategoryCounts,
+                    decisionRound=decisionRound,
+                    representativeIndex=representativeIndex,
+                )
+
+                async def streamProgress(
+                    progress: ModelStreamProgress,
+                    attemptedCallsForProgress: int = attemptedCalls,
+                    completedCallsForProgress: int = completedCalls,
+                    fallbackCountForProgress: int = fallbackCount,
+                    totalTokensForProgress: int = totalTokens,
+                    structuredValidCallsForProgress: int = structuredValidCalls,
+                    failureCategoriesForProgress: dict[str, int] = failureCategoryCounts,
+                    decisionRoundForProgress: int = decisionRound,
+                    representativeIndexForProgress: int = representativeIndex,
+                ) -> None:
+                    stageStatus = {
+                        ModelStreamStage.PREPARING: "MODEL_REQUESTING",
+                        ModelStreamStage.PLANNING: "MODEL_REQUESTING",
+                        ModelStreamStage.READING_RESULTS: "MODEL_REQUESTING",
+                        ModelStreamStage.GENERATING: "MODEL_STREAM_RECEIVING",
+                        ModelStreamStage.REASONING: "MODEL_STREAM_RECEIVING",
+                        ModelStreamStage.VALIDATING: "MODEL_VALIDATING",
+                        ModelStreamStage.REPAIRING: "MODEL_REPAIRING",
+                        ModelStreamStage.COMPLETED: "MODEL_VALIDATING",
+                    }[progress.stage]
+                    reportProgress(
+                        stageStatus,
+                        plannedCalls=plannedCalls,
+                        attemptedCalls=attemptedCallsForProgress,
+                        completedCalls=completedCallsForProgress,
+                        fallbackCount=fallbackCountForProgress,
+                        totalTokens=totalTokensForProgress,
+                        structuredValidCalls=structuredValidCallsForProgress,
+                        failureCategoryCounts=failureCategoriesForProgress,
+                        decisionRound=decisionRoundForProgress,
+                        representativeIndex=representativeIndexForProgress,
+                        modelStage=progress.stage.value,
+                        streamChunkCount=progress.chunkCount,
+                        answerChunkCount=progress.answerChunkCount,
+                        reasoningChunkCount=progress.reasoningChunkCount,
+                        repairAttempted=progress.repair,
                     )
+
+                try:
+                    beliefArguments: dict[str, Any] = {
+                        "sessionId": credentialSessionId,
+                        "observation": observation,
+                        "costBudget": costBudget,
+                        "allowRuleFallback": fallbackAllowed,
+                    }
+                    if isinstance(self.cognition, CognitionService):
+                        beliefArguments["progressObserver"] = streamProgress
+                    run = asyncio.run(self.cognition.generateBeliefDecision(**beliefArguments))
                 except (CredentialNotConfiguredError, ModelGatewayError) as error:
                     if not fallbackAllowed:
                         raise RuntimeError("the configured cognitive model failed") from error
@@ -2274,6 +2818,26 @@ class ExperimentService:
                         error.code.value
                         if isinstance(error, ModelGatewayError)
                         else "LLM_CREDENTIAL_EXPIRED"
+                    )
+                    failureCategory = _cognitionFailureCategory(failureCode)
+                    failureCategoryCounts[failureCategory] = (
+                        failureCategoryCounts.get(failureCategory, 0) + 1
+                    )
+                    repeatedFailureCounts[failureCode] = (
+                        repeatedFailureCounts.get(failureCode, 0) + 1
+                    )
+                    reportProgress(
+                        "MODEL_CALL_FAILED",
+                        plannedCalls=plannedCalls,
+                        attemptedCalls=attemptedCalls,
+                        completedCalls=completedCalls,
+                        fallbackCount=fallbackCount,
+                        totalTokens=totalTokens,
+                        structuredValidCalls=structuredValidCalls,
+                        failureCategoryCounts=failureCategoryCounts,
+                        decisionRound=decisionRound,
+                        representativeIndex=representativeIndex,
+                        failureCode=failureCode,
                     )
                     break
                 # 注入式网关或测试替身也必须服从用户策略；不能只依赖供应商网关正确实现。
@@ -2290,6 +2854,14 @@ class ExperimentService:
                 fallbackCount += int(run.fallback_used)
                 if run.fallback_used:
                     fallbackReasons.append(run.fallback_reason or "RULE_FALLBACK_USED")
+                    fallbackReason = run.fallback_reason or "RULE_FALLBACK_USED"
+                    for category in {_cognitionFailureCategory(code) for code in run.failure_codes}:
+                        failureCategoryCounts[category] = failureCategoryCounts.get(category, 0) + 1
+                    repeatedFailureCounts[fallbackReason] = (
+                        repeatedFailureCounts.get(fallbackReason, 0) + 1
+                    )
+                else:
+                    structuredValidCalls += 1
                 decision = run.decision
                 evidenceIds = sorted(decision.evidenceIds())
                 publicMessage = (
@@ -2347,6 +2919,8 @@ class ExperimentService:
                         "cacheHit": run.cache_hit,
                         "fallbackUsed": run.fallback_used,
                         "repairUsed": run.repair_used,
+                        "thinkingPreferenceEnabled": run.thinking_preference_enabled,
+                        "thinkingEnabled": run.thinking_enabled,
                         "failureReason": run.fallback_reason,
                         "failureCodes": list(run.failure_codes),
                         "transportAttempts": run.transport_attempts,
@@ -2358,6 +2932,35 @@ class ExperimentService:
                         "costUpperBoundUsd": run.cost_upper_bound_usd,
                     }
                 )
+                completedCalls += 1
+                reportProgress(
+                    "MODEL_CALL_COMPLETED",
+                    plannedCalls=plannedCalls,
+                    attemptedCalls=attemptedCalls,
+                    completedCalls=completedCalls,
+                    fallbackCount=fallbackCount,
+                    totalTokens=totalTokens,
+                    structuredValidCalls=structuredValidCalls,
+                    failureCategoryCounts=failureCategoryCounts,
+                    decisionRound=decisionRound,
+                    representativeIndex=representativeIndex,
+                )
+                if run.fallback_used and repeatedFailureCounts[fallbackReason] >= 3:
+                    failureCode = "COGNITION_REPEATED_FAILURE_CIRCUIT_OPEN"
+                    reportProgress(
+                        "CIRCUIT_BREAKER_OPEN",
+                        plannedCalls=plannedCalls,
+                        attemptedCalls=attemptedCalls,
+                        completedCalls=completedCalls,
+                        fallbackCount=fallbackCount,
+                        totalTokens=totalTokens,
+                        structuredValidCalls=structuredValidCalls,
+                        failureCategoryCounts=failureCategoryCounts,
+                        decisionRound=decisionRound,
+                        representativeIndex=representativeIndex,
+                        failureCode=failureCode,
+                    )
+                    break
 
             callsRemaining -= len(signals) - roundStartSignalCount
             if len(signals) > roundStartSignalCount:
@@ -2389,6 +2992,18 @@ class ExperimentService:
                         ) from error
                     pilotFailed = True
                     failureCode = "CLOSED_LOOP_PILOT_FAILED"
+                    reportProgress(
+                        "FAILED_CLOSED",
+                        plannedCalls=plannedCalls,
+                        attemptedCalls=attemptedCalls,
+                        completedCalls=completedCalls,
+                        fallbackCount=fallbackCount,
+                        totalTokens=totalTokens,
+                        structuredValidCalls=structuredValidCalls,
+                        failureCategoryCounts=failureCategoryCounts,
+                        decisionRound=decisionRound,
+                        failureCode=failureCode,
+                    )
                     break
             if failureCode is not None:
                 break
@@ -2400,6 +3015,8 @@ class ExperimentService:
             return {
                 **baseMetadata,
                 "resolvedMode": "RULE_FALLBACK",
+                "externalModelUsed": attemptedCalls > 0,
+                "provider": requestedProvider if attemptedCalls > 0 else None,
                 "resolvedModel": resolvedModel,
                 "calls": discardedSignalCount,
                 "attemptedCalls": attemptedCalls,
@@ -2410,6 +3027,19 @@ class ExperimentService:
                 "cachedTokens": cachedTokens,
                 "fallbackCount": fallbackCount,
                 "fallbackReasons": fallbackReasons,
+                "structuredValidCalls": structuredValidCalls,
+                "structuredSuccessRate": (
+                    structuredValidCalls / attemptedCalls if attemptedCalls else 0.0
+                ),
+                "structuredSuccessThreshold": 0.95,
+                "structuredSuccessGateStatus": (
+                    "NOT_EVALUATED"
+                    if attemptedCalls == 0
+                    else "PASS"
+                    if structuredValidCalls / attemptedCalls >= 0.95
+                    else "FAIL"
+                ),
+                "failureCategoryCounts": dict(sorted(failureCategoryCounts.items())),
                 "failureCode": failureCode,
                 "costBudget": costBudget.snapshot(),
                 "decisionScheduleMode": COGNITION_PILOT_SCHEDULE_MODE,
@@ -2449,9 +3079,22 @@ class ExperimentService:
         else:
             resolvedMode = "HYBRID_LLM"
 
+        reportProgress(
+            "COMPLETED",
+            plannedCalls=plannedCalls,
+            attemptedCalls=attemptedCalls,
+            completedCalls=completedCalls,
+            fallbackCount=fallbackCount,
+            totalTokens=totalTokens,
+            structuredValidCalls=structuredValidCalls,
+            failureCategoryCounts=failureCategoryCounts,
+            failureCode=failureCode,
+        )
         return {
             **baseMetadata,
             "resolvedMode": resolvedMode,
+            "externalModelUsed": attemptedCalls > 0,
+            "provider": requestedProvider if attemptedCalls > 0 else None,
             "resolvedModel": resolvedModel,
             "calls": len(signals),
             "attemptedCalls": attemptedCalls,
@@ -2462,7 +3105,21 @@ class ExperimentService:
             "cachedTokens": cachedTokens,
             "fallbackCount": fallbackCount,
             "fallbackReasons": fallbackReasons,
+            "structuredValidCalls": structuredValidCalls,
+            "structuredSuccessRate": (
+                structuredValidCalls / attemptedCalls if attemptedCalls else 0.0
+            ),
+            "structuredSuccessThreshold": 0.95,
+            "structuredSuccessGateStatus": (
+                "NOT_EVALUATED"
+                if attemptedCalls == 0
+                else "PASS"
+                if structuredValidCalls / attemptedCalls >= 0.95
+                else "FAIL"
+            ),
+            "failureCategoryCounts": dict(sorted(failureCategoryCounts.items())),
             "failureCode": failureCode,
+            "userRequestedRuleContinuation": userRequestedRuleContinuation,
             "costBudget": costBudget.snapshot(),
             "decisionScheduleMode": COGNITION_PILOT_SCHEDULE_MODE,
             "pilot": pilotMetadata,
@@ -2823,7 +3480,7 @@ class ExperimentService:
             "completeConfigurationHash": _hashJson(requestData),
             "seedListHash": _hashJson(seeds),
             "eventPackHash": _hashJson(eventPack),
-            "engineVersion": "eventshock-simulation-0.2.0",
+            "engineVersion": SIMULATION_ENGINE_VERSION,
             "pythonVersion": "3.12.13",
             "matchedSeedDesign": True,
             "validPairedSeeds": len(aggregate["pairedRuns"]),
@@ -2831,8 +3488,11 @@ class ExperimentService:
             "stoppingRuleTriggered": stoppingDecision["triggered"],
             "synthetic": True,
             "agentMode": cognitionRun["resolvedMode"],
+            "llmExternalModelUsed": cognitionRun.get("externalModelUsed", False),
             "llmProvider": cognitionRun["provider"],
             "llmModel": cognitionRun["resolvedModel"],
+            "configuredButUnusedProvider": cognitionRun.get("configuredButUnusedProvider"),
+            "configuredButUnusedModel": cognitionRun.get("configuredButUnusedModel"),
             "llmCalls": cognitionRun["calls"],
             "llmPlannedCalls": cognitionRun["plannedCalls"],
             "llmAttemptedCalls": cognitionRun["attemptedCalls"],
@@ -2856,7 +3516,7 @@ class ExperimentService:
             "portfolioLedgerVersion": "ledger_v1.0.0",
             "analysisDiagnosticsVersion": "analysis_diagnostics_v1.0.0",
         }
-        return {
+        result = {
             "experimentId": experimentId,
             "question": requestData["question"],
             "questionZh": requestData.get("questionZh"),
@@ -2879,6 +3539,12 @@ class ExperimentService:
             "limitations": limitations,
             "manifest": manifest,
         }
+        # 结果页与解释助手必须复用同一套服务端稳定排序，避免前端与模型各自
+        # 计算“最强结果”后产生不一致。这里只保存指标 ID，不复制或改写统计量。
+        result["strongestMetricIds"] = [
+            item.metric_id for item in strongestMetricFacts(buildResultFactCatalog(result))
+        ]
+        return result
 
     def _activeFutureCount(self) -> int:
         with self.futureLock:
@@ -2905,46 +3571,110 @@ def _stoppingDecision(
     decision = {**previous, "completedPairs": completedPairs}
     stoppingRule = requestData["stoppingRule"]
     targetHalfWidth = stoppingRule.get("targetCiHalfWidth")
-    if targetHalfWidth is None or completedPairs < stoppingRule["minimumPairs"]:
-        return decision
+    minimumReached = completedPairs >= stoppingRule["minimumPairs"]
+    maximumReached = completedPairs >= stoppingRule["maximumPairs"]
+    targetReached = False
+    intervalPayload: dict[str, Any] | None = None
+    observedHalfWidth: float | None = None
 
-    primaryOutcome = requestData["primaryOutcome"]
-    differences = [
-        float(interventionRun["metrics"][primaryOutcome])
-        - float(baselineRun["metrics"][primaryOutcome])
-        for baselineRun, interventionRun in zip(
-            baselineRuns,
-            interventionRuns,
-            strict=True,
+    if targetHalfWidth is not None and minimumReached:
+        primaryOutcome = requestData["primaryOutcome"]
+        differences = [
+            float(interventionRun["metrics"][primaryOutcome])
+            - float(baselineRun["metrics"][primaryOutcome])
+            for baselineRun, interventionRun in zip(
+                baselineRuns,
+                interventionRuns,
+                strict=True,
+            )
+        ]
+        bootstrapSeed = int.from_bytes(
+            hashlib.blake2s(
+                f"{requestData['seedRoot']}:{primaryOutcome}:stopping".encode(),
+                digest_size=4,
+            ).digest(),
+            "big",
         )
-    ]
-    bootstrapSeed = int.from_bytes(
-        hashlib.blake2s(
-            f"{requestData['seedRoot']}:{primaryOutcome}:stopping".encode(),
-            digest_size=4,
-        ).digest(),
-        "big",
-    )
-    interval = bootstrap95ConfidenceInterval(
-        differences,
-        resamples=5_000,
-        seed=bootstrapSeed,
-    )
-    halfWidth = (interval.upper - interval.lower) / 2
-    targetReached = halfWidth <= float(targetHalfWidth)
-    return {
-        **decision,
-        "triggered": targetReached,
-        "reason": "TARGET_CI_HALF_WIDTH_REACHED" if targetReached else "MAXIMUM_PAIRS_REACHED",
-        "observedCiHalfWidth": round(halfWidth, 6),
-        "bootstrapInterval95": {
+        interval = bootstrap95ConfidenceInterval(
+            differences,
+            resamples=5_000,
+            seed=bootstrapSeed,
+        )
+        observedHalfWidth = round((interval.upper - interval.lower) / 2, 6)
+        targetReached = observedHalfWidth <= float(targetHalfWidth)
+        intervalPayload = {
             "estimate": round(interval.estimate, 6),
             "lower": round(interval.lower, 6),
             "upper": round(interval.upper, 6),
             "confidenceLevel": interval.confidenceLevel,
             "resamples": interval.resamples,
             "seed": interval.seed,
-        },
+        }
+
+    hasTarget = targetHalfWidth is not None
+    conditionStates = [
+        ("MINIMUM_PAIRS_REACHED", minimumReached, stoppingRule["minimumPairs"]),
+        (
+            "MAXIMUM_PAIRS_REACHED" if hasTarget else "FIXED_PAIR_COUNT_REACHED",
+            maximumReached,
+            stoppingRule["maximumPairs"],
+        ),
+    ]
+    if hasTarget:
+        conditionStates.append(
+            (
+                "TARGET_CI_HALF_WIDTH_REACHED",
+                targetReached,
+                completedPairs if targetReached else None,
+            )
+        )
+    previousEvaluations = {
+        str(item.get("code")): item
+        for item in previous.get("conditionEvaluations", [])
+        if isinstance(item, dict)
+    }
+    conditionEvaluations = []
+    for evaluationOrder, (code, satisfied, satisfiedAtPair) in enumerate(
+        conditionStates,
+        start=1,
+    ):
+        previousEvaluation = previousEvaluations.get(code, {})
+        firstSatisfiedAtPair = previousEvaluation.get("firstSatisfiedAtPair")
+        if firstSatisfiedAtPair is None and satisfied:
+            firstSatisfiedAtPair = satisfiedAtPair
+        conditionEvaluations.append(
+            {
+                "code": code,
+                "evaluationOrder": evaluationOrder,
+                "satisfied": satisfied,
+                "firstSatisfiedAtPair": firstSatisfiedAtPair,
+            }
+        )
+
+    terminalReasons: list[str] = []
+    # 固定/最大样本条件优先于精度条件，确保 min=max 时不会被解释成提前停止。
+    if maximumReached:
+        terminalReasons.append("MAXIMUM_PAIRS_REACHED" if hasTarget else "FIXED_PAIR_COUNT_REACHED")
+    if targetReached:
+        terminalReasons.append("TARGET_CI_HALF_WIDTH_REACHED")
+    primaryReason = (
+        terminalReasons[0]
+        if terminalReasons
+        else str(previous.get("primaryReason") or previous.get("reason"))
+    )
+    return {
+        **decision,
+        "triggered": bool(terminalReasons),
+        "reason": primaryReason,
+        "primaryReason": primaryReason,
+        "reasons": terminalReasons,
+        "observedCiHalfWidth": observedHalfWidth
+        if observedHalfWidth is not None
+        else previous.get("observedCiHalfWidth"),
+        "bootstrapInterval95": intervalPayload
+        if intervalPayload is not None
+        else previous.get("bootstrapInterval95"),
+        "conditionEvaluations": conditionEvaluations,
     }
 
 
@@ -3219,11 +3949,13 @@ def _buildNarrativeReport(
             f"{spreadTextZh}{drawdownTextZh}"
         ),
         "interpretationBoundary": (
-            "This is an internal causal contrast under the declared synthetic model, "
-            "data, and parameters. It is not a real-world forecast or investment advice."
+            "This is a controlled scenario comparison within the declared synthetic model, "
+            "data, and parameters. It cannot establish real-world causality and is not a "
+            "forecast or investment advice."
         ),
         "interpretationBoundaryZh": (
-            "这是在已声明的合成模型、数据与参数下的内部因果对比，不是真实世界预测或投资建议。"
+            "这是在已声明的合成模型、数据与参数内进行的受控情景对比；"
+            "它不能证明现实世界因果关系，也不是预测或投资建议。"
         ),
         "generatedBy": "DETERMINISTIC_TEMPLATE",
     }
@@ -3232,9 +3964,20 @@ def _buildNarrativeReport(
 def _buildExport(experiment: dict[str, Any]) -> bytes:
     result = experiment["result"]
     requestData = experiment["request"]
+    # 生产导出只允许已完成实验；底层构建器也被结果级测试直接复用，
+    # 这些调用没有数据库状态字段，因此按其既有“已完成结果”语义补齐默认值。
+    experimentStatus = str(experiment.get("status") or "COMPLETED")
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        _writeJson(archive, "manifest.json", result["manifest"])
+        _writeJson(
+            archive,
+            "manifest.json",
+            {
+                **result["manifest"],
+                "bundleKind": "REPRODUCIBILITY_BUNDLE",
+                "experimentStatus": experimentStatus,
+            },
+        )
         _writeJson(archive, "event_pack_manifest.json", result["eventPackManifest"])
         baselineScenario = {
             **requestData,
@@ -3273,6 +4016,14 @@ def _buildExport(experiment: dict[str, Any]) -> bytes:
             },
         )
         cognition = result.get("cognition", {})
+        requestedMode = str(cognition.get("requestedMode", "RULE_ONLY"))
+        resolvedMode = str(cognition.get("resolvedMode", "RULE_ONLY"))
+        externalModelUsed = bool(
+            cognition.get(
+                "externalModelUsed",
+                cognition.get("attemptedCalls", cognition.get("calls", 0)),
+            )
+        )
         fallbackReasons = [str(reason) for reason in cognition.get("fallbackReasons", []) if reason]
         failureCode = cognition.get("failureCode")
         if failureCode and str(failureCode) not in fallbackReasons:
@@ -3281,14 +4032,15 @@ def _buildExport(experiment: dict[str, Any]) -> bytes:
             archive,
             "model_and_prompt_versions.json",
             {
-                "requestedMode": cognition.get("requestedMode", "RULE_ONLY"),
-                "resolvedMode": cognition.get("resolvedMode", "RULE_ONLY"),
-                "externalModelUsed": str(cognition.get("resolvedMode", "")).startswith(
-                    "HYBRID_LLM"
-                ),
+                "requestedMode": requestedMode,
+                "resolvedMode": resolvedMode,
+                "externalModelUsed": externalModelUsed,
                 "provider": cognition.get("provider"),
+                "requestedProvider": cognition.get("requestedProvider"),
                 "requestedModel": cognition.get("requestedModel"),
                 "resolvedModel": cognition.get("resolvedModel"),
+                "configuredButUnusedProvider": cognition.get("configuredButUnusedProvider"),
+                "configuredButUnusedModel": cognition.get("configuredButUnusedModel"),
                 "promptVersion": cognition.get("promptVersion"),
                 "promptSchemaVersion": cognition.get("promptSchemaVersion"),
                 "calls": cognition.get("calls", 0),
@@ -3322,7 +4074,26 @@ def _buildExport(experiment: dict[str, Any]) -> bytes:
             "cognitive_decisions.json",
             {
                 "schemaVersion": cognition.get("promptSchemaVersion", "belief_decision_v1.0.0"),
+                "mode": resolvedMode,
+                "applicability": (
+                    "NOT_APPLICABLE" if requestedMode == "RULE_ONLY" else "APPLICABLE"
+                ),
+                "reason": (NO_EXTERNAL_COGNITION_REASON if requestedMode == "RULE_ONLY" else None),
                 "items": cognition.get("decisions", []),
+            },
+        )
+        _writeJson(
+            archive,
+            "order_execution_summary.json",
+            {
+                "schemaVersion": "order_execution_summary_v1.0.0",
+                "scope": "REPRESENTATIVE_MATCHED_SEED_PAIR",
+                "interpretationBoundary": (
+                    "Items aggregate requested, approved, filled, remaining, VWAP, "
+                    "trade links, and final status for orders from the representative "
+                    "matched-seed baseline/intervention pair; they are not all experiment orders."
+                ),
+                "items": result.get("orderExecutionSummary", []),
             },
         )
 
@@ -3396,11 +4167,16 @@ def _buildExport(experiment: dict[str, Any]) -> bytes:
             "README_REPRODUCE.md",
             "# EventShock Lab reproducibility bundle\n\n"
             "This bundle records scenarios, matched seeds, run-level metrics, "
-            "event-log hashes, typed Parquet tables, selected traces, and limitations. "
+            "event-log hashes, typed Parquet tables, selected traces, representative "
+            "order/trade execution summaries, and limitations. "
+            "`cognitive_decisions.json` remains present under the fixed export contract; "
+            f"when its applicability is `NOT_APPLICABLE`, `{NO_EXTERNAL_COGNITION_REASON}`. "
             "From the repository root, verify it with `python scripts/replay-bundle.py "
             "<export.zip>`. Re-run it only with engine version "
             f"`{result['manifest']['engineVersion']}` and CPython 3.12.13.\n\n"
-            "本压缩包记录场景、配对种子、逐次指标、事件日志哈希、抽样追踪与限制。"
+            "本压缩包记录场景、配对种子、逐次指标、事件日志哈希、抽样追踪、"
+            "代表性订单/成交执行摘要与限制。固定导出契约会始终保留 "
+            "`cognitive_decisions.json`；`NOT_APPLICABLE` 表示本次未请求外部认知。"
             "在仓库根目录运行 `python scripts/replay-bundle.py <export.zip>` 核验；"
             "只应使用相同引擎版本和 CPython 3.12.13 重放。\n",
         )

@@ -16,12 +16,28 @@ from backend.app.cognition.models import (
 )
 
 ResultLanguage = Literal["en", "zh-CN"]
+ResultSemanticValidationStatus = Literal[
+    "NOT_RECORDED",
+    "PASSED",
+    "REPAIRED",
+    "DETERMINISTIC_FALLBACK",
+]
 # 11 个工具全部启用时仍需为外层 evidence 元数据预留空间，避免单项均合法但
 # 聚合后超过上下文上限。6 KB × 11 加包装字段可稳定控制在 72 KB 以内。
 MAX_TOOL_PAYLOAD_BYTES = 6_000
 MAX_TOOL_CONTEXT_BYTES = 72_000
 
 DEFAULT_RESULT_TOOLS: tuple[ResultEvidenceTool, ...] = tuple(ResultEvidenceTool)
+# 首轮只发送回答研究问题所需的聚合切片。长路径、逐条 trace、Agent 明细、
+# 逐条认知决策和配对数组由后续 Planner 按用户问题选择，避免首轮固定高 token。
+INITIAL_RESULT_TOOLS: tuple[ResultEvidenceTool, ...] = (
+    ResultEvidenceTool.OVERVIEW,
+    ResultEvidenceTool.METRIC_SUMMARY,
+    ResultEvidenceTool.COGNITION_SUMMARY,
+    ResultEvidenceTool.ANALYSIS_DIAGNOSTICS,
+    ResultEvidenceTool.LIMITATIONS,
+    ResultEvidenceTool.MANIFEST,
+)
 
 TOOL_LABELS: dict[ResultEvidenceTool, tuple[str, str]] = {
     ResultEvidenceTool.OVERVIEW: ("Experiment overview", "实验概览"),
@@ -64,13 +80,19 @@ class ResultInterpretationRun(StrictFrozenModel):
     tool_activity: tuple[ResultToolActivity, ...]
     usage: ModelUsage
     latency_ms: float = Field(ge=0.0)
-    # Planner、答案及各自至多一次结构修复，最坏四次真实供应商请求。
-    model_calls: int = Field(ge=1, le=4)
+    # Planner、答案、语义修复及各自至多一次结构修复，最坏六次真实供应商请求。
+    model_calls: int = Field(ge=1, le=6)
     cache_hit: bool
     repair_used: bool
     planner_used: bool
     prompt_version: str
     planner_fallback_used: bool = False
+    # 默认值只用于兼容旧测试夹具和未携带该元数据的历史记录；生产解释路径
+    # 会显式写入 PASSED、REPAIRED 或 DETERMINISTIC_FALLBACK。
+    semantic_validation_status: ResultSemanticValidationStatus = "NOT_RECORDED"
+    deterministic_fallback_used: bool = False
+    semantic_violation_codes: tuple[str, ...] = ()
+    thinking_preference_enabled: bool = False
     thinking_enabled: bool = False
     streamed: bool = False
     transport_attempts: int = Field(default=0, ge=0)

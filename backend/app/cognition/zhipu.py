@@ -355,6 +355,12 @@ class ZhipuRestGateway:
         error: ModelGatewayError,
     ) -> dict[str, Any]:
         payload = ZhipuRestGateway._buildPayload(request)
+        descriptor = getZhipuModel(request.model)
+        # 修复轮必须最大化严格 JSON 的稳定性，即使调用方错误地为首轮打开了
+        # thinking，也不能把该偏好继续传进结构修复请求。
+        if descriptor.supports_thinking:
+            payload["thinking"] = {"type": "disabled"}
+        payload.pop("reasoning_effort", None)
         # 修复轮已经携带上一轮的有界无效 JSON；为提高一次修复成功率并避免
         # 再次处理半截结构，按“结构化 JSON 不适合边生成边展示”的例外非流式接收。
         payload["stream"] = False

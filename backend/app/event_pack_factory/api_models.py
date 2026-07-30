@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Literal
 
 from pydantic import Field, SecretStr, StrictBool, field_validator, model_validator
 
@@ -106,6 +107,16 @@ class FactoryReviewMutationRequest(StrictFactoryModel):
         if self.status is SourceReviewStatus.PENDING:
             raise ValueError("status must be APPROVED or REJECTED")
         return self
+
+
+class FactorySourceSelectionMutationRequest(StrictFactoryModel):
+    expectedRevision: int = Field(ge=0)
+    included: StrictBool
+
+
+class FactorySourcePermanentDeleteRequest(StrictFactoryModel):
+    expectedRevision: int = Field(ge=0)
+    confirmation: Literal["DELETE_RAW_TEXT"]
 
 
 class FactoryReaderMutationRequest(StrictFactoryModel):

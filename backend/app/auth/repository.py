@@ -509,6 +509,16 @@ class AuthRepository:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def getUserAuthenticationRecord(self, userId: str) -> dict[str, Any] | None:
+        """仅供服务端重新认证使用；调用方不得序列化或记录返回值。"""
+
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT id, password_hash, status FROM auth_users WHERE id=?",
+                (userId,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def getUserById(self, userId: str) -> PublicUser | None:
         with self.database.connection() as connection:
             row = connection.execute("SELECT * FROM auth_users WHERE id=?", (userId,)).fetchone()

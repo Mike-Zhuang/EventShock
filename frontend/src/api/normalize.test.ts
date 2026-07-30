@@ -1,15 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildHistogram,
+  normalizeAccountDataExport,
+  normalizeAccountDeletionReceipt,
   normalizeAdminActivityPage,
   normalizeAdminUserPage,
   normalizeAuthSession,
   normalizeCases,
   normalizeCognitionEvalSummary,
   normalizeCognitionEvaluationRun,
+  normalizeDeploymentStatus,
   normalizeEventPack,
   normalizeExperiment,
   normalizeGovernanceInventory,
+  normalizeGuidedTurnOperation,
+  normalizeGuidedTurnRecoveryResult,
   normalizeLegalAcceptance,
   normalizeLegalDocument,
   normalizeLlmCatalog,
@@ -31,6 +36,49 @@ import {
 } from './normalize';
 
 describe('API normalizers', () => {
+  it('保留引导调用的恢复证据并严格归一化恢复响应', () => {
+    const operation = normalizeGuidedTurnOperation({
+      schema_version: '1.0.0',
+      workflow_id: 'guided-12345678',
+      client_request_id: 'guided-request-12345678',
+      expected_version: 2,
+      status: 'UNKNOWN',
+      error_code: 'MODEL_TIMEOUT',
+      request_message: 'Study one bounded event.',
+      language: 'en',
+      cached_proposal_available: true,
+      recovery_options: ['RETRY_CACHED_COMMIT', 'ABANDON_AND_AUTHORIZE_RETRY'],
+      provider_request_id: 'guided-provider-request-1',
+      http_response_received: false,
+      usage_received: false,
+      parse_completed: true,
+      failure_stage: 'DATABASE_COMMIT_PENDING',
+      created_at: '2026-07-29T12:00:00Z',
+      updated_at: '2026-07-29T12:01:00Z',
+    });
+
+    expect(operation).toMatchObject({
+      status: 'UNKNOWN',
+      requestMessage: 'Study one bounded event.',
+      cachedProposalAvailable: true,
+      providerRequestId: 'guided-provider-request-1',
+      httpResponseReceived: false,
+      parseCompleted: true,
+      failureStage: 'DATABASE_COMMIT_PENDING',
+    });
+    expect(normalizeGuidedTurnRecoveryResult({
+      kind: 'OPERATION',
+      operation: {
+        ...operation,
+        status: 'ABANDONED_BY_USER',
+        recoveryOptions: [],
+      },
+    })).toMatchObject({
+      kind: 'OPERATION',
+      operation: { status: 'ABANDONED_BY_USER' },
+    });
+  });
+
   it('兼容多供应商目录并保留供应商原币种价格与能力元数据', () => {
     const catalog = normalizeLlmCatalog({
       default_provider: 'zhipu',
@@ -236,6 +284,50 @@ describe('API normalizers', () => {
         created_at: '2026-07-20T01:00:00Z',
       }],
     })).toMatchObject({ total: 1, items: [{ entityId: 'exp-1', outcome: 'FAILED' }] });
+  });
+
+  it('normalizes account export and deletion receipts without weakening their contracts', () => {
+    expect(normalizeAccountDataExport({
+      schema_version: 'account_data_export_v1.0.0',
+      generated_at: '2026-07-29T12:00:00Z',
+      retention_notice: 'Backups follow normal retention.',
+      excluded_secrets: ['password hashes', 'session tokens'],
+      data: {
+        account: [{ id: 'user-1', email: 'analyst@example.com' }],
+        factorySourceBodies: [{ sourceId: 'source-1', rawText: 'retained text' }],
+      },
+    })).toEqual({
+      schemaVersion: 'account_data_export_v1.0.0',
+      generatedAt: '2026-07-29T12:00:00Z',
+      retentionNotice: 'Backups follow normal retention.',
+      excludedSecrets: ['password hashes', 'session tokens'],
+      data: {
+        account: [{ id: 'user-1', email: 'analyst@example.com' }],
+        factorySourceBodies: [{ sourceId: 'source-1', rawText: 'retained text' }],
+      },
+    });
+    expect(normalizeAccountDeletionReceipt({
+      deleted: true,
+      deleted_record_count: 17,
+      backup_retention_notice: 'Backups follow normal retention.',
+    })).toEqual({
+      deleted: true,
+      deletedRecordCount: 17,
+      backupRetentionNotice: 'Backups follow normal retention.',
+    });
+
+    expect(() => normalizeAccountDataExport({
+      schemaVersion: 'account_data_export_v1.0.0',
+      generatedAt: '2026-07-29T12:00:00Z',
+      retentionNotice: 'Backups follow normal retention.',
+      excludedSecrets: [],
+      data: { account: { id: 'user-1' } },
+    })).toThrow(/section account is not an array/i);
+    expect(() => normalizeAccountDeletionReceipt({
+      deleted: false,
+      deletedRecordCount: 0,
+      backupRetentionNotice: 'No deletion.',
+    })).toThrow(/did not confirm deletion/i);
   });
 
   it('normalizes versioned legal documents and onboarding responses without discarding audit fields', () => {
@@ -558,8 +650,17 @@ describe('API normalizers', () => {
         phase: 'INTERVENTION',
         pairIndex: 10,
         currentSeed: 12_345,
+        lastCompletedSeed: 11_111,
         resumedFromCheckpoint: true,
         checkpointPairs: 9,
+        cognitionProgress: {
+          status: 'MODEL_CALL_COMPLETED',
+          plannedCalls: 12,
+          attemptedCalls: 4,
+          completedCalls: 4,
+          fallbackCount: 1,
+          totalTokens: 2048,
+        },
         baseline: {
           step: 119,
           completedSteps: 120,
@@ -585,6 +686,8 @@ describe('API normalizers', () => {
           level: 'INFO',
           message: 'Intervention path is running.',
           seed: 12_345,
+          code: 'INTERVENTION_PATH_STARTED',
+          parameters: { pairIndex: 10 },
         }],
       },
     });
@@ -594,15 +697,27 @@ describe('API normalizers', () => {
     expect(experiment.intervention?.parameter).toBe('marketMakerCapacity');
     expect(experiment.scenario?.populationSize).toBe(56);
     expect(experiment.currentSeed).toBe(12_345);
+    expect(experiment.lastCompletedSeed).toBe(11_111);
     expect(experiment.liveState).toMatchObject({
       phase: 'INTERVENTION',
       checkpointPairs: 9,
       resumedFromCheckpoint: true,
+      lastCompletedSeed: 11_111,
+      cognitionProgress: {
+        status: 'MODEL_CALL_COMPLETED',
+        plannedCalls: 12,
+        completedCalls: 4,
+      },
       baseline: { price: 134.25, completedSteps: 120 },
       intervention: { marketState: 'HALTED', spreadBps: 42.25 },
     });
     expect(experiment.logs).toEqual([
-      expect.objectContaining({ message: 'Intervention path is running.', seed: 12_345 }),
+      expect.objectContaining({
+        message: 'Intervention path is running.',
+        seed: 12_345,
+        code: 'INTERVENTION_PATH_STARTED',
+        parameters: { pairIndex: 10 },
+      }),
     ]);
   });
 
@@ -655,7 +770,12 @@ describe('API normalizers', () => {
 
   it('uses authoritative backend checks and preserves the interpretation boundary', () => {
     const validation = normalizeValidation({
-      valid: true,
+      valid: false,
+      simulationRunnable: true,
+      requestedCognitionRunnable: false,
+      effectiveCognitionMode: 'RULE_ONLY',
+      degradationReasons: ['LLM_COST_CAP_INSUFFICIENT'],
+      requiresExplicitRuleFallbackConfirmation: true,
       checks: [
         { code: 'EVENT_PACK_FROZEN', status: 'PASS', message: 'Frozen snapshot verified.' },
         { code: 'LLM_BUDGET_CLOSE_TO_CAP', status: 'WARN', message: 'Review the configured cap.' },
@@ -671,6 +791,46 @@ describe('API normalizers', () => {
     expect(validation.estimatedLlmCalls).toBe(40);
     expect(validation.llmCostCapUsd).toBe(2.5);
     expect(validation.interpretationBoundary).toBe('Scenario analysis, not a forecast.');
+    expect(validation).toMatchObject({
+      simulationRunnable: true,
+      requestedCognitionRunnable: false,
+      effectiveCognitionMode: 'RULE_ONLY',
+      degradationReasons: ['LLM_COST_CAP_INSUFFICIENT'],
+      requiresExplicitRuleFallbackConfirmation: true,
+    });
+  });
+
+  it('keeps action-required errors alongside authoritative backend checks', () => {
+    const validation = normalizeValidation({
+      valid: false,
+      errors: [{
+        code: 'INTERVENTION_MECHANISM_DISABLED',
+        message: 'The clarification claim was rejected.',
+      }],
+      warnings: [{
+        code: 'SMALL_SEED_COUNT',
+        message: 'The empirical interval may be wide.',
+      }],
+      checks: [{
+        code: 'EVENT_PACK_FROZEN',
+        status: 'PASS',
+        message: 'Frozen snapshot verified.',
+      }],
+    });
+
+    expect(validation.checks).toEqual([
+      expect.objectContaining({ id: 'EVENT_PACK_FROZEN', passed: true }),
+      expect.objectContaining({
+        id: 'INTERVENTION_MECHANISM_DISABLED',
+        passed: false,
+        severity: 'error',
+      }),
+      expect.objectContaining({
+        id: 'SMALL_SEED_COUNT',
+        passed: true,
+        severity: 'warning',
+      }),
+    ]);
   });
 
   it('converts aggregate result objects into chart arrays and metric rows', () => {
@@ -703,6 +863,7 @@ describe('API normalizers', () => {
         { seed: 101, baseline: { maxSpreadBps: 14 }, intervention: { maxSpreadBps: 22 }, delta: { maxSpreadBps: 8 } },
       ],
       metricSummaries: { maxSpreadBps: summary },
+      strongestMetricIds: ['maxSpreadBps'],
       primaryOutcome: 'maxSpreadBps',
       medianPaths: {
         step: [0, 1],
@@ -726,11 +887,46 @@ describe('API normalizers', () => {
       },
       traces: [{
         traceId: 'trace-1',
+        globalSequence: 42,
         eventType: 'RISK_CHECK',
         step: 11,
+        phase: 'RISK',
+        phaseSequence: 2,
+        sourceLayer: 'DETERMINISTIC_MARKET_MECHANISM',
+        isInterventionDifference: true,
         summary: 'Risk control checked the order.',
         summaryZh: '风控检查了订单。',
-        payload: { agentId: 'agent-1', orderId: 'order-1' },
+        agentId: 'agent-top-level',
+        parentTraceId: 'trace-parent',
+        payload: { agentId: 'agent-payload-fallback', orderId: 'order-1' },
+      }],
+      orderExecutionSummary: [{
+        orderId: 'order-1',
+        orderTraceId: 'trace-order-1',
+        agentId: 'agent-top-level',
+        side: 'SELL',
+        submissionStep: 11,
+        submissionSequence: 7,
+        timeInForce: 'GTC',
+        limitPriceTicks: 9_900,
+        limitPrice: 99,
+        requestedQuantity: 12,
+        approvedQuantity: 10,
+        unapprovedQuantity: 2,
+        cumulativeFilledQuantity: 7,
+        remainingQuantity: 3,
+        vwapPriceTicks: 9_875,
+        vwapPrice: 98.75,
+        fillCount: 2,
+        tradeIds: ['trade-1', 'trade-2'],
+        tradeTraceIds: ['trace-trade-1', 'trace-trade-2'],
+        riskDecision: 'MODIFY',
+        finalStatus: 'PARTIALLY_FILLED_AT_SIMULATION_END',
+        terminal: false,
+        closure: 'SIMULATION_ENDED',
+        scenario: 'intervention',
+        seed: 100,
+        isInterventionDifference: true,
       }],
       limitations: [{ code: 'SYNTHETIC', text: 'Synthetic only.', textZh: '仅为合成数据。' }],
       cognition: {
@@ -787,11 +983,29 @@ describe('API normalizers', () => {
       stoppingRule: {
         mode: 'TARGET_CI_HALF_WIDTH',
         triggered: true,
-        reason: 'TARGET_CI_HALF_WIDTH_REACHED',
+        reason: 'MAXIMUM_PAIRS_REACHED',
+        primaryReason: 'MAXIMUM_PAIRS_REACHED',
+        reasons: ['MAXIMUM_PAIRS_REACHED', 'TARGET_CI_HALF_WIDTH_REACHED'],
         primaryOutcome: 'maxSpreadBps',
         completedPairs: 10,
+        minimumPairs: 10,
+        maximumPairs: 10,
         observedCiHalfWidth: 1.2,
         targetCiHalfWidth: 1.5,
+        conditionEvaluations: [
+          {
+            code: 'MINIMUM_PAIRS_REACHED',
+            evaluationOrder: 1,
+            satisfied: true,
+            firstSatisfiedAtPair: 10,
+          },
+          {
+            code: 'MAXIMUM_PAIRS_REACHED',
+            evaluationOrder: 2,
+            satisfied: true,
+            firstSatisfiedAtPair: 10,
+          },
+        ],
         bootstrapInterval95: { estimate: 8, lower: 6.8, upper: 9.2, confidenceLevel: 0.95, resamples: 5_000, seed: 17 },
       },
       narrativeReport: {
@@ -857,12 +1071,36 @@ describe('API normalizers', () => {
     });
     expect(results.pairedSeeds).toHaveLength(2);
     expect(results.primaryMetricId).toBe('maxSpreadBps');
+    expect(results.strongestMetricIds).toEqual(['maxSpreadBps']);
     expect(results.pairedSeries.maxSpreadBps).toHaveLength(2);
     expect(results.distribution.reduce((total, bin) => total + bin.baseline, 0)).toBe(2);
     expect(results.marketPaths[1]).toMatchObject({ baselinePrice: 99, interventionSpread: 20 });
     expect(results.agentFlows[0]).toMatchObject({ agentType: 'MARKET_MAKER', delta: -12 });
     expect(results.agentPnl[0]).toMatchObject({ agentType: 'MARKET_MAKER', deltaEquityChangeCents: -200, validN: 2 });
-    expect(results.traces[0]).toMatchObject({ kind: 'RISK_CHECK', step: 11, summaryZh: '风控检查了订单。' });
+    expect(results.traces[0]).toMatchObject({
+      kind: 'RISK_CHECK',
+      step: 11,
+      summaryZh: '风控检查了订单。',
+      agentId: 'agent-top-level',
+      parentId: 'trace-parent',
+      globalSequence: 42,
+      phase: 'RISK',
+      phaseSequence: 2,
+      sourceLayer: 'DETERMINISTIC_MARKET_MECHANISM',
+      isInterventionDifference: true,
+    });
+    expect(results.orderExecutionSummary?.[0]).toMatchObject({
+      orderId: 'order-1',
+      submissionSequence: 7,
+      cumulativeFilledQuantity: 7,
+      remainingQuantity: 3,
+      vwapPrice: 98.75,
+      fillCount: 2,
+      riskDecision: 'MODIFY',
+      finalStatus: 'PARTIALLY_FILLED_AT_SIMULATION_END',
+      scenario: 'intervention',
+      isInterventionDifference: true,
+    });
     expect(results.limitationsZh).toEqual(['仅为合成数据。']);
     expect(results.modelVersions.engineVersion).toBe('engine-0.1.0');
     expect(results.cognition).toMatchObject({
@@ -892,7 +1130,24 @@ describe('API normalizers', () => {
       sensitivityStatus: 'PASSED',
       negativeControlStatus: 'PASSED',
     });
-    expect(results.stoppingRule).toMatchObject({ triggered: true, completedPairs: 10, observedCiHalfWidth: 1.2 });
+    expect(results.stoppingRule).toMatchObject({
+      triggered: true,
+      completedPairs: 10,
+      observedCiHalfWidth: 1.2,
+      reasons: ['MAXIMUM_PAIRS_REACHED', 'TARGET_CI_HALF_WIDTH_REACHED'],
+      conditionEvaluations: [
+        expect.objectContaining({
+          code: 'MINIMUM_PAIRS_REACHED',
+          evaluationOrder: 1,
+          firstSatisfiedAtPair: 10,
+        }),
+        expect.objectContaining({
+          code: 'MAXIMUM_PAIRS_REACHED',
+          evaluationOrder: 2,
+          firstSatisfiedAtPair: 10,
+        }),
+      ],
+    });
     expect(results.narrativeReport).toMatchObject({ generatedBy: 'DETERMINISTIC_TEMPLATE', headlineZh: '干预扩大了模拟价差。' });
     expect(results.analysisDiagnostics).toMatchObject({
       preregisteredPrimaryOutcome: 'maxSpreadBps',
@@ -1051,6 +1306,68 @@ describe('API normalizers', () => {
       runtime: { requestCount: 12, latencyMs: { p95: 9 } },
       storage: { database: 'ok', retainedExperiments: 3 },
       cognition: { calls: 2, totalTokens: 400 },
+    });
+  });
+
+  it('normalizes direct deployment evidence and fails closed on unknown check states', () => {
+    const deployedCommit = 'a'.repeat(40);
+    const githubMainCommit = 'b'.repeat(40);
+    const deploymentStatus = normalizeDeploymentStatus({
+      schema_version: '1.0.0',
+      deployed_commit: deployedCommit,
+      health_commit: deployedCommit,
+      reported_deployed_commit: deployedCommit,
+      github_main_commit: githubMainCommit,
+      branch: 'main',
+      commit_alignment: 'MAIN_MISMATCH',
+      required_checks: [
+        {
+          name: 'Backend / Python 3.12.13',
+          status: 'PASS',
+          completed_at: '2026-07-29T10:00:00Z',
+        },
+        {
+          name: 'Frontend / Node 22',
+          status: 'PENDING',
+          completed_at: null,
+        },
+        {
+          name: 'Production container',
+          status: 'NOT_TRUSTED',
+          completed_at: '2026-07-29T10:04:00Z',
+        },
+      ],
+      required_checks_status: 'FAIL',
+      last_sync_at: '2026-07-29T10:05:00Z',
+      last_sync_result: 'FAILED',
+      last_deploy_at: '2026-07-28T18:30:00Z',
+      last_failure_at: '2026-07-29T10:05:00Z',
+      last_failure_code: 'REQUIRED_CHECKS_FAILED',
+      evidence_observed_at: '2026-07-29T10:06:00Z',
+      status_source: 'RESTRICTED_STATUS_FILE',
+      status_file_state: 'VERIFIED',
+      observed_at: '2026-07-29T10:07:00Z',
+    });
+
+    expect(deploymentStatus).toMatchObject({
+      deployedCommit,
+      githubMainCommit,
+      commitAlignment: 'MAIN_MISMATCH',
+      requiredChecksStatus: 'FAIL',
+      lastSyncResult: 'FAILED',
+      lastFailureCode: 'REQUIRED_CHECKS_FAILED',
+      statusSource: 'RESTRICTED_STATUS_FILE',
+      statusFileState: 'VERIFIED',
+    });
+    expect(deploymentStatus.requiredChecks.map((check) => check.status))
+      .toEqual(['PASS', 'PENDING', 'UNKNOWN']);
+
+    expect(normalizeDeploymentStatus({
+      required_checks_status: 'UNVERIFIED_PASS',
+      last_sync_result: 'UNVERIFIED_SUCCESS',
+    })).toMatchObject({
+      requiredChecksStatus: 'UNKNOWN',
+      lastSyncResult: 'UNKNOWN',
     });
   });
 

@@ -31,6 +31,14 @@ from backend.app.cognition import (
     ModelUsage,
     Observation,
 )
+from backend.app.database import Database
+from backend.app.guided_workflow.models import (
+    GuidedStage,
+    GuidedWorkflowDraft,
+    GuidedWorkflowProposal,
+    GuidedWorkflowStatus,
+    GuidedWorkflowView,
+)
 from backend.app.schemas import ExperimentRequest
 from backend.app.service import (
     COGNITION_PILOT_SCHEDULE_MODE,
@@ -228,6 +236,8 @@ class GatewayHarness:
 
 def configuredService(
     outcomes: list[FakeOutcome],
+    *,
+    thinkingEnabled: bool = False,
 ) -> tuple[CognitionService, GatewayHarness]:
     harness = GatewayHarness(outcomes)
     service = CognitionService(gatewayFactory=harness)
@@ -235,6 +245,7 @@ def configuredService(
         sessionId=SESSION_ID,
         apiKey=API_KEY,
         model="glm-5.2",
+        thinkingEnabled=thinkingEnabled,
         maxTokens=4_096,
     )
     return service, harness
@@ -291,6 +302,81 @@ def test_public_catalog_prompts_config_and_live_connection_are_redacted() -> Non
     assert service.getConfig(SESSION_ID).configured is False
 
 
+def test_strict_structured_workflows_force_thinking_off_but_report_preference() -> None:
+    emptyExtraction = EventExtractionResult(
+        claims=(),
+        source_summary="The connectivity probe contains no event claim.",
+        abstain_reason="No event fact was supplied in the connectivity probe.",
+    )
+    guidedProposal = GuidedWorkflowProposal(
+        stage=GuidedStage.EVENT_GOAL,
+        assistantMessage="Please provide a bounded event and research question for review.",
+        clarificationRequired=True,
+        readyForHumanReview=False,
+    )
+    service, harness = configuredService(
+        [
+            FakeOutcome(emptyExtraction),
+            FakeOutcome(makeExtraction()),
+            FakeOutcome(guidedProposal),
+            FakeOutcome(makeAbstainDecision()),
+        ],
+        thinkingEnabled=True,
+    )
+    source = ExternalEvidenceSource(
+        sourceId="source-official-001",
+        rawText="The official source announced a simulated market event.",
+        sourceType="OFFICIAL",
+        knownAt=KNOWN_AT,
+    )
+    workflow = GuidedWorkflowView(
+        id="guided-thinking-policy-001",
+        stage=GuidedStage.EVENT_GOAL,
+        status=GuidedWorkflowStatus.ACTIVE,
+        version=1,
+        language="en",
+        draft=GuidedWorkflowDraft(),
+        messages=(),
+        createdAt=KNOWN_AT,
+        updatedAt=KNOWN_AT,
+    )
+
+    connection = asyncio.run(service.testConnection(SESSION_ID))
+    extraction = asyncio.run(
+        service.extractEventClaims(
+            sessionId=SESSION_ID,
+            sources=(source,),
+        )
+    )
+    asyncio.run(
+        service.proposeGuidedWorkflow(
+            sessionId=SESSION_ID,
+            workflow=workflow,
+            latestUserMessage="Study one bounded public event.",
+            language="en",
+        )
+    )
+    belief = asyncio.run(
+        service.generateBeliefDecision(
+            sessionId=SESSION_ID,
+            observation=makeObservation(),
+        )
+    )
+
+    assert [request.samplingConfig.thinking_enabled for request in harness.requests] == [
+        False,
+        False,
+        False,
+        False,
+    ]
+    assert connection.thinking_preference_enabled is True
+    assert connection.thinking_enabled is False
+    assert extraction.thinking_preference_enabled is True
+    assert extraction.thinking_enabled is False
+    assert belief.thinking_preference_enabled is True
+    assert belief.thinking_enabled is False
+
+
 def test_service_propagates_non_zhipu_provider_to_request_and_result() -> None:
     emptyExtraction = EventExtractionResult(
         claims=(),
@@ -342,6 +428,18 @@ def test_extraction_safely_wraps_sources_and_builds_event_pack_claims() -> None:
     assert claim["knownAt"] == KNOWN_AT.isoformat()
     assert claim["reviewStatus"] == "AI_PROPOSED"
     assert claim["instructionLikeTextDetected"] is True
+    assert claim["modelReportedConfidence"] == 0.95
+    assert claim["confidence"] < claim["modelReportedConfidence"]
+    assert claim["confidenceMeaning"] == "EXTRACTION_FIDELITY_NOT_EVENT_PROBABILITY"
+    assert set(claim["confidenceComponents"]) == {
+        "textualFidelity",
+        "sourceTierStrength",
+        "timeBoundaryCertainty",
+    }
+    assert claim["impactChannels"] == ["belief"]
+    assert len(claim["impactChannels"]) <= 2
+    assert claim["impactChannelRationale"][0]["channel"] == "belief"
+    assert claim["channelMappingIsInference"] is True
     request = harness.requests[0]
     assert source.rawText in request.userContent
     assert source.rawText not in request.systemPrompt
@@ -379,6 +477,9 @@ def test_service_rejects_evidence_overreach_and_closes_gateway() -> None:
     assert telemetry.calls == 1
     assert telemetry.invalid_outputs == 1
     assert telemetry.invalid_output_rate == 1.0
+    assert telemetry.structured_successes == 0
+    assert telemetry.structured_success_gate_status == "FAIL"
+    assert telemetry.failure_category_counts == {"GROUNDING": 1}
 
 
 def test_belief_fallback_cache_telemetry_and_eval_summary() -> None:
@@ -448,6 +549,15 @@ def test_belief_fallback_cache_telemetry_and_eval_summary() -> None:
     assert telemetry.cache_hit_rate == 0.5
     assert telemetry.fallback_rate == 0.5
     assert telemetry.invalid_output_rate == 0.5
+    assert telemetry.structured_successes == 1
+    assert telemetry.structured_success_rate == 0.5
+    assert telemetry.structured_success_threshold == 0.95
+    assert telemetry.structured_success_gate_status == "FAIL"
+    assert telemetry.failure_category_counts == {
+        "INVALID_OUTPUT": 1,
+        "RULE_FALLBACK": 1,
+    }
+    assert telemetry.observation_scope == "PROCESS_LOCAL"
 
     case = CognitionEvalCase(
         case_id="case-service-eval",
@@ -462,6 +572,53 @@ def test_belief_fallback_cache_telemetry_and_eval_summary() -> None:
     assert summary.passed_cases == 1
     assert summary.pass_rate == 1.0
     assert summary.telemetry == telemetry
+
+
+def test_belief_progress_observer_enables_provider_streaming() -> None:
+    service, harness = configuredService([FakeOutcome(makeAbstainDecision())])
+
+    async def observe(_progress: object) -> None:
+        return None
+
+    asyncio.run(
+        service.generateBeliefDecision(
+            sessionId=SESSION_ID,
+            observation=makeObservation(),
+            progressObserver=observe,
+        )
+    )
+
+    assert harness.requests[0].streamResponse is True
+    assert harness.requests[0].streamObserver is observe
+
+
+def test_cognition_telemetry_survives_service_restart(tmp_path) -> None:
+    database = Database(tmp_path / "control-plane.sqlite3")
+    database.initialize()
+    database.recordCognitionTelemetry(
+        {
+            "calls": 2,
+            "structuredSuccesses": 1,
+            "invalidOutputs": 1,
+            "totalLatencyMs": 12.5,
+            "failureCategoryCounts": {"INVALID_OUTPUT": 1},
+        }
+    )
+
+    first = CognitionService(
+        telemetryLoader=database.loadCognitionTelemetry,
+        telemetryRecorder=database.recordCognitionTelemetry,
+    )
+    second = CognitionService(
+        telemetryLoader=database.loadCognitionTelemetry,
+        telemetryRecorder=database.recordCognitionTelemetry,
+    )
+
+    assert first.getTelemetry() == second.getTelemetry()
+    assert second.getTelemetry().calls == 2
+    assert second.getTelemetry().structured_success_rate == 0.5
+    assert second.getTelemetry().failure_category_counts == {"INVALID_OUTPUT": 1}
+    assert second.getTelemetry().observation_scope == "PERSISTED_SITE_WIDE"
 
 
 def test_belief_rule_fallback_is_rejected_when_policy_disables_it() -> None:
@@ -679,13 +836,36 @@ def closedLoopEventPack() -> dict:
 
 
 def closedLoopService(
-    cognition: ClosedLoopPilotCognition,
+    cognition: CognitionService | ClosedLoopPilotCognition,
 ) -> ExperimentService:
     return ExperimentService(
         database=None,  # type: ignore[arg-type]
         eventPacks=None,  # type: ignore[arg-type]
         cognition=cognition,  # type: ignore[arg-type]
     )
+
+
+def test_rule_only_cognition_does_not_claim_configured_provider_was_used() -> None:
+    cognition, _harness = configuredService([])
+    service = closedLoopService(cognition)
+    requestData = closedLoopRequest()
+    requestData["llmPolicy"]["mode"] = "RULE_ONLY"
+
+    cognitionRun = service._prepareCognitiveSignals(
+        "exp-rule-only-metadata",
+        SESSION_ID,
+        requestData,
+        closedLoopEventPack(),
+    )
+
+    assert cognitionRun["resolvedMode"] == "RULE_ONLY"
+    assert cognitionRun["externalModelUsed"] is False
+    assert cognitionRun["provider"] is None
+    assert cognitionRun["requestedProvider"] is None
+    assert cognitionRun["requestedModel"] is None
+    assert cognitionRun["resolvedModel"] is None
+    assert cognitionRun["configuredButUnusedProvider"] == "zhipu"
+    assert cognitionRun["configuredButUnusedModel"] == "glm-5.2"
 
 
 def test_null_claim_confidence_uses_neutral_default_for_evidence_and_social_feed() -> None:
@@ -770,6 +950,63 @@ def test_closed_loop_pilot_uses_endogenous_market_feedback_and_labeled_social_fe
         for post in secondRoundObservation.social_feed
     )
     assert secondRoundObservation.evidenceIds() == {"claim-risk-off"}
+
+
+def test_closed_loop_pilot_reports_real_per_call_progress() -> None:
+    cognition = ClosedLoopPilotCognition()
+    service = closedLoopService(cognition)
+    progressStates: list[dict[str, object]] = []
+
+    cognitionRun = service._prepareCognitiveSignals(
+        "exp-closed-loop-progress",
+        SESSION_ID,
+        closedLoopRequest(),
+        closedLoopEventPack(),
+        progressCallback=lambda state: progressStates.append(state),
+    )
+
+    assert cognitionRun["attemptedCalls"] == 8
+    assert progressStates[0]["status"] == "INITIALIZING_PILOT"
+    assert any(state["status"] == "PILOT_READY" for state in progressStates)
+    completedStates = [
+        state for state in progressStates if state["status"] == "MODEL_CALL_COMPLETED"
+    ]
+    assert [state["completedCalls"] for state in completedStates] == list(range(1, 9))
+    assert progressStates[-1]["status"] == "COMPLETED"
+    assert progressStates[-1]["attemptedCalls"] == 8
+    assert progressStates[-1]["completedCalls"] == 8
+    assert progressStates[-1]["structuredValidCalls"] == 8
+    assert progressStates[-1]["structuredSuccessRate"] == 1.0
+    assert progressStates[-1]["currentCostUsd"] == 0.0
+    assert progressStates[-1]["failureCategoryCounts"] == {}
+
+
+def test_user_can_stop_future_model_calls_and_preserve_validated_signals() -> None:
+    cognition = ClosedLoopPilotCognition()
+    service = closedLoopService(cognition)
+    progressStates: list[dict[str, object]] = []
+    checks = 0
+
+    def ruleContinuationRequested() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks > 2
+
+    cognitionRun = service._prepareCognitiveSignals(
+        "exp-user-rule-continuation",
+        SESSION_ID,
+        closedLoopRequest(),
+        closedLoopEventPack(),
+        progressCallback=lambda state: progressStates.append(state),
+        ruleContinuationRequested=ruleContinuationRequested,
+    )
+
+    assert cognitionRun["attemptedCalls"] == 2
+    assert cognitionRun["calls"] == 2
+    assert cognitionRun["userRequestedRuleContinuation"] is True
+    assert cognitionRun["failureCode"] == "COGNITION_RULE_CONTINUATION_REQUESTED"
+    assert cognitionRun["resolvedMode"] == "HYBRID_LLM_PARTIAL_RULE_FALLBACK"
+    assert any(state["status"] == "RULE_CONTINUATION_REQUESTED" for state in progressStates)
 
 
 def test_closed_loop_pilot_reports_partial_rule_fallback_with_reason() -> None:
@@ -859,8 +1096,16 @@ def test_partial_rule_fallback_is_preserved_in_limitations_manifest_and_export()
     exportBytes = _buildExport({"request": requestData, "result": result})
     with zipfile.ZipFile(io.BytesIO(exportBytes)) as archive:
         modelVersions = json.loads(archive.read("model_and_prompt_versions.json"))
+        cognitiveDecisions = json.loads(archive.read("cognitive_decisions.json"))
         limitations = archive.read("limitations.md").decode()
     assert modelVersions["fallbackReasons"] == ["SCHEMA_INVALID"]
+    assert modelVersions["externalModelUsed"] is True
+    assert modelVersions["provider"] == "zhipu"
+    assert modelVersions["requestedProvider"] == "zhipu"
+    assert modelVersions["requestedModel"] == "glm-5.2"
+    assert cognitiveDecisions["applicability"] == "APPLICABLE"
+    assert cognitiveDecisions["reason"] is None
+    assert cognitiveDecisions["items"]
     assert "LLM_PARTIAL_RULE_FALLBACK" in limitations
 
 
