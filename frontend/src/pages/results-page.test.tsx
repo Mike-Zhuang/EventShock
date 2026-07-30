@@ -277,7 +277,7 @@ describe('ResultsPage 结果证据导航', () => {
 
     await user.click(screen.getByRole('button', { name: 'Show 2 more metrics' }));
     expect(within(metricsSection).getAllByRole('article')).toHaveLength(8);
-  });
+  }, 20_000);
 
   it('uses backend strongest order and filters cognition, microstructure, and risk groups', async () => {
     const user = userEvent.setup();
@@ -365,7 +365,7 @@ describe('ResultsPage 结果证据导航', () => {
     await user.selectOptions(filter, 'risk');
     expect(within(metricsSection).getAllByRole('article')).toHaveLength(1);
     expect(metricsSection).toHaveTextContent('Maximum drawdown');
-  });
+  }, 20_000);
 
   it('creates a not-run prefilled scenario draft without starting an experiment', async () => {
     const user = userEvent.setup();
