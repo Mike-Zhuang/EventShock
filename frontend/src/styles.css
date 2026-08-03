@@ -3412,6 +3412,42 @@ code {
   font-size: 12px;
 }
 
+.admin-credential-state {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 10px;
+  margin-top: 22px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  background: var(--surface-subtle);
+}
+
+.admin-credential-state > svg {
+  margin-top: 2px;
+  color: var(--accent);
+}
+
+.admin-credential-state .section-heading {
+  margin-bottom: 14px;
+}
+
+.admin-credential-state strong,
+.admin-credential-state span {
+  display: block;
+}
+
+.admin-credential-state span {
+  margin-top: 5px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.admin-credential-state .ai-config-actions {
+  margin-top: 16px;
+  padding-top: 14px;
+}
+
 .official-doc-link {
   display: inline-flex;
   margin-top: 22px;

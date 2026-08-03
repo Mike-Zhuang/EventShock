@@ -60,7 +60,7 @@ LLM 不拥有订单簿、账本、数据库、真实交易工具、发布工具�
 
 - FastAPI 提供 API 和静态前端。
 - SQLite 保存匿名会话的 Event Pack 草稿、场景、审计事件、Experiment 状态/完整配对 checkpoint、不可变 Study 记录和单实验 invalidation 元数据。
-- BYOK 凭据仅保存在进程内存，具有过期时间；SQLite 和导出不保存完整密钥。
+- 普通用户 BYOK 凭据仅保存在进程内存并具有过期时间。部署指定管理员可主动持久保存一份供应商凭据；SQLite 只保存 Fernet 认证加密密文与有限元数据，浏览器、日志、审计和导出不保存或返回明文。主机 root、Docker 管理员与运行中应用进程仍属于信任边界。
 - Caddy 终止 HTTPS、设置安全响应头、限制请求体并移除 Session Header 日志字段；正式监测拓扑中的宝塔 Nginx 只在 Docker host-gateway 私网反向代理到回环应用，记录真实站点流量并关闭 SSE 缓冲。UFW active 时，仅允许动态识别的 Caddy Docker bridge/subnet 访问 host-gateway 的 `18080/tcp`，禁止 broad/public 放行；注册过程还必须从 Caddy 容器内完成健康验证，并在失败时撤销本次新建的精确规则。
 
 匿名 Session ID 是隔离键，不是用户身份认证。系统当前不适合保存敏感、多租户或受监管数据。
@@ -75,9 +75,9 @@ LLM 不拥有订单簿、账本、数据库、真实交易工具、发布工具�
 - 智谱 REST 网关及运行时目录中的全部 GLM 模型。
 - `event_extraction_v1.0.0` 与 `belief_v1.0.0` 提示词及其 SHA-256。
 - matched-seed 指标组件和 cognition code grader。
-- 内存 BYOK Secret 控制。
+- 普通用户内存 BYOK 与指定管理员加密持久凭据控制。
 
-每项记录 owner、purpose、materiality、version、Schema、输入、输出、验证、限制、回退和 approval status。GLM 模型、提示词、网关、grader 与 BYOK 生产控制仍为 `PENDING_HUMAN_EVIDENCE`。
+每项记录 owner、purpose、materiality、version、Schema、输入、输出、验证、限制、回退和 approval status。模型、提示词、网关、grader、BYOK 与管理员凭据主机安全控制仍为 `PENDING_HUMAN_EVIDENCE`。
 
 ## 价格与行为权威
 
@@ -126,7 +126,7 @@ Nasdaq-100 公告不能在 `2026-06-27T00:00:00Z` 前进入 Agent 观察。Reute
 - matched seeds 和单干预差异验证。
 - 完整 matched-pair checkpoint、重启后哈希校验恢复和 SSE 状态快照。
 - 单实验 invalidation、结果/子资源/导出阻断与哈希审计；批量发现和失效仍未实现。
-- Session 范围的数据库查询与内存 BYOK。
+- 账号所有者范围的数据库查询、普通用户内存 BYOK，以及只允许部署指定管理员使用的加密持久凭据。
 - 固定服务器端导出文件名。
 - 撮合、账本、重放、来源和 Event Pack 测试。
 - 机器可执行红队定义和 P0 发布门禁。
@@ -138,7 +138,7 @@ Nasdaq-100 公告不能在 `2026-06-27T00:00:00Z` 前进入 Agent 观察。Reute
 | 真实目标用户完成流程并正确解释结果 | `PENDING_HUMAN_EVIDENCE` | 不能证明产品不会被系统性误读为预测 |
 | 独立市场微观结构或模型风险专家审查 | `PENDING_HUMAN_EVIDENCE` | 不能宣称方法和参数得到外部认可 |
 | 智谱实时模型质量、成本、延迟和多语言评估 | `PENDING_HUMAN_EVIDENCE` | 只能证明 Mock 契约和本地校验，不证明实时表现 |
-| 部署主机、TLS、日志、内存和 BYOK 安全审查 | `PENDING_HUMAN_EVIDENCE` | 不能宣称生产安全 |
+| 部署主机、TLS、日志、内存 BYOK、管理员密文/主密钥分离与轮换安全审查 | `PENDING_HUMAN_EVIDENCE` | 不能宣称生产安全 |
 | 数据与供应商许可审查 | `PENDING_HUMAN_EVIDENCE` | 不能扩大外部内容存储和再分发范围 |
 | 完整红队运行证据 | `NOT_EVALUATED` | 红队定义本身不是测试通过证据 |
 | Incident response 演练 | `PENDING_HUMAN_EVIDENCE` | 不能宣称具备运营恢复能力 |

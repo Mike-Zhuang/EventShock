@@ -812,6 +812,7 @@ export interface LlmConfigView {
   maxTokens?: number;
   advancedParameters?: AdvancedModelParameters;
   credentialHint?: string;
+  credentialSource?: 'SESSION' | 'ADMIN_SERVER_ENCRYPTED';
   expiresAt?: string;
 }
 
@@ -822,6 +823,28 @@ export interface LlmConfigInput {
   thinkingEnabled: boolean;
   maxTokens: number;
   advancedParameters: AdvancedModelParameters;
+}
+
+export interface AdminLlmCredentialView {
+  available: boolean;
+  configured: boolean;
+  storageScope: 'ADMIN_SERVER_ENCRYPTED';
+  provider?: LlmProviderId;
+  model?: string;
+  thinkingEnabled?: boolean;
+  maxTokens?: number;
+  advancedParameters?: AdvancedModelParameters;
+  credentialHint?: string;
+  persistedAt?: string;
+  updatedAt?: string;
+}
+
+export interface AdminLlmCredentialInput extends LlmConfigInput {
+  currentPassword: string;
+}
+
+export interface AdminLlmCredentialDeleteInput {
+  currentPassword: string;
 }
 
 export type ResultInterpretationLanguage = 'en' | 'zh-CN';

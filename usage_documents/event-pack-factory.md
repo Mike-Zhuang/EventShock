@@ -95,7 +95,7 @@ Reader 当前没有本项目能够从官方公开资料核验的单价，因此�
 - [智谱 Web Search 指南](https://docs.bigmodel.cn/cn/guide/tools/web-search)
 - [智谱 Reader API](https://docs.bigmodel.cn/api-reference/工具-api/网页阅读)
 
-Search 与 Reader 复用当前登录会话中临时配置的智谱 API Key。Key 只保存在服务端进程内存，退出登录、凭据过期、供应商切换或服务重启后清除；它不会写入 Factory 构建、账号、SQLite、浏览器持久存储、日志、审计详情或导出。
+Search 与 Reader 复用当前登录会话中已经解析的智谱凭据。普通用户 Key 只保存在服务端进程内存，退出登录、凭据过期、供应商切换或服务重启后清除；部署指定管理员也可使用自己明确启用的服务器持久凭据，该凭据在 SQLite 中只保存认证加密密文与有限元数据。两种模式下，明文 Key 都不会写入 Factory 构建、浏览器持久存储、日志、审计详情或导出，也不会返回给前端或其他用户。持久模式的主机与应用信任边界详见 [AI 供应商接入说明](ai-providers.md)。
 
 ## 来源状态与原文存储
 

@@ -6,6 +6,7 @@ export LC_ALL=C
 readonly TARGET_ROOT="/opt/eventshock"
 readonly SHARED_DIR="${TARGET_ROOT}/shared"
 readonly SHARED_SECRETS_DIR="${SHARED_DIR}/secrets"
+readonly ADMIN_API_KEY_ENCRYPTION_KEY_FILE="${SHARED_SECRETS_DIR}/admin-api-key-encryption-key"
 readonly ADMIN_BOOTSTRAP_PASSWORD_FILE="${SHARED_SECRETS_DIR}/admin-bootstrap-password.once"
 readonly RELEASES_DIR="${TARGET_ROOT}/releases"
 DEFAULT_SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -322,6 +323,50 @@ shared_env_value() {
   sed -n "s/^${key}=//p" "${SHARED_DIR}/.env" | tail -n 1
 }
 
+ensure_admin_api_key_encryption_key() {
+  local directoryOwner directoryGroup directoryMode temporaryPath
+
+  [[ -d "${SHARED_SECRETS_DIR}" ]] && [[ ! -L "${SHARED_SECRETS_DIR}" ]] \
+    || fail "密钥目录必须是普通目录且不能是符号链接。"
+  read -r directoryOwner directoryGroup directoryMode \
+    < <(stat -c '%u %g %a' "${SHARED_SECRETS_DIR}")
+  [[ "${directoryOwner}:${directoryGroup}:${directoryMode}" == "0:10001:750" ]] \
+    || fail "密钥目录权限必须精确为 root:10001 0750。"
+
+  # 既有文件（包括悬空符号链接）绝不被覆盖；其安全性由下一步
+  # 统一校验。这使重试和失败回滚都继续使用同一把主密钥。
+  if [[ -e "${ADMIN_API_KEY_ENCRYPTION_KEY_FILE}" ]] \
+    || [[ -L "${ADMIN_API_KEY_ENCRYPTION_KEY_FILE}" ]]; then
+    return
+  fi
+
+  temporaryPath="$(
+    mktemp "${SHARED_SECRETS_DIR}/.admin-api-key-encryption-key.XXXXXX"
+  )" || fail "无法创建管理员 API Key 加密主密钥临时文件。"
+  if ! head -c 32 /dev/urandom \
+    | base64 --wrap=0 \
+    | tr '+/' '-_' \
+    >"${temporaryPath}"; then
+    rm -f -- "${temporaryPath}"
+    fail "无法生成管理员 API Key 加密主密钥。"
+  fi
+  if ! chown root:10001 "${temporaryPath}" || ! chmod 0440 "${temporaryPath}"; then
+    rm -f -- "${temporaryPath}"
+    fail "无法收紧管理员 API Key 加密主密钥权限。"
+  fi
+
+  # 同目录硬链接创建是原子的，且目标已存在时必然失败，避免并发
+  # 部署把已投入使用的主密钥替换掉。
+  if ln -- "${temporaryPath}" "${ADMIN_API_KEY_ENCRYPTION_KEY_FILE}" 2>/dev/null; then
+    log "已生成服务器端管理员 API Key 加密主密钥。"
+  elif [[ ! -e "${ADMIN_API_KEY_ENCRYPTION_KEY_FILE}" ]] \
+    && [[ ! -L "${ADMIN_API_KEY_ENCRYPTION_KEY_FILE}" ]]; then
+    rm -f -- "${temporaryPath}"
+    fail "无法原子安装管理员 API Key 加密主密钥。"
+  fi
+  rm -f -- "${temporaryPath}"
+}
+
 validate_auth_configuration() {
   local directoryOwner directoryGroup directoryMode path fileOwner fileGroup fileMode fileSize
   [[ -f "${SHARED_DIR}/.env" ]] || fail "缺少 root 专用共享配置：${SHARED_DIR}/.env"
@@ -351,6 +396,7 @@ validate_auth_configuration() {
 
   for path in \
     "${SHARED_SECRETS_DIR}/auth-secret" \
+    "${ADMIN_API_KEY_ENCRYPTION_KEY_FILE}" \
     "${SHARED_SECRETS_DIR}/smtp-password"; do
     [[ -f "${path}" ]] && [[ ! -L "${path}" ]] \
       || fail "长期密钥必须是普通文件且不能是符号链接：$(basename "${path}")"
@@ -363,6 +409,10 @@ validate_auth_configuration() {
   done
   [[ "$(stat -c '%s' "${SHARED_SECRETS_DIR}/auth-secret")" -ge 32 ]] \
     || fail "认证随机密钥至少需要 32 字节。"
+  [[ "$(stat -c '%s' "${ADMIN_API_KEY_ENCRYPTION_KEY_FILE}")" -eq 44 ]] \
+    || fail "管理员 API Key 加密主密钥必须是 44 字节 Fernet 密钥。"
+  LC_ALL=C grep -Eq '^[A-Za-z0-9_-]{43}=$' "${ADMIN_API_KEY_ENCRYPTION_KEY_FILE}" \
+    || fail "管理员 API Key 加密主密钥格式无效。"
 
   if [[ -e "${ADMIN_BOOTSTRAP_PASSWORD_FILE}" ]]; then
     [[ -f "${ADMIN_BOOTSTRAP_PASSWORD_FILE}" ]] \
@@ -667,6 +717,7 @@ cleanup_old_releases() {
 deploy_release() {
   local releaseDir="$1"
 
+  ensure_admin_api_key_encryption_key
   validate_auth_configuration
 
   log "校验 Compose 配置。"

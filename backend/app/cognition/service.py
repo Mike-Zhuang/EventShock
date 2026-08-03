@@ -338,7 +338,7 @@ class CognitionService:
         self._lastEvalSuite: EvalSuiteResult | None = None
 
     def __repr__(self) -> str:
-        return "CognitionService(credentials=<session-scoped-redacted>)"
+        return "CognitionService(credentials=<redacted>)"
 
     def setConfig(
         self,
@@ -378,12 +378,22 @@ class CognitionService:
         *,
         provider: ProviderId,
     ) -> str:
-        """仅供同进程受信服务复用临时密钥，不通过任何 HTTP 响应回显。"""
+        """兼容旧调用名；返回当前会话或管理员加密库解析出的受信凭据。"""
+
+        return self.requireApiKey(sessionId, provider=provider)
+
+    def requireApiKey(
+        self,
+        sessionId: str,
+        *,
+        provider: ProviderId,
+    ) -> str:
+        """仅供受信服务复用当前凭据，不通过任何 HTTP 响应回显。"""
 
         runtime = self._configStore.getRuntimeConfig(sessionId)
         if runtime.provider != provider:
             raise CredentialNotConfiguredError(
-                f"a temporary {provider} credential is required for this operation"
+                f"a {provider} credential is required for this operation"
             )
         return runtime.apiKey
 

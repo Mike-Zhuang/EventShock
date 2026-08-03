@@ -37,8 +37,8 @@ const PAGE_GUIDES: Record<PageGuideId, BilingualPageGuide> = {
   },
   ai: {
     optional: true,
-    en: ['Enter a key for this sign-in and choose a model.', 'Save it temporarily and test structured output.', 'Return to Scenario Builder and select Hybrid LLM.'],
-    zh: ['填写本次登录使用的 Key，并选择模型。', '临时保存并测试结构化输出。', '回到情景构建器，选择混合 LLM。'],
+    en: ['Choose a provider and model, then enter a key when needed.', 'Use it temporarily, or—as an administrator—explicitly save an encrypted server copy, then test structured output.', 'Return to Scenario Builder and select Hybrid LLM.'],
+    zh: ['选择供应商与模型，并在需要时填写 Key。', '临时使用；管理员也可明确选择服务器加密持久保存，然后测试结构化输出。', '回到情景构建器，选择混合 LLM。'],
   },
   scenario: {
     en: ['Review the event, market, agents, and network in steps 01–05.', 'Change exactly one intervention in step 06.', 'Choose matched seeds in step 07, then select Validate Scenario.'],

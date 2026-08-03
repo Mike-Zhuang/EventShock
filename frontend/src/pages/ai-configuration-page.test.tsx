@@ -9,6 +9,8 @@ import {
   configurationMatchesDraft,
 } from './ai-configuration-page';
 
+const authState = vi.hoisted(() => ({ role: 'USER' as 'ADMIN' | 'USER' }));
+
 vi.mock('../api/client', () => ({
   api: {
     getLlmCatalog: vi.fn(),
@@ -17,8 +19,23 @@ vi.mock('../api/client', () => ({
     saveLlmConfig: vi.fn(),
     testLlmConfig: vi.fn(),
     clearLlmConfig: vi.fn(),
+    getAdminLlmCredential: vi.fn(),
+    saveAdminLlmCredential: vi.fn(),
+    deleteAdminLlmCredential: vi.fn(),
     runEvaluation: vi.fn(),
   },
+}));
+
+vi.mock('../state/auth-context', () => ({
+  useAuth: () => ({
+    user: {
+      id: 'admin-or-user-1',
+      email: 'owner@example.com',
+      role: authState.role,
+      emailVerified: true,
+      createdAt: '2026-07-20T00:00:00Z',
+    },
+  }),
 }));
 
 const CATALOG: LlmCatalog = {
@@ -100,11 +117,22 @@ const CATALOG: LlmCatalog = {
 describe('多供应商 AI 配置', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubGlobal('ResizeObserver', class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    });
+    authState.role = 'USER';
     window.localStorage.clear();
     window.sessionStorage.clear();
     vi.mocked(api.getLlmCatalog).mockResolvedValue(CATALOG);
     vi.mocked(api.getLlmConfig).mockResolvedValue({ configured: false });
     vi.mocked(api.getPromptRegistry).mockResolvedValue([]);
+    vi.mocked(api.getAdminLlmCredential).mockResolvedValue({
+      available: true,
+      configured: false,
+      storageScope: 'ADMIN_SERVER_ENCRYPTED',
+    });
     vi.mocked(api.saveLlmConfig).mockResolvedValue({
       configured: true,
       provider: 'openai',
@@ -298,5 +326,107 @@ describe('多供应商 AI 配置', () => {
     await user.click(restoreButton);
     expect(screen.getByLabelText('Randomness (temperature)')).toHaveValue(null);
     expect(restoreButton).toBeDisabled();
+  });
+
+  it('普通用户保持临时密钥流程且不会请求管理员服务器凭据', async () => {
+    render(<I18nProvider><AiConfigurationPage /></I18nProvider>);
+
+    expect(await screen.findByLabelText('Provider')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Administrator server credential' }))
+      .not.toBeInTheDocument();
+    expect(api.getAdminLlmCredential).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Use for this sign-in' })).toBeInTheDocument();
+  });
+
+  it('管理员复验密码后把密钥加密保存到服务器且浏览器不持久化明文', async () => {
+    authState.role = 'ADMIN';
+    const user = userEvent.setup();
+    const localStorageWrite = vi.spyOn(window.localStorage, 'setItem');
+    const sessionStorageWrite = vi.spyOn(window.sessionStorage, 'setItem');
+    const secret = 'administrator-provider-key-for-test';
+    vi.mocked(api.saveAdminLlmCredential).mockResolvedValue({
+      available: true,
+      configured: true,
+      storageScope: 'ADMIN_SERVER_ENCRYPTED',
+      provider: 'zhipu',
+      model: 'glm-5.2',
+      thinkingEnabled: false,
+      maxTokens: 2_048,
+      advancedParameters: {},
+      credentialHint: '••••test',
+      persistedAt: '2026-08-03T10:00:00Z',
+      updatedAt: '2026-08-03T10:00:00Z',
+    });
+    vi.mocked(api.getLlmConfig)
+      .mockResolvedValueOnce({ configured: false })
+      .mockResolvedValueOnce({
+        configured: true,
+        provider: 'zhipu',
+        model: 'glm-5.2',
+        thinkingEnabled: false,
+        maxTokens: 2_048,
+        advancedParameters: {},
+        credentialHint: '••••test',
+        credentialSource: 'ADMIN_SERVER_ENCRYPTED',
+      });
+    render(<I18nProvider><AiConfigurationPage /></I18nProvider>);
+
+    expect(await screen.findByRole('heading', { name: 'Administrator server credential' }))
+      .toBeInTheDocument();
+    await user.type(screen.getByLabelText('Zhipu AI API Key'), secret);
+    await user.click(screen.getByRole('button', { name: 'Save encrypted on server' }));
+    await user.type(screen.getByLabelText('Current administrator password'), 'Admin password 123!');
+    await user.click(screen.getByRole('button', { name: 'Save encrypted' }));
+
+    await waitFor(() => expect(api.saveAdminLlmCredential).toHaveBeenCalledWith({
+      currentPassword: 'Admin password 123!',
+      provider: 'zhipu',
+      model: 'glm-5.2',
+      apiKey: secret,
+      thinkingEnabled: false,
+      maxTokens: 2_048,
+      advancedParameters: {},
+    }));
+    expect((await screen.findAllByText(/••••test/)).length).toBeGreaterThan(0);
+    expect(screen.getAllByText('ADMIN_SERVER_ENCRYPTED').length).toBeGreaterThan(0);
+    expect(screen.getByLabelText('Zhipu AI API Key')).toHaveValue('');
+    expect(localStorageWrite.mock.calls.flat().join(' ')).not.toContain(secret);
+    expect(sessionStorageWrite.mock.calls.flat().join(' ')).not.toContain(secret);
+  });
+
+  it('管理员删除服务器密钥前必须复验密码并看到不可恢复警告', async () => {
+    authState.role = 'ADMIN';
+    const user = userEvent.setup();
+    vi.mocked(api.getAdminLlmCredential).mockResolvedValue({
+      available: true,
+      configured: true,
+      storageScope: 'ADMIN_SERVER_ENCRYPTED',
+      provider: 'zhipu',
+      model: 'glm-5.2',
+      credentialHint: '••••test',
+      updatedAt: '2026-08-03T10:00:00Z',
+    });
+    vi.mocked(api.deleteAdminLlmCredential).mockResolvedValue({
+      available: true,
+      configured: false,
+      storageScope: 'ADMIN_SERVER_ENCRYPTED',
+    });
+    render(<I18nProvider><AiConfigurationPage /></I18nProvider>);
+
+    await user.click(await screen.findByRole('button', { name: 'Delete server credential' }));
+    expect(screen.getByText('The application cannot recover it after deletion')).toBeInTheDocument();
+    const confirm = screen.getByRole('button', { name: 'Delete credential' });
+    expect(confirm).toBeDisabled();
+    await user.type(screen.getByLabelText('Current administrator password'), 'Admin password 123!');
+    expect(confirm).toBeEnabled();
+    await user.click(confirm);
+
+    await waitFor(() => expect(api.deleteAdminLlmCredential).toHaveBeenCalledWith({
+      currentPassword: 'Admin password 123!',
+    }));
+    expect(await screen.findByText('No administrator API key is stored on the server.'))
+      .toBeInTheDocument();
+    expect(screen.queryByText('The application cannot recover it after deletion'))
+      .not.toBeInTheDocument();
   });
 });

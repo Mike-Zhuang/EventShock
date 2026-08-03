@@ -19,6 +19,7 @@ class Settings:
     authenticationRequired: bool
     authCookieSecure: bool
     authSecret: str | None = field(repr=False)
+    adminApiKeyEncryptionKey: str | None = field(default=None, repr=False)
     adminEmail: str | None = None
     smtpHost: str | None = None
     smtpPort: int = 465
@@ -53,6 +54,10 @@ def loadSettings(dataDir: Path | None = None) -> Settings:
         authCookieSecure=production
         or _environmentFlag("EVENTSHOCK_AUTH_COOKIE_SECURE", default=False),
         authSecret=_secretValue("EVENTSHOCK_AUTH_SECRET", "EVENTSHOCK_AUTH_SECRET_FILE"),
+        adminApiKeyEncryptionKey=_secretValue(
+            "EVENTSHOCK_ADMIN_API_KEY_ENCRYPTION_KEY",
+            "EVENTSHOCK_ADMIN_API_KEY_ENCRYPTION_KEY_FILE",
+        ),
         adminEmail=os.environ.get("EVENTSHOCK_ADMIN_EMAIL"),
         smtpHost=os.environ.get("EVENTSHOCK_SMTP_HOST"),
         smtpPort=int(os.environ.get("EVENTSHOCK_SMTP_PORT", "465")),

@@ -4,6 +4,7 @@ import {
   normalizeAccountDataExport,
   normalizeAccountDeletionReceipt,
   normalizeAdminActivityPage,
+  normalizeAdminLlmCredential,
   normalizeAdminUserPage,
   normalizeAuthSession,
   normalizeCases,
@@ -163,6 +164,7 @@ describe('API normalizers', () => {
         timeout_seconds: 60,
       },
       credential_hint: '••••test',
+      credential_source: 'ADMIN_SERVER_ENCRYPTED',
     })).toMatchObject({
       configured: true,
       provider: 'zhipu',
@@ -174,7 +176,58 @@ describe('API normalizers', () => {
         topP: 0.9,
         timeoutSeconds: 60,
       },
+      credentialSource: 'ADMIN_SERVER_ENCRYPTED',
     });
+  });
+
+  it('只接受服务器声明的管理员加密凭据范围且从不读取明文密钥', () => {
+    const credential = normalizeAdminLlmCredential({
+      available: true,
+      configured: true,
+      storage_scope: 'ADMIN_SERVER_ENCRYPTED',
+      provider: 'zhipu',
+      model: 'glm-5.2',
+      thinking_enabled: false,
+      max_tokens: 4096,
+      advanced_parameters: { temperature: 0.2, timeout_seconds: 45 },
+      credential_hint: '••••test',
+      persisted_at: '2026-08-03T10:00:00Z',
+      updated_at: '2026-08-03T11:00:00Z',
+      api_key: 'must-never-be-normalized',
+    });
+
+    expect(credential).toEqual({
+      available: true,
+      configured: true,
+      storageScope: 'ADMIN_SERVER_ENCRYPTED',
+      provider: 'zhipu',
+      model: 'glm-5.2',
+      thinkingEnabled: false,
+      maxTokens: 4096,
+      advancedParameters: {
+        temperature: 0.2,
+        topP: undefined,
+        presencePenalty: undefined,
+        frequencyPenalty: undefined,
+        seed: undefined,
+        timeoutSeconds: 45,
+      },
+      credentialHint: '••••test',
+      persistedAt: '2026-08-03T10:00:00Z',
+      updatedAt: '2026-08-03T11:00:00Z',
+    });
+    expect(credential).not.toHaveProperty('apiKey');
+    expect(() => normalizeAdminLlmCredential({
+      available: true,
+      configured: true,
+      storage_scope: 'PLAINTEXT_DATABASE',
+    })).toThrow('storage scope is invalid');
+    expect(normalizeAdminLlmCredential({
+      available: true,
+      configured: true,
+      storage_scope: 'ADMIN_SERVER_ENCRYPTED',
+      credential_hint: 'provider-key-must-not-render',
+    }).credentialHint).toBeUndefined();
   });
 
   it('把旧版智谱单供应商目录提升为新的 providers 结构', () => {

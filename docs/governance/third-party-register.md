@@ -8,7 +8,7 @@
 
 | 第三方 | 用途 | 发送数据 | 当前控制 | 退出与回退 | 审查状态 |
 | --- | --- | --- | --- | --- | --- |
-| 智谱开放平台 Chat Completions | Event extraction 与 simulated belief JSON | System Prompt、有限 Evidence/Observation、Request ID、User ID；Authorization Header 含用户 BYOK | 固定 HTTPS Endpoint、无重定向、结构化 JSON、本地 Schema、限次重试、TTL Key | Immutable cache、Rule-only ABSTAIN、关闭 Live LLM | 服务条款、保留、训练、地域、SLA 和成本均 `PENDING_HUMAN_EVIDENCE` |
+| 智谱开放平台 Chat Completions | Event extraction 与 simulated belief JSON | System Prompt、有限 Evidence/Observation、Request ID、User ID；Authorization Header 含当前已解析 BYOK | 固定 HTTPS Endpoint、无重定向、结构化 JSON、本地 Schema、限次重试；普通用户使用 TTL 内存 Key，部署指定管理员可主动使用服务器认证加密凭据 | Immutable cache、Rule-only ABSTAIN、清除临时 Key、删除管理员密文或关闭 Live LLM | 服务条款、保留、训练、地域、SLA 和成本均 `PENDING_HUMAN_EVIDENCE` |
 | Let's Encrypt 或 Caddy 所选 ACME CA | 公网 HTTPS 证书 | 域名与 ACME 所需元数据 | Caddy 自动申请和续期 | 暂停公网服务或改用经审查证书 | 实际 CA、证书链和续期演练 `PENDING_HUMAN_EVIDENCE` |
 
 运行时 GLM 目录来自 `backend/app/cognition/catalog.py`。模型 ID 包括 GLM-5.2、GLM-5.1、GLM-5-Turbo、GLM-5、GLM-4.7 系列、GLM-4.6、GLM-4.5 系列和已标记 legacy 的旧模型。稳定 ID 不保证稳定行为；每个模型都需要独立的实时验证 artifact。
@@ -24,6 +24,7 @@
 | Uvicorn | 0.51.0 | ASGI Server | BSD-3-Clause | 版本锁定，许可复核待人工 |
 | HTTPX / HTTPCore | 0.28.1 / 1.0.9 | 智谱异步 HTTP | BSD-3-Clause | 版本锁定，许可复核待人工 |
 | AnyIO | 4.14.2 | 异步抽象 | MIT | 版本锁定，许可复核待人工 |
+| Cryptography | 49.0.0 | 管理员持久供应商凭据的 Fernet 认证加密 | Apache-2.0 或 BSD-3-Clause 双许可 | 版本锁定；主密钥分离、轮换与恢复演练待人工 |
 | PyYAML | 6.0.3 | 配置解析能力 | MIT | 版本锁定，许可复核待人工 |
 | python-dotenv | 1.2.2 | 环境变量加载 | BSD-3-Clause | 版本锁定，许可复核待人工 |
 | SQLite | Python 标准库绑定 | 控制面数据库 | SQLite Public Domain 声明 | 未使用外部 DB 服务；备份与安全审查待人工 |

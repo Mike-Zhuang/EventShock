@@ -22,7 +22,7 @@
 
 依赖错误结果做研究或现实决策的用户、API Key 泄漏的用户、跨 Session 数据被读取的用户、被错误来源或时间污染的分析对象，以及维护故障系统的团队成员。
 
-控制：PIT、Session-bound DB、Memory-only BYOK、Schema、Replay、Release Gate 和 Incident Runbook。
+控制：PIT、账号所有者绑定、普通用户 Memory-only BYOK、指定管理员 Fernet 密文与独立主密钥、Schema、Replay、Release Gate 和 Incident Runbook。
 
 证据状态：生产安全和 Incident rehearsal 为 `PENDING_HUMAN_EVIDENCE`。
 
@@ -57,7 +57,7 @@
 - 修改研究问题和唯一干预。
 - 拒绝合成 Clarification 或其他假设。
 - 在结果页查看版本、限制、Trace 和样本量。
-- 停止实验、清除 BYOK、关闭 Live LLM。
+- 停止实验、清除临时 BYOK 或由指定管理员删除持久凭据、关闭 Live LLM。
 - 阻止 Release。
 
 缺口：当前没有面向最终用户的一键 Artifact Invalidation 和完整数据删除界面。
@@ -99,7 +99,7 @@
 
 ## 11. 是否有明确退出或撤回机制？
 
-用户可清除 BYOK、停止新实验、禁用 Live LLM 和改用 Rule-only。团队可停止服务、隔离 Event Pack 与撤回公开导出。
+普通用户可清除临时 BYOK；部署指定管理员可删除或替换持久凭据。所有用户都可停止新实验、禁用 Live LLM 和改用 Rule-only。团队可停止服务、隔离 Event Pack 与撤回公开导出。
 
 缺口：按数据或模型版本批量标记 Experiment 为 `INVALIDATED` 尚未实现，状态为 `CONTROL_GAP`。
 

@@ -124,8 +124,9 @@ jobs:
           set -Eeuo pipefail
           install -d -m 0755 .eventshock-secrets
           printf '%s\n' 'ci-auth-secret-with-at-least-thirty-two-bytes' > .eventshock-secrets/auth-secret
+          head -c 32 /dev/zero | base64 --wrap=0 | tr '+/' '-_' > .eventshock-secrets/admin-api-key-encryption-key
           printf '%s\n' 'ci-smtp-password' > .eventshock-secrets/smtp-password
-          chmod 0444 .eventshock-secrets/auth-secret .eventshock-secrets/smtp-password
+          chmod 0444 .eventshock-secrets/auth-secret .eventshock-secrets/admin-api-key-encryption-key .eventshock-secrets/smtp-password
           chmod 0555 .eventshock-secrets
           container_id="$(docker run --detach \
             --read-only \
@@ -140,6 +141,7 @@ jobs:
             --env EVENTSHOCK_RELEASE_COMMIT=${{ github.sha }} \
             --env EVENTSHOCK_ADMIN_EMAIL=admin@example.com \
             --env EVENTSHOCK_AUTH_SECRET_FILE=/run/secrets/eventshock/auth-secret \
+            --env EVENTSHOCK_ADMIN_API_KEY_ENCRYPTION_KEY_FILE=/run/secrets/eventshock/admin-api-key-encryption-key \
             --env EVENTSHOCK_SMTP_HOST=smtp.example.com \
             --env EVENTSHOCK_SMTP_PORT=465 \
             --env EVENTSHOCK_SMTP_USERNAME=sender@example.com \

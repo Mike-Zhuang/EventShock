@@ -390,7 +390,7 @@ class LlmConfigRequest(StrictModel):
         max_length=128,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$",
     )
-    apiKey: str = Field(min_length=8, max_length=4_096)
+    apiKey: str = Field(min_length=8, max_length=4_096, repr=False)
     thinkingEnabled: bool = False
     maxTokens: int = Field(default=2_048, ge=256, le=APPLICATION_MAX_OUTPUT_TOKENS)
     advancedParameters: AdvancedModelParameters = Field(default_factory=AdvancedModelParameters)
@@ -410,6 +410,16 @@ class LlmConfigRequest(StrictModel):
             raise ValueError(f"{self.provider}/{self.model} does not support thinking")
         validateAdvancedModelParameters(self.provider, self.advancedParameters)
         return self
+
+
+class AdminLlmCredentialRequest(LlmConfigRequest):
+    """管理员将供应商凭据加密保存到服务器时必须重新验证密码。"""
+
+    currentPassword: str = Field(min_length=1, max_length=128, repr=False)
+
+
+class AdminLlmCredentialDeleteRequest(StrictModel):
+    currentPassword: str = Field(min_length=1, max_length=128, repr=False)
 
 
 class ResultInterpretationMessage(StrictModel):

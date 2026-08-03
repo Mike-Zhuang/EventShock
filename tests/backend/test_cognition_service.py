@@ -7,6 +7,7 @@ import zipfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Never
 
 import pytest
 from pydantic import BaseModel
@@ -30,6 +31,8 @@ from backend.app.cognition import (
     ModelResult,
     ModelUsage,
     Observation,
+    PersistentCredentialUnavailableError,
+    SessionConfigStore,
 )
 from backend.app.database import Database
 from backend.app.guided_workflow.models import (
@@ -845,7 +848,7 @@ def closedLoopService(
     )
 
 
-def test_rule_only_cognition_does_not_claim_configured_provider_was_used() -> None:
+def test_rule_only_cognition_does_not_read_or_claim_configured_provider() -> None:
     cognition, _harness = configuredService([])
     service = closedLoopService(cognition)
     requestData = closedLoopRequest()
@@ -864,8 +867,98 @@ def test_rule_only_cognition_does_not_claim_configured_provider_was_used() -> No
     assert cognitionRun["requestedProvider"] is None
     assert cognitionRun["requestedModel"] is None
     assert cognitionRun["resolvedModel"] is None
-    assert cognitionRun["configuredButUnusedProvider"] == "zhipu"
-    assert cognitionRun["configuredButUnusedModel"] == "glm-5.2"
+    assert cognitionRun["configuredButUnusedProvider"] is None
+    assert cognitionRun["configuredButUnusedModel"] is None
+
+
+def test_rule_only_cognition_ignores_unavailable_persistent_credential() -> None:
+    def unavailableResolver(_reference: str) -> Never:
+        raise PersistentCredentialUnavailableError(
+            "stored administrator model credential is unavailable"
+        )
+
+    cognition = CognitionService(
+        configStore=SessionConfigStore(
+            persistentRuntimeResolver=unavailableResolver,
+            persistentViewResolver=unavailableResolver,
+        )
+    )
+    service = closedLoopService(cognition)
+    requestData = closedLoopRequest()
+    requestData["llmPolicy"]["mode"] = "RULE_ONLY"
+
+    cognitionRun = service._prepareCognitiveSignals(
+        "exp-rule-only-broken-credential",
+        SESSION_ID,
+        requestData,
+        closedLoopEventPack(),
+    )
+
+    assert cognitionRun["resolvedMode"] == "RULE_ONLY"
+    assert cognitionRun["externalModelUsed"] is False
+    assert cognitionRun["failureCode"] is None
+
+
+def test_hybrid_cognition_reports_unavailable_persistent_credential_fallback() -> None:
+    def unavailableResolver(_reference: str) -> Never:
+        raise PersistentCredentialUnavailableError(
+            "stored administrator model credential is unavailable"
+        )
+
+    cognition = CognitionService(
+        configStore=SessionConfigStore(
+            persistentRuntimeResolver=unavailableResolver,
+            persistentViewResolver=unavailableResolver,
+        )
+    )
+    service = closedLoopService(cognition)
+
+    cognitionRun = service._prepareCognitiveSignals(
+        "exp-hybrid-broken-credential",
+        SESSION_ID,
+        closedLoopRequest(),
+        closedLoopEventPack(),
+    )
+
+    assert cognitionRun["resolvedMode"] == "RULE_FALLBACK"
+    assert cognitionRun["externalModelUsed"] is False
+    assert cognitionRun["failureCode"] == "LLM_CREDENTIAL_STORAGE_UNAVAILABLE"
+
+
+def test_hybrid_cognition_classifies_runtime_credential_storage_failure() -> None:
+    class RuntimeCredentialFailureCognition(ClosedLoopPilotCognition):
+        async def generateBeliefDecision(self, **_kwargs: object) -> BeliefDecisionRun:
+            raise PersistentCredentialUnavailableError(
+                "stored administrator model credential is unavailable"
+            )
+
+    service = closedLoopService(RuntimeCredentialFailureCognition())
+    requestData = closedLoopRequest()
+
+    cognitionRun = service._prepareCognitiveSignals(
+        "exp-hybrid-runtime-credential-failure",
+        SESSION_ID,
+        requestData,
+        closedLoopEventPack(),
+    )
+
+    assert cognitionRun["resolvedMode"] == "RULE_FALLBACK"
+    assert cognitionRun["externalModelUsed"] is True
+    assert cognitionRun["attemptedCalls"] == 1
+    assert cognitionRun["failureCode"] == "LLM_CREDENTIAL_STORAGE_UNAVAILABLE"
+    assert cognitionRun["failureCategoryCounts"] == {"CREDENTIAL_STORAGE": 1}
+
+    requestData["llmPolicy"]["fallbackToRules"] = False
+    with pytest.raises(
+        RuntimeError,
+        match="encrypted model credential storage is unavailable",
+    ):
+        service._prepareCognitiveSignals(
+            "exp-hybrid-runtime-credential-failure-no-fallback",
+            SESSION_ID,
+            requestData,
+            closedLoopEventPack(),
+        )
 
 
 def test_null_claim_confidence_uses_neutral_default_for_evidence_and_social_feed() -> None:

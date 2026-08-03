@@ -414,6 +414,10 @@ def testAuthenticationDeploymentConfigurationNeverEmbedsSecrets() -> None:
         '"${EVENTSHOCK_SECRETS_DIR:-./.eventshock-secrets}:/run/secrets/eventshock:ro"'
     ) in composeContent
     assert "EVENTSHOCK_AUTH_SECRET_FILE: /run/secrets/eventshock/auth-secret" in composeContent
+    assert (
+        "EVENTSHOCK_ADMIN_API_KEY_ENCRYPTION_KEY_FILE: "
+        "/run/secrets/eventshock/admin-api-key-encryption-key"
+    ) in composeContent
     assert "EVENTSHOCK_SMTP_PASSWORD_FILE: /run/secrets/eventshock/smtp-password" in composeContent
     assert "EVENTSHOCK_ADMIN_BOOTSTRAP_PASSWORD_FILE" not in composeContent
     assert "EVENTSHOCK_AUTH_SECRET:" not in composeContent
@@ -421,6 +425,7 @@ def testAuthenticationDeploymentConfigurationNeverEmbedsSecrets() -> None:
     assert "EVENTSHOCK_ADMIN_BOOTSTRAP_PASSWORD=" not in environmentExample
     assert "EVENTSHOCK_SMTP_PASSWORD=" not in environmentExample
     assert "EVENTSHOCK_AUTH_SECRET=" not in environmentExample
+    assert "EVENTSHOCK_ADMIN_API_KEY_ENCRYPTION_KEY=" not in environmentExample
     assert ".eventshock-secrets/" in dockerIgnore
     assert "--exclude='.eventshock-secrets'" in deploySource
     for headerPath in (
@@ -445,6 +450,48 @@ def testDeployScriptConsumesOneTimeAdminPasswordThroughStdin() -> None:
     assert 'rm -f -- "${ADMIN_BOOTSTRAP_PASSWORD_FILE}"' in source
 
 
+def testDeployScriptGeneratesAdminApiKeyEncryptionKeyOnceAndValidatesIt() -> None:
+    source = (PROJECT_ROOT / "scripts" / "deploy-server.sh").read_text()
+    ensureBody = source.split("ensure_admin_api_key_encryption_key() {", 1)[1].split(
+        "\n}\n\nvalidate_auth_configuration() {",
+        1,
+    )[0]
+    validateBody = source.split("validate_auth_configuration() {", 1)[1].split(
+        "\n}\n\nbackup_database() {",
+        1,
+    )[0]
+
+    assert (
+        'ADMIN_API_KEY_ENCRYPTION_KEY_FILE="${SHARED_SECRETS_DIR}/admin-api-key-encryption-key"'
+    ) in source
+    assert '[[ -e "${ADMIN_API_KEY_ENCRYPTION_KEY_FILE}" ]]' in ensureBody
+    assert '[[ -L "${ADMIN_API_KEY_ENCRYPTION_KEY_FILE}" ]]' in ensureBody
+    assert ensureBody.index('[[ -e "${ADMIN_API_KEY_ENCRYPTION_KEY_FILE}" ]]') < (
+        ensureBody.index("mktemp")
+    )
+    assert "head -c 32 /dev/urandom" in ensureBody
+    assert "base64 --wrap=0" in ensureBody
+    assert "tr '+/' '-_'" in ensureBody
+    assert 'chown root:10001 "${temporaryPath}"' in ensureBody
+    assert 'chmod 0440 "${temporaryPath}"' in ensureBody
+    assert 'ln -- "${temporaryPath}" "${ADMIN_API_KEY_ENCRYPTION_KEY_FILE}"' in ensureBody
+    assert "mv " not in ensureBody
+    assert "cp " not in ensureBody
+    assert '"${ADMIN_API_KEY_ENCRYPTION_KEY_FILE}"' in validateBody
+    assert "stat -c '%s' \"${ADMIN_API_KEY_ENCRYPTION_KEY_FILE}\"" in validateBody
+    assert "'^[A-Za-z0-9_-]{43}=$'" in validateBody
+
+
+def testProductionDependencyLockIncludesCryptography49AndItsRuntimeDependencies() -> None:
+    project = (PROJECT_ROOT / "pyproject.toml").read_text()
+    runtimeLock = (PROJECT_ROOT / "requirements.lock").read_text()
+
+    assert '"cryptography>=49,<50"' in project
+    assert "cryptography==49.0.0" in runtimeLock
+    assert "cffi==2.1.0" in runtimeLock
+    assert "pycparser==3.0" in runtimeLock
+
+
 def testDeployScriptFailsClosedAndOrdersCredentialSafetyBeforeCutover() -> None:
     source = (PROJECT_ROOT / "scripts" / "deploy-server.sh").read_text()
     deployBody = source[source.index("deploy_release() {") : source.index("main() {")]
@@ -454,6 +501,9 @@ def testDeployScriptFailsClosedAndOrdersCredentialSafetyBeforeCutover() -> None:
     assert '"0:0:400"' in source
     assert "verify_auth_migration" in source
     assert "legacy ownership migration is incomplete" in source
+    assert deployBody.index("ensure_admin_api_key_encryption_key") < deployBody.index(
+        "validate_auth_configuration"
+    )
     assert deployBody.index("validate_auth_configuration") < deployBody.index(
         'run_compose "${releaseDir}" config --quiet'
     )
@@ -473,6 +523,11 @@ def testProductionContainerCiStartsWithRealProductionAuthBoundary() -> None:
 
     assert "--env APP_ENV=production" in workflow
     assert "EVENTSHOCK_AUTH_SECRET_FILE=/run/secrets/eventshock/auth-secret" in workflow
+    assert (
+        "EVENTSHOCK_ADMIN_API_KEY_ENCRYPTION_KEY_FILE="
+        "/run/secrets/eventshock/admin-api-key-encryption-key"
+    ) in workflow
+    assert ".eventshock-secrets/admin-api-key-encryption-key" in workflow
     assert "EVENTSHOCK_SMTP_PASSWORD_FILE=/run/secrets/eventshock/smtp-password" in workflow
     assert "http://127.0.0.1:18000/api/v1/cases" in workflow
     assert '"401"' in workflow

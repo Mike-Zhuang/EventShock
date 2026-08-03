@@ -37,6 +37,7 @@ from backend.app.auth import (
     PublicUser,
     SmtpVerificationMailer,
     UserRole,
+    UserStatus,
     normalizeEmail,
 )
 from backend.app.auth.api_models import (
@@ -57,12 +58,16 @@ from backend.app.cognition import (
     PRICING_MAX_AGE_DAYS,
     PRICING_SNAPSHOT_VALID_UNTIL,
     PRICING_SNAPSHOT_VERSION,
+    AdminPersistentCredentialVault,
     CognitionService,
     CredentialNotConfiguredError,
     EvalSample,
     ExternalEvidenceSource,
     FailureCode,
     ModelGatewayError,
+    PersistentCredentialUnavailableError,
+    SessionConfigStore,
+    adminCredentialReference,
 )
 from backend.app.cognition.catalog import (
     CAPABILITY_REVIEW_CADENCE_DAYS,
@@ -149,6 +154,8 @@ from backend.app.privacy import (
 from backend.app.rate_limit import RateLimitExceeded, RateLimitRule, SlidingWindowRateLimiter
 from backend.app.scenario_service import ScenarioService
 from backend.app.schemas import (
+    AdminLlmCredentialDeleteRequest,
+    AdminLlmCredentialRequest,
     BulkClaimApprovalRequest,
     ClaimReviewRequest,
     EvalRunRequest,
@@ -208,7 +215,9 @@ LEGAL_GATE_EXEMPT_PATHS = frozenset(
 MODEL_ERROR_PUBLIC_MESSAGES: dict[FailureCode, str] = {
     FailureCode.MODEL_TIMEOUT: "The model provider did not finish within the bounded time.",
     FailureCode.MODEL_TRANSPORT_ERROR: "The model provider connection failed temporarily.",
-    FailureCode.MODEL_AUTHENTICATION_ERROR: "The model provider rejected the temporary API key.",
+    FailureCode.MODEL_AUTHENTICATION_ERROR: (
+        "The model provider rejected the active API credential."
+    ),
     FailureCode.MODEL_PERMISSION_ERROR: "The selected model is not available to this API key.",
     FailureCode.MODEL_RATE_LIMITED: "The model provider rate limit was reached.",
     FailureCode.MODEL_OVERLOADED: "The model provider is temporarily overloaded.",
@@ -406,11 +415,16 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         )
         authRepository: AuthRepository | None = None
         authService: AuthService | None = None
+        adminCredentialVault: AdminPersistentCredentialVault | None = None
         if settings.authenticationRequired:
             missingSettings = [
                 name
                 for name, value in (
                     ("EVENTSHOCK_AUTH_SECRET(_FILE)", settings.authSecret),
+                    (
+                        "EVENTSHOCK_ADMIN_API_KEY_ENCRYPTION_KEY(_FILE)",
+                        settings.adminApiKeyEncryptionKey,
+                    ),
                     ("EVENTSHOCK_ADMIN_EMAIL", settings.adminEmail),
                     ("EVENTSHOCK_SMTP_HOST", settings.smtpHost),
                     ("EVENTSHOCK_SMTP_USERNAME", settings.smtpUsername),
@@ -442,10 +456,29 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 mailer=mailer,
                 authSecret=settings.authSecret or "",
             )
+            adminCredentialVault = AdminPersistentCredentialVault(
+                database=database,
+                encryptionKey=settings.adminApiKeyEncryptionKey or "",
+                configuredAdminEmail=configuredAdminEmail,
+            )
+            adminCredentialVault.initialize()
         # 部署时必须先由一次性管理员引导认领旧数据；认领前绝不执行保留期清理。
         if not any(database.countUnownedRecords().values()):
             database.enforceRetention()
+        configStore = SessionConfigStore(
+            persistentRuntimeResolver=(
+                adminCredentialVault.resolveRuntimeReference
+                if adminCredentialVault is not None
+                else None
+            ),
+            persistentViewResolver=(
+                adminCredentialVault.resolveViewReference
+                if adminCredentialVault is not None
+                else None
+            ),
+        )
         cognitionService = CognitionService(
+            configStore=configStore,
             telemetryLoader=database.loadCognitionTelemetry,
             telemetryRecorder=database.recordCognitionTelemetry,
         )
@@ -470,6 +503,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         appInstance.state.database = database
         appInstance.state.authRepository = authRepository
         appInstance.state.authService = authService
+        appInstance.state.adminCredentialVault = adminCredentialVault
         appInstance.state.configuredAdminEmail = (
             configuredAdminEmail if settings.authenticationRequired else None
         )
@@ -650,6 +684,18 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
 
     def credentialSessionId(request: Request, ownerUserId: str) -> str:
         context = getattr(request.state, "authContext", None)
+        configuredAdminEmail = getattr(request.app.state, "configuredAdminEmail", None)
+        if (
+            isinstance(context, AuthContext)
+            and context.isAdmin
+            and context.status is UserStatus.ACTIVE
+            and isinstance(configuredAdminEmail, str)
+            and context.email.casefold() == configuredAdminEmail.casefold()
+        ):
+            return adminCredentialReference(
+                userId=context.userId,
+                authSessionId=context.authSessionId,
+            )
         return context.authSessionId if isinstance(context, AuthContext) else ownerUserId
 
     @appInstance.exception_handler(ApiError)
@@ -750,6 +796,22 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             code="ADMIN_ACCESS_REQUIRED",
             message=str(error),
             statusCode=403,
+        )
+
+    @appInstance.exception_handler(PersistentCredentialUnavailableError)
+    async def persistentCredentialUnavailableHandler(
+        request: Request,
+        error: PersistentCredentialUnavailableError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": {
+                    "code": "ADMIN_LLM_CREDENTIAL_UNAVAILABLE",
+                    "message": str(error),
+                    "traceId": getattr(request.state, "traceId", None),
+                }
+            },
         )
 
     @appInstance.exception_handler(ChallengeCooldownError)
@@ -1060,6 +1122,13 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             raise ApiError("ACCOUNT_NOT_FOUND", 404, str(error)) from error
         cognition: CognitionService = request.app.state.cognitionService
         cognition.clearConfig(context.authSessionId)
+        if context.isAdmin:
+            cognition.clearConfig(
+                adminCredentialReference(
+                    userId=context.userId,
+                    authSessionId=context.authSessionId,
+                )
+            )
         singleFlight: ResultInterpretationSingleFlight = (
             request.app.state.resultInterpretationSingleFlight
         )
@@ -1442,6 +1511,13 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         context = _authContext(request)
         cognition: CognitionService = request.app.state.cognitionService
         cognition.clearConfig(context.authSessionId)
+        if context.isAdmin:
+            cognition.clearConfig(
+                adminCredentialReference(
+                    userId=context.userId,
+                    authSessionId=context.authSessionId,
+                )
+            )
         singleFlight: ResultInterpretationSingleFlight = (
             request.app.state.resultInterpretationSingleFlight
         )
@@ -2306,6 +2382,93 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             mode="json"
         )
 
+    @appInstance.get("/api/v1/admin/llm-credential")
+    async def getAdminLlmCredential(request: Request) -> dict[str, Any]:
+        context = _configuredAdministratorContext(request)
+        vault = getattr(request.app.state, "adminCredentialVault", None)
+        if not isinstance(vault, AdminPersistentCredentialVault):
+            raise ApiError(
+                "ADMIN_LLM_CREDENTIAL_STORAGE_UNAVAILABLE",
+                503,
+                "Encrypted administrator credential storage is unavailable.",
+            )
+        return vault.getView(context.userId).model_dump(mode="json")
+
+    @appInstance.put("/api/v1/admin/llm-credential")
+    async def saveAdminLlmCredential(
+        config: AdminLlmCredentialRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        context = _configuredAdministratorContext(request)
+        authService = _requiredAuthService(request)
+        _verifyAdministratorCredentialPassword(
+            authService,
+            context,
+            config.currentPassword,
+        )
+        vault = _requiredAdminCredentialVault(request)
+        try:
+            view = vault.save(
+                userId=context.userId,
+                apiKey=config.apiKey,
+                provider=config.provider,
+                model=config.model,
+                thinkingEnabled=config.thinkingEnabled,
+                maxTokens=config.maxTokens,
+                advancedParameters=config.advancedParameters,
+            )
+        except ValueError as error:
+            # 不把底层校验异常原文带回客户端，避免未来新增校验器后意外回显
+            # 供应商凭据或其他敏感输入；具体输入可由管理员在表单中重新核对。
+            LOGGER.warning(
+                "Rejected invalid administrator LLM credential configuration "
+                "traceId=%s errorType=%s",
+                getattr(request.state, "traceId", "unavailable"),
+                type(error).__name__,
+            )
+            raise ApiError(
+                "INVALID_ADMIN_LLM_CREDENTIAL",
+                422,
+                "The administrator model credential configuration is invalid.",
+            ) from error
+        except PermissionError as error:
+            raise AuthorizationError("configured administrator access is required") from error
+        cognition: CognitionService = request.app.state.cognitionService
+        cognition.clearConfig(credentialSessionId(request, context.userId))
+        authService.repository.recordActivity(
+            userId=context.userId,
+            action="ADMIN_LLM_CREDENTIAL_SAVED",
+            metadata={"provider": config.provider, "model": config.model},
+        )
+        return view.model_dump(mode="json")
+
+    @appInstance.delete("/api/v1/admin/llm-credential")
+    async def deleteAdminLlmCredential(
+        payload: AdminLlmCredentialDeleteRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        context = _configuredAdministratorContext(request)
+        authService = _requiredAuthService(request)
+        _verifyAdministratorCredentialPassword(
+            authService,
+            context,
+            payload.currentPassword,
+        )
+        vault = _requiredAdminCredentialVault(request)
+        try:
+            view = vault.delete(context.userId)
+        except PermissionError as error:
+            raise AuthorizationError("configured administrator access is required") from error
+        cognition: CognitionService = request.app.state.cognitionService
+        # 删除持久凭据时一并清除当前管理员会话的临时覆盖，确保“删除”后
+        # 不会继续通过一把只驻内存的旧 Key 调用供应商。
+        cognition.clearConfig(credentialSessionId(request, context.userId))
+        authService.repository.recordActivity(
+            userId=context.userId,
+            action="ADMIN_LLM_CREDENTIAL_DELETED",
+        )
+        return view.model_dump(mode="json")
+
     @appInstance.put("/api/v1/llm/config")
     async def saveLlmConfig(
         config: LlmConfigRequest,
@@ -2425,7 +2588,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 raise ApiError(
                     "LLM_CREDENTIAL_NOT_CONFIGURED",
                     409,
-                    "Configure a session-scoped provider API key before running the live suite.",
+                    "Configure an active provider API credential before running the live suite.",
                 )
             liveSamples: list[EvalSample] = []
             for case in cases:
@@ -3957,6 +4120,49 @@ def _authContext(request: Request) -> AuthContext:
     return context
 
 
+def _configuredAdministratorContext(request: Request) -> AuthContext:
+    """持久凭据只归部署配置的唯一管理员，不扩展给其他 ADMIN 角色。"""
+
+    context = _authContext(request)
+    configuredAdminEmail = getattr(request.app.state, "configuredAdminEmail", None)
+    if (
+        not context.isAdmin
+        or context.status is not UserStatus.ACTIVE
+        or not isinstance(configuredAdminEmail, str)
+        or context.email.casefold() != configuredAdminEmail.casefold()
+    ):
+        raise AuthorizationError("configured administrator access is required")
+    return context
+
+
+def _requiredAdminCredentialVault(request: Request) -> AdminPersistentCredentialVault:
+    vault = getattr(request.app.state, "adminCredentialVault", None)
+    if not isinstance(vault, AdminPersistentCredentialVault):
+        raise ApiError(
+            "ADMIN_LLM_CREDENTIAL_STORAGE_UNAVAILABLE",
+            503,
+            "Encrypted administrator credential storage is unavailable.",
+        )
+    return vault
+
+
+def _verifyAdministratorCredentialPassword(
+    authService: AuthService,
+    context: AuthContext,
+    currentPassword: str,
+) -> None:
+    """区分高风险操作复验失败与登录会话失效，避免前端误登出。"""
+
+    try:
+        authService.verifyCurrentPassword(context, currentPassword)
+    except AuthenticationError as error:
+        raise ApiError(
+            "ADMIN_REAUTHENTICATION_FAILED",
+            403,
+            "The current administrator password is incorrect.",
+        ) from error
+
+
 def _requiredAuthService(request: Request) -> AuthService:
     service = getattr(request.app.state, "authService", None)
     if not isinstance(service, AuthService):
@@ -4438,6 +4644,25 @@ def _rateLimitRules(request: Request) -> list[RateLimitRule]:
                 RateLimitRule(key=f"auth-code:ip:{clientIp}", limit=60, windowSeconds=3600)
             )
         return rules
+    if path == "/api/v1/admin/llm-credential":
+        # 保存和删除服务器端高价值凭据都要求当前密码复验。账号与来源地址
+        # 双桶共同限制在线猜测及 Argon2 CPU/审计写入放大；GET 不进入本分支。
+        context = getattr(request.state, "authContext", None)
+        principal = (
+            context.userId if isinstance(context, AuthContext) else f"unavailable:{clientIp}"
+        )
+        return [
+            RateLimitRule(
+                key=f"admin-llm-credential:user:{principal}",
+                limit=5,
+                windowSeconds=3_600,
+            ),
+            RateLimitRule(
+                key=f"admin-llm-credential:ip:{clientIp}",
+                limit=5,
+                windowSeconds=3_600,
+            ),
+        ]
     if path in {"/api/v1/account", "/api/v1/account/data-export"}:
         context = getattr(request.state, "authContext", None)
         principal = (

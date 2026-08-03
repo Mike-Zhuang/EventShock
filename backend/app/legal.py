@@ -17,8 +17,8 @@ from pydantic import BaseModel, ConfigDict
 
 LegalLocale = Literal["en", "zh-CN"]
 
-CURRENT_TERMS_VERSION = "2026-07-29-v2"
-CURRENT_TERMS_EFFECTIVE_DATE = date(2026, 7, 29)
+CURRENT_TERMS_VERSION = "2026-08-03-v3"
+CURRENT_TERMS_EFFECTIVE_DATE = date(2026, 8, 3)
 MINIMUM_ACCOUNT_AGE = 18
 
 
@@ -121,11 +121,20 @@ _EN_SECTIONS = (
             "related requests to that provider. The provider’s own terms, privacy practices, "
             "availability, geographic restrictions, safety filters, and fees apply separately. "
             "The Operator does not control or endorse those services.",
-            "API keys are intended to remain in volatile server memory for a limited session and "
-            "are not associated with your persistent account record. Nevertheless, you must use "
-            "a restricted key where available, monitor provider billing, avoid entering secrets "
-            "into content fields, and revoke a key if exposure is suspected. You authorize "
-            "charges caused by requests you confirm through the Service.",
+            "For ordinary users, API keys remain in volatile server memory for a limited session "
+            "and are not associated with a persistent account record. A single administrator "
+            "designated by the deployment may expressly choose to persist a provider key. In "
+            "that exceptional case, the database stores only authenticated encrypted ciphertext; "
+            "the plaintext key is not returned to browser storage, logs, audit details, account "
+            "exports, experiment exports, or other users. The designated administrator may "
+            "replace or delete the stored credential through the authenticated interface.",
+            "Server-side encryption reduces exposure from a database-only disclosure but is not "
+            "a hardware secret vault or end-to-end encryption. The running application must "
+            "temporarily decrypt the credential to contact the selected provider, so the "
+            "deployment host's root users, Docker administrators, and the application process "
+            "remain trusted. You must use a restricted key where available, monitor provider "
+            "billing, avoid entering secrets into content fields, and revoke a key if exposure is "
+            "suspected. You authorize charges caused by requests you confirm through the Service.",
         ),
     ),
     LegalSection(
@@ -167,7 +176,9 @@ _EN_SECTIONS = (
             "password hashes, email-verification status, "
             "session records, acceptance records, self-selected experience preferences, audit "
             "events, Event Packs, scenarios, experiments, exports, and AI-related conversation "
-            "records needed to provide continuity and accountability. Passwords and verification "
+            "records needed to provide continuity and accountability. If the deployment-designated "
+            "administrator opts in, this also includes authenticated ciphertext and limited "
+            "metadata for one persistent provider credential. Passwords and verification "
             "codes are not stored in plaintext. The account email is used only for account "
             "access, verification, security, support, and research-data ownership; it is not "
             "included in prompts sent to AI or search providers. Sensitive content should not "
@@ -178,11 +189,14 @@ _EN_SECTIONS = (
             "only when needed for requested functions. The Service does not promise that a "
             "third-party provider will process data in your country.",
             "Authentication cookies and browser storage are used for session security, language, "
-            "theme, temporary API configuration, and workflow continuity. An authenticated user "
+            "theme, non-secret API configuration state, and workflow continuity; a persistent "
+            "administrator key is not stored in the browser. An authenticated user "
             "may export the account data currently held by the primary database or request "
             "account deletion through the in-product Account and privacy page after re-entering "
-            "the current password. Deletion removes active account-owned records and signs the "
-            "user out, but encrypted or access-controlled backups may retain a copy until their "
+            "the current password. Account exports exclude provider credentials. Deletion removes "
+            "active account-owned records, including any administrator credential ciphertext, "
+            "and signs the user out, but encrypted or access-controlled backups may retain a "
+            "copy until their "
             "scheduled expiry where immediate selective deletion is not technically possible. "
             "Security, fraud-prevention, or legal records may be retained only where reasonably "
             "necessary. Other requests must use an operator-provided private channel; never put "
@@ -317,9 +331,15 @@ _ZH_SECTIONS = (
             "当您配置第三方模型或搜索服务时，本服务可能向该供应商传输受限提示词、已选择的"
             "来源片段、实验结果切片及相关请求。该供应商自己的条款、隐私规则、可用性、地域"
             "限制、安全过滤和费用另行适用；运营方不控制或背书其服务。",
-            "API 密钥按设计仅在有限会话的服务器易失性内存中存在，不与持久账户资料绑定。您"
-            "仍应尽量使用受限密钥、监控供应商账单、避免在内容字段输入秘密，并在疑似泄露时"
-            "及时撤销。您确认由本人在本服务中批准的请求可能产生供应商费用。",
+            "普通用户的 API 密钥仅在有限会话的服务器易失性内存中存在，不与持久账户资料绑定。"
+            "部署指定的唯一管理员可明确选择持久保存供应商密钥；在这一例外情况下，数据库只保存"
+            "经过认证加密的密文，明文密钥不会返回浏览器存储、日志、审计详情、账户导出、实验"
+            "导出或其他用户。该指定管理员可在登录界面中替换或删除持久凭据。",
+            "服务器端加密可降低仅数据库泄露时的风险，但不等同于硬件密钥保险库或端到端加密。"
+            "运行中的应用必须在调用供应商时短暂解密，因此部署主机 root 用户、Docker 管理员和"
+            "应用进程仍属于信任边界。您仍应尽量使用受限密钥、监控供应商账单、避免在内容字段"
+            "输入秘密，并在疑似泄露时及时撤销。您确认由本人在本服务中批准的请求可能产生供应商"
+            "费用。",
         ),
     ),
     LegalSection(
@@ -352,15 +372,19 @@ _ZH_SECTIONS = (
         body=(
             "邮箱地址属于个人信息。本服务为连续性与问责需要保存账户邮箱、密码摘要、邮箱验证"
             "状态、会话、同意记录、"
-            "自选经验偏好、审计事件、事件包、情景、实验、导出及 AI 相关对话记录。密码和验证"
+            "自选经验偏好、审计事件、事件包、情景、实验、导出及 AI 相关对话记录。若部署指定"
+            "管理员主动选择持久保存供应商凭据，还会保存一份经过认证加密的密文及有限元数据。"
+            "密码和验证"
             "码不会以明文保存。账户邮箱仅用于账户访问、验证、安全、支持和研究数据归属，不会"
             "被放入发送给 AI 或搜索供应商的提示词。请勿提交敏感内容。",
             "数据用于认证、提供和个性化工作流、执行所请求分析、保持可复现性、防止滥用、"
             "诊断故障和运营服务。仅在所请求功能必要时向基础设施、AI 或搜索供应商披露有限"
             "数据；本服务不保证第三方在您所在国家或地区处理数据。",
-            "认证 Cookie 与浏览器存储用于会话安全、语言、主题、临时 API 配置及工作流连续性。"
+            "认证 Cookie 与浏览器存储用于会话安全、语言、主题、非秘密 API 配置状态及工作流"
+            "连续性；管理员持久密钥不会保存在浏览器中。"
             "登录用户重新输入当前密码后，可在产品内“账户与隐私”页面导出主数据库当前保存的"
-            "账户数据，或请求删除账户。删除会移除活动数据库中的账户所属记录并退出登录；如"
+            "账户数据，或请求删除账户；账户导出不包含供应商凭据。删除会移除活动数据库中的"
+            "账户所属记录（包括管理员凭据密文）并退出登录；如"
             "技术上无法立即从备份中选择性删除，受加密或访问控制保护的备份副本可能保留到计划"
             "到期。仅在安全、防欺诈或法律义务合理必要时保留有限记录。其他请求应通过运营方"
             "提供的私密渠道提出；切勿在公开仓库 Issue 中提交敏感信息。",

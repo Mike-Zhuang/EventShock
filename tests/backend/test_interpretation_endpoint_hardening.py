@@ -729,7 +729,7 @@ def test_llm_connection_test_redacts_model_gateway_error(tmp_path: Path) -> None
     assert providerSentinel not in response.text
     assert response.json()["error"] == {
         "code": "MODEL_AUTHENTICATION_ERROR",
-        "message": "The model provider rejected the temporary API key.",
+        "message": "The model provider rejected the active API credential.",
         "traceId": response.json()["error"]["traceId"],
         "retryable": False,
         "providerAttempts": 1,

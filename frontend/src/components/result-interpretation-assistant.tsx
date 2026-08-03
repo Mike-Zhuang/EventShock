@@ -103,8 +103,8 @@ const STREAM_STAGE_LABELS: Record<StreamState['stage'], { en: string; zh: string
 
 const FRIENDLY_ERROR_COPY: Record<string, { en: string; zh: string; configuration?: boolean }> = {
   LLM_CREDENTIAL_NOT_CONFIGURED: {
-    en: 'The temporary API key is missing or expired. Reconnect the provider in AI Configuration.',
-    zh: '临时 API Key 不存在或已过期，请到“AI 配置”重新连接供应商。',
+    en: 'No usable API credential is available. Reconnect the provider in AI Configuration.',
+    zh: '当前没有可用的 API 凭据，请到“AI 配置”重新连接供应商。',
     configuration: true,
   },
   MODEL_AUTHENTICATION_ERROR: {

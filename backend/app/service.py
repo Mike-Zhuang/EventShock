@@ -35,6 +35,7 @@ from backend.app.cognition import (
     ModelGatewayError,
     ModelPolicy,
     Observation,
+    PersistentCredentialUnavailableError,
     PortfolioObservation,
     SocialPost,
     TrustProfile,
@@ -85,7 +86,13 @@ NO_EXTERNAL_COGNITION_REASON = "no external cognition requested"
 BULK_APPROVAL_MIN_CONFIDENCE = 0.75
 
 
+class _ModelCredentialStorageUnavailableError(RuntimeError):
+    """混合认知所需持久凭据暂时不可解密，可在修复凭据后重试。"""
+
+
 def _cognitionFailureCategory(code: str) -> str:
+    if code == "LLM_CREDENTIAL_STORAGE_UNAVAILABLE":
+        return "CREDENTIAL_STORAGE"
     if code in {"MODEL_AUTHENTICATION_ERROR", "MODEL_PERMISSION_ERROR", "LLM_CREDENTIAL_EXPIRED"}:
         return "AUTHENTICATION"
     if code in {"MODEL_TIMEOUT", "MODEL_OVERLOADED"}:
@@ -2131,6 +2138,36 @@ class ExperimentService:
                     "manifestHash": _hashJson(result["manifest"]),
                 },
             )
+        except _ModelCredentialStorageUnavailableError:
+            LOGGER.exception(
+                "Experiment %s could not access the configured model credential",
+                experimentId,
+            )
+            runtime["phase"] = "FAILED_RETRYABLE"
+            self._appendRuntimeLog(
+                runtime,
+                "ERROR",
+                (
+                    "The encrypted model credential is unavailable. Re-save the "
+                    "administrator credential and retry the experiment."
+                ),
+                code="LLM_CREDENTIAL_STORAGE_UNAVAILABLE",
+            )
+            self.database.updateExperiment(
+                experimentId,
+                sessionId,
+                status="FAILED_RETRYABLE",
+                error_code="LLM_CREDENTIAL_STORAGE_UNAVAILABLE",
+                completed_at=utcNow(),
+                runtime_json=runtime,
+            )
+            self.database.appendAuditEvent(
+                sessionId,
+                "EXPERIMENT",
+                experimentId,
+                "RUN_FAILED_RETRYABLE",
+                {"errorCode": "LLM_CREDENTIAL_STORAGE_UNAVAILABLE"},
+            )
         except Exception:
             LOGGER.exception("Experiment %s failed", experimentId)
             runtime["phase"] = "FAILED_FINAL"
@@ -2458,18 +2495,25 @@ class ExperimentService:
 
         if not hybridRequested:
             reportProgress("NOT_APPLICABLE")
+            # 纯规则实验不得读取或解密任何供应商凭据。除了缩小明文暴露面，
+            # 这也保证主密钥轮换或密文损坏不会使本来不需要 LLM 的实验失败。
+            return baseMetadata
+        try:
             runtimeConfig = (
                 self.cognition.getConfig(credentialSessionId)
                 if self.cognition is not None
                 else None
             )
-            if runtimeConfig is not None and runtimeConfig.configured:
-                baseMetadata["configuredButUnusedProvider"] = runtimeConfig.provider
-                baseMetadata["configuredButUnusedModel"] = runtimeConfig.model
-            return baseMetadata
-        runtimeConfig = (
-            self.cognition.getConfig(credentialSessionId) if self.cognition is not None else None
-        )
+        except PersistentCredentialUnavailableError as error:
+            if not fallbackAllowed:
+                raise _ModelCredentialStorageUnavailableError(
+                    "encrypted model credential storage is unavailable"
+                ) from error
+            return {
+                **baseMetadata,
+                "resolvedMode": "RULE_FALLBACK",
+                "failureCode": "LLM_CREDENTIAL_STORAGE_UNAVAILABLE",
+            }
         if runtimeConfig is None or not runtimeConfig.configured:
             if not fallbackAllowed:
                 raise RuntimeError("hybrid LLM mode requires a configured session credential")
@@ -2811,13 +2855,25 @@ class ExperimentService:
                     if isinstance(self.cognition, CognitionService):
                         beliefArguments["progressObserver"] = streamProgress
                     run = asyncio.run(self.cognition.generateBeliefDecision(**beliefArguments))
-                except (CredentialNotConfiguredError, ModelGatewayError) as error:
+                except (
+                    CredentialNotConfiguredError,
+                    ModelGatewayError,
+                    PersistentCredentialUnavailableError,
+                ) as error:
                     if not fallbackAllowed:
+                        if isinstance(error, PersistentCredentialUnavailableError):
+                            raise _ModelCredentialStorageUnavailableError(
+                                "encrypted model credential storage is unavailable"
+                            ) from error
                         raise RuntimeError("the configured cognitive model failed") from error
                     failureCode = (
-                        error.code.value
-                        if isinstance(error, ModelGatewayError)
-                        else "LLM_CREDENTIAL_EXPIRED"
+                        "LLM_CREDENTIAL_STORAGE_UNAVAILABLE"
+                        if isinstance(error, PersistentCredentialUnavailableError)
+                        else (
+                            error.code.value
+                            if isinstance(error, ModelGatewayError)
+                            else "LLM_CREDENTIAL_EXPIRED"
+                        )
                     )
                     failureCategory = _cognitionFailureCategory(failureCode)
                     failureCategoryCounts[failureCategory] = (

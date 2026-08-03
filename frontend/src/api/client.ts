@@ -1,6 +1,7 @@
 import {
   normalizeAccountDataExport,
   normalizeAccountDeletionReceipt,
+  normalizeAdminLlmCredential,
   normalizeAdminActivityPage,
   normalizeAdminUserPage,
   normalizeAuthSession,
@@ -56,6 +57,9 @@ import type {
   AccountDataExportInput,
   AccountDeletionInput,
   AccountDeletionReceipt,
+  AdminLlmCredentialDeleteInput,
+  AdminLlmCredentialInput,
+  AdminLlmCredentialView,
   AdminActivityPage,
   AdminUserPage,
   AuthSession,
@@ -910,6 +914,26 @@ export const api = {
     return normalizeLlmConnectionTest(await requestJson('/v1/llm/test', {
       method: 'POST',
       timeoutMs: 70_000,
+    }));
+  },
+
+  async getAdminLlmCredential(): Promise<AdminLlmCredentialView> {
+    return normalizeAdminLlmCredential(await requestJson('/v1/admin/llm-credential'));
+  },
+
+  async saveAdminLlmCredential(input: AdminLlmCredentialInput): Promise<AdminLlmCredentialView> {
+    return normalizeAdminLlmCredential(await requestJson('/v1/admin/llm-credential', {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    }));
+  },
+
+  async deleteAdminLlmCredential(
+    input: AdminLlmCredentialDeleteInput,
+  ): Promise<AdminLlmCredentialView> {
+    return normalizeAdminLlmCredential(await requestJson('/v1/admin/llm-credential', {
+      method: 'DELETE',
+      body: JSON.stringify(input),
     }));
   },
 

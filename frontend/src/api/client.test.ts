@@ -188,6 +188,46 @@ describe('API client event stream', () => {
     window.removeEventListener(AUTH_SESSION_EXPIRED_EVENT, listener);
   });
 
+  it('does not expire the session when administrator credential re-verification returns 403', async () => {
+    const listener = vi.fn();
+    window.addEventListener(AUTH_SESSION_EXPIRED_EVENT, listener);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({
+        error: {
+          code: 'ADMIN_REAUTHENTICATION_FAILED',
+          message: 'The current administrator password is incorrect.',
+        },
+      }),
+      { status: 403, headers: { 'Content-Type': 'application/json' } },
+    )));
+
+    await expect(api.deleteAdminLlmCredential({
+      currentPassword: 'dummy-incorrect-password',
+    })).rejects.toMatchObject({
+      status: 403,
+      code: 'ADMIN_REAUTHENTICATION_FAILED',
+    });
+
+    expect(listener).not.toHaveBeenCalled();
+    window.removeEventListener(AUTH_SESSION_EXPIRED_EVENT, listener);
+  });
+
+  it('expires the session when an administrator credential request receives a real 401', async () => {
+    const listener = vi.fn();
+    window.addEventListener(AUTH_SESSION_EXPIRED_EVENT, listener);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({ error: { code: 'AUTHENTICATION_FAILED', message: 'Session expired.' } }),
+      { status: 401, headers: { 'Content-Type': 'application/json' } },
+    )));
+
+    await expect(api.deleteAdminLlmCredential({
+      currentPassword: 'irrelevant-after-session-expiry',
+    })).rejects.toMatchObject({ status: 401 });
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    window.removeEventListener(AUTH_SESSION_EXPIRED_EVENT, listener);
+  });
+
   it('broadcasts session expiry when an authenticated business request returns 401', async () => {
     const listener = vi.fn();
     window.addEventListener(AUTH_SESSION_EXPIRED_EVENT, listener);

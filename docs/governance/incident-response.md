@@ -46,7 +46,7 @@
 
 - 在宝塔“计划任务”中先停用 `EventShock GitHub 自动同步部署`，防止调查期间自动引入新提交；不要只杀死当前进程而保留下一轮调度。
 - 停止新的实验和模型调用。
-- 清除内存 BYOK，并要求用户在智谱侧吊销可能泄漏的 Key。
+- 清除普通用户内存 BYOK；若涉及管理员持久凭据，删除其密文、隔离主密钥并停止外部模型调用。要求受影响用户在供应商侧吊销可能泄漏的 Key。
 - 停止或隔离 Caddy/App 容器，但先保存必要日志和只读数据库副本。
 - 禁用受影响 Event Pack、模型 ID、Prompt 版本或导出入口。
 - 对数据泄漏停止公开访问和进一步同步。
@@ -128,7 +128,7 @@ Postmortem 采用无责原则，但所有高风险改进必须有明确 Owner �
 
 ### API Key 泄漏
 
-停止模型调用，清除内存配置，用户在智谱控制台吊销 Key，检查响应、Caddy/App 日志、SQLite、ZIP、Crash Dump 和 Shell History。更换相关凭据后执行 `rt-secret-disclosure-001`。
+停止模型调用并清除内存配置。若涉及管理员持久凭据，先保全不含明文的审计证据，再删除持久密文，隔离 `/opt/eventshock/shared/secrets/admin-api-key-encryption-key`，并判断攻击者是否同时取得 SQLite/WAL/备份和主密钥。用户在对应供应商控制台吊销并轮换 API Key；主密钥疑似泄露时也必须生成新主密钥，不能继续信任旧密文。检查 API 响应、浏览器存储、Caddy/App/宝塔日志、SQLite/WAL/备份、账户与实验 ZIP、Crash Dump、容器挂载和 Shell History。恢复前验证普通用户临时模式、管理员重新保存、日志/导出排除和篡改密文失败关闭，再执行 `rt-secret-disclosure-001`。
 
 ### Future leakage
 
