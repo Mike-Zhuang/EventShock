@@ -64,7 +64,7 @@ SpaceX Nasdaq-100 公告的时间来自 Nasdaq 内容和 GlobeNewswire 官方分
 - 用户上传的正文与元数据在任何抽取或模型调用前经过确定性安全扫描；高风险内容阻断，可复核内容需确认并在下游处理前脱敏，持久化摘要不含命中原文。
 - 通过内容安全 gate 的文本进入带 delimiter 的 untrusted data 区；需要人工确认的来源使用脱敏副本，阻断内容不会进入抽取或模型。
 - LLM 只能提出候选 Claim，候选始终要求人工审核。
-- 原始上传文本不进入公开 Event Pack，当前实现也不把 BYOK 密钥写入 SQLite。
+- 原始上传文本不进入公开 Event Pack。普通用户 BYOK 不写入 SQLite；部署指定管理员主动启用持久保存时，SQLite 只保存一份供应商凭据的认证加密密文与有限元数据，不保存明文。
 - 冻结 Event Pack 后，实验引用冻结 Claim 和配置。
 - 仿真输出带 seed、版本和 event-log hash。
 
@@ -110,7 +110,7 @@ SpaceX Nasdaq-100 公告的时间来自 Nasdaq 内容和 GlobeNewswire 官方分
 
 - Canonical Event Pack 随仓库版本保存。
 - SQLite 持久化匿名会话的草稿、场景、审计和实验。
-- BYOK API Key 仅在进程内存中按 TTL 保存，进程重启即丢失。
+- 普通用户 BYOK API Key 仅在进程内存中按 TTL 保存，进程重启即丢失。部署指定管理员可主动持久保存一份凭据密文；主密钥与 SQLite 备份分离管理，账户与实验导出均排除该凭据。
 - 当前没有面向最终用户的完整数据删除、导出权和保留期管理界面。
 - SQLite 备份、恢复与过期数据清理尚未通过运营演练。
 

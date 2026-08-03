@@ -106,7 +106,7 @@
 | 信念到订单的确定性转换和风险限额 | `已实现` | `cognition/policy.py`、`agents.py::makeCognitiveOrderIntent`、ledger | `test_cognition.py`、`test_agent_protocol.py`、`test_simulation.py` | LLM 永远不能提交原始订单。 |
 | 一次 JSON repair、重试与规则回退 | `已实现` | `cognition/zhipu.py`、`gateway.py` | `test_cognition.py`、`test_cognition_service.py` | 供应商长时间不可用时只能回退，未实现多 provider route。 |
 | 不可变决策缓存 | `已实现` | `cognition/cache.py` | `test_cognition.py` | 当前是进程内缓存；重启后不保留，也没有跨 worker artifact cache。 |
-| BYOK 会话密钥、TTL、遮罩和不落 SQLite | `已实现` | `cognition/config_store.py`、LLM config API/UI | `test_cognition.py`、`test_control_plane.py` | 内存不是硬件密钥库；主机、崩溃转储和运维访问仍需人工安全审查。 |
+| BYOK 临时模式与指定管理员加密持久模式 | `已实现` | `cognition/config_store.py`、`cognition/persistent_credentials.py`、LLM/admin credential API 与 AI Configuration 页面 | cognition/auth API tests、AI Configuration 前端测试 | 普通用户仍为会话内存 TTL；只有 `EVENTSHOCK_ADMIN_EMAIL` 指定管理员可经当前密码复验主动保存。SQLite 只存 Fernet 密文，前端/日志/审计/导出不返回明文；主机 root、Docker、应用进程、备份分离和轮换仍需人工安全审查。 |
 | 预算、调用数、token、fallback、latency 遥测 | `已实现` | `CognitionService`、preflight、governance UI | `test_cognition_service.py`、`test_cognition_pricing.py` | `maxCostUsd` 是调用前硬门控：按公开刊例价的最高分档和冻结保守汇率，为初次请求、JSON 修复及全部传输重试预留美元成本上界，再按供应商 token usage 结算；缺失 usage 或未知价格时失败关闭。该上界不是供应商实时账单，且不包含税费、支付手续费、折扣、套餐或账户余额。 |
 | 在线关键时点动态调用 LLM | `部分实现` | `ExperimentService._prepareCognitiveSignals` 按 `decisionIntervalSteps` / `callBudget` 生成多轮 PIT 信号，engine 按 `activeFromStep` 消费 | `test_simulation.py::test_scheduled_cognitive_decisions_are_consumed_at_their_point_in_time_steps` | 调用仍在实验仿真前完成并冻结，同一序列复用于 baseline/intervention 与所有 seeds；模型不会在每个 seed 中实时重观察内生价格，也没有仿真内阈值/事件触发调用。 |
 | LLM 社交发言、记忆与 follower 扩散 | `部分实现` | `_prepareCognitiveSignals`、`_socialFeed`、`Observation.social_feed` / `memory_summary` | `test_cognition.py`、`test_simulation.py` | 每轮可读取截至观察时点的最多八条证据绑定社交摘要和自身上一轮决策记忆；LLM `public_message` 尚未动态进入传播网络，馈送也不来自 seed-specific 内生主体发言。 |
@@ -162,7 +162,7 @@
 | 默认英文、完整中英文切换 | `已实现` | `frontend/src/i18n.tsx`、`app.tsx` | `frontend/src/i18n.test.tsx`、`app.test.tsx` | GLM 实际中英文行为仍需真人评估。 |
 | Case Library 与用途/限制 | `已实现` | `case-library-page.tsx`、`EventPackService.listCases` | `app.test.tsx`、`test_historical_event_packs.py` | SpaceX 为旗舰样本外 Demo；CrowdStrike/GameStop 仅标为历史验证候选案例，不能解读为已通过历史研究。 |
 | Event Pack Studio：来源、内容安全摘要、claim 状态、审核、冻结 | `已实现` | `event-pack-page.tsx`、upload modal、`security/content.py` | 前端测试、`test_content_security.py` 与 API tests | 安全摘要只显示分类码/数量/确认状态，不回显命中原文；Claim graph 仍以列表/时间线为主。 |
-| AI Configuration：API Key、型号、thinking、token、连接测试、清除 | `已实现` | `ai-configuration-page.tsx` | API normalize/tests、backend cognition tests | Key 只保存在服务端内存；刷新会话配置可见但不能取回原 key。 |
+| AI Configuration：临时/管理员持久 API Key、型号、thinking、token、连接测试、清除 | `已实现` | `ai-configuration-page.tsx` | API normalize/tests、backend cognition/auth tests | 普通用户只显示临时模式；部署指定管理员可在当前密码复验后保存、替换或删除服务器密文。两种模式都只回显掩码，不能取回原 Key。 |
 | 七步场景信息：Event/Facts/Market/Population/Network/Intervention/Review | `已实现` | `scenario-builder-page.tsx` 的七步锚点导航 + preflight | `app.test.tsx`、API tests | 七步已集中在一个页面，但仍是锚点式长表单而非逐步向导；高级参数来源/敏感性没有逐字段动态证据卡。 |
 | 会话 Scenario 库：保存、更新、克隆、diff、冻结、删除 | `已实现` | `scenario-builder-page.tsx`、`frontend/src/api/client.ts`、`scenario_service.py` | `test_control_plane.py::test_scenario_crud_diff_freeze_and_audit_chain` | 当前前端代码已调用全部接口并禁止覆盖/删除冻结记录；尚无覆盖这些按钮操作的前端交互测试。 |
 | 七类单变量干预和即时 diff | `已实现` | Scenario Builder、schemas、preflight | `test_api.py`、`test_simulation.py` | 不支持多个干预同时归因。 |
@@ -194,11 +194,11 @@
 | SQLite 会话/场景/审计/实验状态 | `已实现` | `backend/app/database.py` | `test_database.py` | 无用户/组织/项目实体，也不是 PostgreSQL 多租户生产拓扑。 |
 | 哈希链审计和篡改检测 | `已实现` | `Database.appendAuditEvent` / `verifyAuditChain` | `test_database.py`、`test_control_plane.py` | 同一应用数据库管理员仍有底层写权限；没有外部 WORM 日志。 |
 | 固定 Schema Parquet | `已实现` | `backend/app/export/parquet.py` | `test_parquet_export.py` | 在导出时内存生成；无 S3 分区数据湖。 |
-| ZIP：manifest/scenarios/Event Pack/source hashes/seeds/model versions/traces/报告 | `已实现` | `service.py::_buildExport` | `test_api.py` | 不含原始上传全文或 API Key，符合最小化原则。 |
+| ZIP：manifest/scenarios/Event Pack/source hashes/seeds/model versions/traces/报告 | `已实现` | `service.py::_buildExport` | `test_api.py` | 不含原始上传全文、普通用户临时 Key、管理员持久凭据密文或明文，符合最小化原则。 |
 | CPython 3.12.13 和依赖锁 | `已实现` | `.python-version`、`environment.yml`、`pyproject.toml`、locks、Dockerfile、CI | CI 配置本身 | 某次发布仍需实际 CI artifact。 |
 | Ruff/Pytest/前端 test/build/container gates | `已实现` | `.github/workflows/ci.yml` | 工作流定义 | 没有覆盖率阈值、E2E 浏览器 CI、镜像漏洞/许可证扫描。 |
 | 单实验 artifact invalidation | `已实现` | `POST /api/v1/experiments/{id}/invalidate`、SQLite invalidation 字段、Results 页面操作与结果读取/导出 gate、审计事件 | `test_api.py`、`test_database.py`、`frontend/src/api/normalize.test.ts` | 只允许当前 Session 对单个已完成实验操作；保留底层 result 供取证但不再返回为有效结果。Results 弹窗尚无独立按钮级前端交互测试；按模型/数据/版本批量查找和失效仍是控制缺口。 |
-| ADR | `已实现` | `docs/adr/0001-0011` | 治理测试检查部分引用 | 重大未来变更仍应新增 ADR。 |
+| ADR | `已实现` | `docs/adr/0001-0012` | 治理测试检查部分引用 | 重大未来变更仍应新增 ADR。 |
 | Docker 非 root、只读 FS、资源限制、健康检查 | `已实现` | `Dockerfile`、`compose.yml` | CI container build gate | 运行安全性需在生产主机实测。 |
 | GitHub→宝塔→自有服务器拉取式部署 | `已实现，已有运行证据` | `sync-from-github.sh`、`deploy-server.sh`、宝塔任务/站点注册器、Caddy/Compose 与部署指南 | 214 项后端测试、部署 shell 测试、两类 GitHub CI 共 6 个成功检查、宝塔原生任务/GetLogs、目标主机健康与流量观测 | implementation commit 已先经 GitHub CI，再由宝塔任务匿名拉取；本地/GitHub/sync state/current release/健康 SHA 一致。真实 SSE 写入 Nginx access log，`site_total` 随公网请求增长，外部 18080 不可达。尚无正式失败恢复演练、长期运行数据或宝塔网页截图。 |
 | 请求限制、安全响应头、rate limit、稳定错误码 | `已实现` | Caddyfile、FastAPI middleware、`rate_limit.py` | `test_rate_limit.py`、`test_api.py` | rate limit 是单进程内存状态；多副本需要共享限流器。 |
@@ -218,7 +218,7 @@
 | 第三方登记、系统卡、数据卡、威胁模型、限制 | `已实现` | `docs/governance/` | `test_governance.py` | 法律、安全与供应商条款需要人工定期审核。 |
 | Model/prompt/schema/version change policy | `部分实现` | component/prompt/engine/schema 版本和 ADR | tests verify current contracts | 无自动 comparability migration、变更审批 UI 或旧 artifact 批量重验证。 |
 | 偏差与公平控制 | `部分实现` | 参数化合成 persona，不使用真实受保护属性；治理文档 | cognition schemas/tests | 无跨语言/persona 公平评估集与真人 blind review。 |
-| 隐私：最少收集、无真实交易、原文不落盘、PII/Secret 初筛 | `部分实现` | Event Pack service、`security/content.py`、BYOK store、data card | `test_content_security.py`、`test_control_plane.py`、`test_cognition.py` | 扫描只覆盖已登记类别；无全面 DLP、删除请求、数据主体流程、隐私影响评估和硬件 secret vault。 |
+| 隐私：最少收集、无真实交易、原文受限暂存、PII/Secret 初筛与凭据隔离 | `部分实现` | Event Pack service、`security/content.py`、临时 BYOK store、管理员加密 credential vault、data card | content/control-plane/cognition/auth tests | 普通 Key 不落库；管理员持久 Key 仅以认证密文入库且排除浏览器、日志、审计和导出。扫描只覆盖已登记类别；无全面 DLP、隐私影响评估、硬件 secret vault 或完成演练的主密钥轮换。 |
 | 红队攻击注册表 | `已实现` | `governance/redteam.py` | `test_governance.py` | 当前 API 明确把全部用例标为 `NOT_RUN`，直到附可核验证据。 |
 | 发布门与人工证据类型隔离 | `已实现` | `governance/release_gate.py` | `test_governance.py`、`test_control_plane.py` | 当前 release gate 正确保持 blocked；不妨碍受限课程 Demo。 |
 | Incident response 与单实验 invalidation | `部分实现` | `docs/governance/incident-response.md`、单实验 invalidation API/DB/audit gate | `test_api.py`、`test_database.py` | 单实验结果可保留证据并阻断后续使用；按版本/时间/模型批量查找与 invalidation、通知系统和具名演练仍未完成。 |
@@ -255,7 +255,7 @@
 3. **动态认知耦合**：现有多轮 PIT 序列已接入时点证据、有限社交馈送和上一轮记忆；若研究问题需要更强耦合，下一步是 seed-specific 内生市场重观察、阈值/事件触发更新，以及让经审核的 `public_message` 进入传播。每次决策仍必须缓存、版本化并经过确定性风险层。
 4. **从有界代理 Study 到验证型研究**：预注册 Study、全因子/LHS、8 类负对照、10 类消融、common seeds、Holm 与探索性敏感性已有 artifact，但认知臂使用冻结 tape，若干移除臂是最近可执行代理，且 `historicalValidityEstablished` 永远为 false。下一步是实现字面 subsystem removal/真实 provider 对比、Sobol/Morris 等全局敏感性，并用许可明确的历史数据与独立研究证据提升主张。
 5. **真实用户证据**：由目标分析师/学生完成任务测试与七个信任问题；记录成功率、时间、误读和修复。没有这一证据不能宣称“陌生用户可独立完成”。
-6. **生产安全与运维证据**：完成人工红队、许可证审查、TLS/日志/内存密钥检查、SQLite 异地备份与恢复演练，并补齐按版本/模型/时间窗口批量 invalidation；如承载私有数据，再增加身份认证、组织 RBAC、对象授权和完整 PII/数据主体工作流。
+6. **生产安全与运维证据**：完成人工红队、许可证审查、TLS/日志/内存密钥检查、管理员密文与主密钥分离/轮换/泄漏演练、SQLite 异地备份与恢复演练，并补齐按版本/模型/时间窗口批量 invalidation；如承载私有数据，再增加组织 RBAC、对象授权和完整 PII/数据主体工作流。
 7. **市场制度和性能边界**：只有在产品主张需要时，再实现真正的 auction/halt/latency 状态机、多资产或大规模 worker；当前单资产课程服务器约束必须继续公开。
 
 ## 13. 可接受的当前发布标签

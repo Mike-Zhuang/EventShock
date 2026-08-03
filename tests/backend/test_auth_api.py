@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import ClassVar
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 import backend.app.main as mainModule
@@ -96,11 +97,16 @@ class CapturingMailer:
 def configureProduction(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (
         "EVENTSHOCK_AUTH_SECRET_FILE",
+        "EVENTSHOCK_ADMIN_API_KEY_ENCRYPTION_KEY_FILE",
         "EVENTSHOCK_SMTP_PASSWORD_FILE",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv("EVENTSHOCK_AUTH_SECRET", AUTH_SECRET)
+    monkeypatch.setenv(
+        "EVENTSHOCK_ADMIN_API_KEY_ENCRYPTION_KEY",
+        Fernet.generate_key().decode("ascii"),
+    )
     monkeypatch.setenv("EVENTSHOCK_ADMIN_EMAIL", ADMIN_EMAIL)
     monkeypatch.setenv("EVENTSHOCK_SMTP_HOST", "smtp.example.com")
     monkeypatch.setenv("EVENTSHOCK_SMTP_PORT", "465")
@@ -222,6 +228,235 @@ def test_production_auth_cookie_csrf_owner_migration_and_session_only_api_key(
     assert b"temporary-api-key" not in (tmp_path / "eventshock.db").read_bytes()
 
 
+def test_configured_admin_can_persist_replace_and_delete_encrypted_api_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configureProduction(monkeypatch)
+    monkeypatch.setattr(mainModule, "SmtpVerificationMailer", CapturingMailer)
+    adminId = bootstrapTestAdmin(tmp_path)
+    persistentApiKey = "administrator-persistent-provider-key-7391"
+
+    with TestClient(createApp(tmp_path), base_url="https://testserver") as client:
+        login = client.post(
+            "/api/v1/auth/login",
+            json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD, "language": "en"},
+        )
+        assert login.status_code == 200
+        csrfToken = login.json()["csrfToken"]
+        acceptCurrentTerms(client, csrfToken)
+        mutationHeaders = {
+            "X-CSRF-Token": csrfToken,
+            "Origin": "https://testserver",
+        }
+
+        initial = client.get("/api/v1/admin/llm-credential")
+        assert initial.status_code == 200
+        assert initial.json() == {
+            "available": True,
+            "configured": False,
+            "storageScope": "ADMIN_SERVER_ENCRYPTED",
+            "provider": None,
+            "model": None,
+            "thinkingEnabled": None,
+            "maxTokens": None,
+            "advancedParameters": None,
+            "credentialHint": None,
+            "persistedAt": None,
+            "updatedAt": None,
+        }
+
+        missingCsrf = client.put(
+            "/api/v1/admin/llm-credential",
+            json={
+                "currentPassword": ADMIN_PASSWORD,
+                "provider": "zhipu",
+                "model": "glm-4.5-air",
+                "apiKey": persistentApiKey,
+                "thinkingEnabled": False,
+                "maxTokens": 2_048,
+                "advancedParameters": {},
+            },
+        )
+        assert missingCsrf.status_code == 403
+
+        wrongPassword = client.put(
+            "/api/v1/admin/llm-credential",
+            headers=mutationHeaders,
+            json={
+                "currentPassword": "wrong password",
+                "provider": "zhipu",
+                "model": "glm-4.5-air",
+                "apiKey": persistentApiKey,
+                "thinkingEnabled": False,
+                "maxTokens": 2_048,
+                "advancedParameters": {},
+            },
+        )
+        assert wrongPassword.status_code == 403
+        assert wrongPassword.json()["error"]["code"] == "ADMIN_REAUTHENTICATION_FAILED"
+
+        saved = client.put(
+            "/api/v1/admin/llm-credential",
+            headers=mutationHeaders,
+            json={
+                "currentPassword": ADMIN_PASSWORD,
+                "provider": "zhipu",
+                "model": "glm-4.5-air",
+                "apiKey": persistentApiKey,
+                "thinkingEnabled": False,
+                "maxTokens": 2_048,
+                "advancedParameters": {},
+            },
+        )
+        assert saved.status_code == 200, saved.json()
+        assert saved.json()["configured"] is True
+        assert saved.json()["credentialHint"] == "••••7391"
+        assert saved.json()["storageScope"] == "ADMIN_SERVER_ENCRYPTED"
+        assert persistentApiKey not in saved.text
+
+        activeConfig = client.get("/api/v1/llm/config")
+        assert activeConfig.status_code == 200
+        assert activeConfig.json()["configured"] is True
+        assert activeConfig.json()["credential_source"] == "ADMIN_SERVER_ENCRYPTED"
+        assert persistentApiKey not in activeConfig.text
+
+        database = Database(tmp_path / "eventshock.db")
+        with database.connection() as connection:
+            encryptedPayload = str(
+                connection.execute(
+                    """
+                    SELECT encrypted_payload FROM auth_persistent_llm_credentials
+                    WHERE user_id=?
+                    """,
+                    (adminId,),
+                ).fetchone()[0]
+            )
+
+        exported = client.post(
+            "/api/v1/account/data-export",
+            headers=mutationHeaders,
+            json={"password": ADMIN_PASSWORD},
+        )
+        assert exported.status_code == 200
+        assert persistentApiKey not in exported.text
+        assert encryptedPayload not in exported.text
+
+        logout = client.post("/api/v1/auth/logout", headers=mutationHeaders)
+        assert logout.status_code == 204
+
+    databasePath = tmp_path / "eventshock.db"
+    databaseBytes = databasePath.read_bytes()
+    walPath = Path(f"{databasePath}-wal")
+    if walPath.exists():
+        databaseBytes += walPath.read_bytes()
+    assert persistentApiKey.encode("utf-8") not in databaseBytes
+
+    # 新建应用实例模拟服务重启；同一主密钥必须恢复管理员的持久凭据。
+    with TestClient(createApp(tmp_path), base_url="https://testserver") as restartedClient:
+        login = restartedClient.post(
+            "/api/v1/auth/login",
+            json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD, "language": "en"},
+        )
+        assert login.status_code == 200
+        csrfToken = login.json()["csrfToken"]
+        assert login.json()["legalAcceptance"]["required"] is False
+        mutationHeaders = {
+            "X-CSRF-Token": csrfToken,
+            "Origin": "https://testserver",
+        }
+
+        restored = restartedClient.get("/api/v1/llm/config")
+        assert restored.status_code == 200
+        assert restored.json()["credential_source"] == "ADMIN_SERVER_ENCRYPTED"
+        assert restored.json()["credential_hint"] == "••••7391"
+
+        wrongDelete = restartedClient.request(
+            "DELETE",
+            "/api/v1/admin/llm-credential",
+            headers=mutationHeaders,
+            json={"currentPassword": "wrong password"},
+        )
+        assert wrongDelete.status_code == 403
+        assert wrongDelete.json()["error"]["code"] == "ADMIN_REAUTHENTICATION_FAILED"
+        temporaryOverride = restartedClient.put(
+            "/api/v1/llm/config",
+            headers=mutationHeaders,
+            json={
+                "provider": "zhipu",
+                "model": "glm-4.5-air",
+                "apiKey": "temporary-provider-key-before-delete",
+                "thinkingEnabled": False,
+                "maxTokens": 2_048,
+                "advancedParameters": {},
+            },
+        )
+        assert temporaryOverride.status_code == 200
+        assert temporaryOverride.json()["credential_source"] == "SESSION"
+        deleted = restartedClient.request(
+            "DELETE",
+            "/api/v1/admin/llm-credential",
+            headers=mutationHeaders,
+            json={"currentPassword": ADMIN_PASSWORD},
+        )
+        assert deleted.status_code == 200
+        assert deleted.json()["configured"] is False
+        assert restartedClient.get("/api/v1/llm/config").json()["configured"] is False
+
+    database = Database(databasePath)
+    with database.connection() as connection:
+        storedCount = connection.execute(
+            "SELECT COUNT(*) FROM auth_persistent_llm_credentials WHERE user_id=?",
+            (adminId,),
+        ).fetchone()[0]
+    assert storedCount == 0
+
+
+def test_admin_persistent_credential_password_reauthentication_is_rate_limited(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configureProduction(monkeypatch)
+    monkeypatch.setattr(mainModule, "SmtpVerificationMailer", CapturingMailer)
+    bootstrapTestAdmin(tmp_path)
+
+    with TestClient(createApp(tmp_path), base_url="https://testserver") as client:
+        login = client.post(
+            "/api/v1/auth/login",
+            json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD, "language": "en"},
+        )
+        assert login.status_code == 200
+        csrfToken = login.json()["csrfToken"]
+        acceptCurrentTerms(client, csrfToken)
+        headers = {
+            "X-CSRF-Token": csrfToken,
+            "Origin": "https://testserver",
+        }
+        payload = {
+            "currentPassword": "incorrect administrator password",
+            "provider": "zhipu",
+            "model": "glm-4.5-air",
+            "apiKey": "administrator-provider-key-for-rate-limit",
+            "thinkingEnabled": False,
+            "maxTokens": 2_048,
+            "advancedParameters": {},
+        }
+
+        responses = [
+            client.put(
+                "/api/v1/admin/llm-credential",
+                headers=headers,
+                json=payload,
+            )
+            for _index in range(6)
+        ]
+
+    assert [response.status_code for response in responses[:5]] == [403] * 5
+    assert responses[5].status_code == 429
+    assert responses[5].json()["error"]["code"] == "RATE_LIMIT_EXCEEDED"
+    assert responses[5].headers["Retry-After"]
+
+
 def test_legal_gate_blocks_workspace_reads_and_writes_but_allows_recovery_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -312,6 +547,8 @@ def test_email_registration_reset_and_user_data_isolation(
         assert client.get("/api/v1/scenarios").json()["items"] == []
         adminResponse = client.get("/api/v1/admin/users")
         assert adminResponse.status_code == 403, adminResponse.json()
+        adminCredentialResponse = client.get("/api/v1/admin/llm-credential")
+        assert adminCredentialResponse.status_code == 403
 
         client.post(
             "/api/v1/auth/logout",

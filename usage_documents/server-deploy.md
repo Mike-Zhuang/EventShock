@@ -38,7 +38,7 @@ Internet :80/:443
 - 实验状态接口使用 SSE；宝塔 Nginx 的 EventShock 代理配置必须关闭响应缓冲，保留长连接相关请求头，并且不能缓存 `/api/v1/experiments/*/events`。
 - SQLite 保存在 Docker 命名卷 `eventshock-data`；重新构建应用镜像不会删除该卷。
 - 最小部署证据也保存在同一持久卷的 `/data/deployment-status.json`。同步脚本在宿主机侧原子替换该文件，应用只通过治理 GET 接口读取，不提供写接口；容器重启或镜像切换不会删除它。
-- 长期认证随机密钥与 SMTP 密码只保存在服务器 `/opt/eventshock/shared/secrets`，以只读文件挂载给固定 UID `10001` 的应用；真实值不进入 Git、Compose 环境变量、镜像或部署日志。
+- 长期认证随机密钥、SMTP 密码与管理员 API 凭据加密主密钥只保存在服务器 `/opt/eventshock/shared/secrets`，以只读文件挂载给固定 UID `10001` 的应用；真实值不进入 Git、Compose 环境变量、镜像或部署日志。管理员实际供应商 API Key 不放在该目录，而是由应用以该独立主密钥加密后仅将密文写入 SQLite。
 - 每个发布目录都生成独立的 `.release.env`，应用镜像标签形如 `eventshock-app:<release-id>`。上一版本不会因下一次构建而被同名镜像覆盖。
 
 第 9 节说明如何在不中断现有 HTTPS 的前提下完成宝塔 Nginx 接入。Caddy 直连仅作为首次引导和故障诊断模式，不是本项目要求的最终监测拓扑。
@@ -168,9 +168,9 @@ EVENTSHOCK_GITHUB_REPOSITORY=Mike-Zhuang/EventShock
 
 配置文件位于 `/opt/eventshock/shared/github-sync.env`，由 root 拥有且权限为 `0600`。新安装默认跟踪 `main`；安装器不会覆盖已经存在的配置，因此旧服务器升级后必须人工确认该值。仓库为公有仓库，配置中不应出现 GitHub Token、密码或部署密钥。
 
-### 5.1 首次配置登录与邮件密钥
+### 5.1 首次配置登录、邮件与管理员凭据加密密钥
 
-真实密码不得写入仓库、`.env.example`、Docker 环境变量或 SSH 命令参数。先建立受限目录；应用固定使用 UID/GID `10001`，只允许读取两个长期密钥文件：
+真实密码不得写入仓库、`.env.example`、Docker 环境变量或 SSH 命令参数。先建立受限目录；应用固定使用 UID/GID `10001`，最终只允许读取三个长期密钥文件。先人工配置认证与 SMTP 两项：
 
 ```bash
 sudo install -d -o root -g 10001 -m 0750 /opt/eventshock/shared/secrets
@@ -186,6 +186,8 @@ printf '%s\n' "${smtpPassword}" \
 unset smtpPassword
 ```
 
+第三个文件 `admin-api-key-encryption-key` 是用于 Fernet 认证加密的 32 字节 URL-safe Base64 主密钥，不是供应商 API Key。`deploy-server.sh` 会在文件不存在时从 `/dev/urandom` 幂等生成 44 字节密钥，通过同目录硬链接原子安装为 `root:10001 0440`，并在每次部署前严格验证；已存在的文件（包括不安全的符号链接）绝不会被自动覆盖。不要手工删除或替换已经用于加密数据的主密钥。
+
 在 root 专用的 `/opt/eventshock/shared/.env` 中只填写非敏感配置和密钥目录路径；以下值都是占位示例：
 
 ```dotenv
@@ -200,7 +202,7 @@ EVENTSHOCK_SMTP_SENDER=sender@example.com
 EVENTSHOCK_SECRETS_DIR=/opt/eventshock/shared/secrets
 ```
 
-旧服务器的共享 `.env` 不会被安装器覆盖，升级时必须人工补入上述固定部署状态路径；部署脚本会在构建前校验它，缺失或指向其他路径都会安全终止。
+旧服务器的共享 `.env` 不会被安装器覆盖，升级时必须人工补入上述固定部署状态路径；主密钥文件由新版部署脚本在首次升级时生成并验证，不需要把主密钥或其容器路径写入共享 `.env`。主密钥的宿主机路径固定为 `/opt/eventshock/shared/secrets/admin-api-key-encryption-key`，Compose 在容器内固定设置 `EVENTSHOCK_ADMIN_API_KEY_ENCRYPTION_KEY_FILE=/run/secrets/eventshock/admin-api-key-encryption-key`。文件缺失、权限不安全或格式错误都会安全终止发布。
 
 首次发布还需要一个只允许 root 读取的一次性管理员初始密码。它不挂载为应用可读密钥，也不设置成环境变量；新版本通过容器健康检查后，部署脚本用标准输入把它交给管理员引导命令，事务成功后立即删除：
 
@@ -220,7 +222,9 @@ sudo find /opt/eventshock/shared/secrets -maxdepth 1 -type f \
   -printf '%u:%g %m %f\n' | sort
 ```
 
-预期目录为 `root:10001 750`，使容器 UID/GID `10001` 只能进入受限目录；`auth-secret`、`smtp-password` 为 `root:10001 440`，一次性管理员文件为 `root:root 400`，因此应用即使看见文件名也不能读取初始密码，且整个挂载在容器内为只读。部署脚本会在构建和启动前逐项验证这些所有者、权限、文件类型、大小及共享环境配置，任何偏差都会终止发布。管理员引导失败时部署会回滚并保留 `.once` 文件以便安全重试；成功时该文件必须消失。不要在共享配置中增加 `EVENTSHOCK_ADMIN_BOOTSTRAP_PASSWORD` 或 `EVENTSHOCK_ADMIN_BOOTSTRAP_PASSWORD_FILE`。
+预期目录为 `root:10001 750`，使容器 UID/GID `10001` 只能进入受限目录；`auth-secret`、`smtp-password`、`admin-api-key-encryption-key` 为 `root:10001 440`，一次性管理员文件为 `root:root 400`，因此应用即使看见文件名也不能读取初始密码，且整个挂载在容器内为只读。部署脚本会在构建和启动前逐项验证这些所有者、权限、文件类型、大小及共享环境配置，任何偏差都会终止发布。管理员引导失败时部署会回滚并保留 `.once` 文件以便安全重试；成功时该文件必须消失。不要在共享配置中增加 `EVENTSHOCK_ADMIN_BOOTSTRAP_PASSWORD` 或 `EVENTSHOCK_ADMIN_BOOTSTRAP_PASSWORD_FILE`。
+
+`admin-api-key-encryption-key` 必须进入受控的主机 Secret 备份，并与 SQLite 备份分开保管。丢失该主密钥后，现有 `auth_persistent_llm_credentials` 密文无法恢复；泄露该主密钥时，应立即停止外部模型调用、轮换供应商 API Key 与主密钥，并删除或重新加密旧密文。主机 root、Docker 管理员和应用进程能够读取或使用主密钥，仍属于明确的信任边界；本设计不应被描述为“只有管理员本人技术上可知”。
 
 安装完成后，可先做只读检查：
 

@@ -23,6 +23,8 @@ _SENSITIVE_COLUMNS = frozenset(
         "csrf_hash",
         "code_hash",
         "checkpoint_blob",
+        "encrypted_payload",
+        "key_id",
     }
 )
 
@@ -234,6 +236,7 @@ class AccountPrivacyService:
                 ("event_pack_drafts", "owner_user_id=?", userId),
                 ("custom_event_packs", "owner_user_id=?", userId),
                 ("auth_user_preferences", "user_id=?", userId),
+                ("auth_persistent_llm_credentials", "user_id=?", userId),
                 ("auth_legal_acceptance_events", "user_id=?", userId),
                 ("auth_legal_acceptances", "user_id=?", userId),
                 ("auth_sessions", "user_id=?", userId),

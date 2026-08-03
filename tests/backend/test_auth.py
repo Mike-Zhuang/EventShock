@@ -46,6 +46,10 @@ EXPECTED_LEGAL_DOCUMENT_HASHES = {
         "en": "e2f35d51083e428d41161664ba8fa25c923cd48cd0642514ac42cbf751d8ffc6",
         "zh-CN": "f574915018118876d614cd69c88cc4d8f607acf479827a129b1a5dfd1d2c4a22",
     },
+    "2026-08-03-v3": {
+        "en": "2c5e215cbc06a53fa4c61cf0df0567ed57a36a9e36e1f4fde397823c949f2566",
+        "zh-CN": "d1b45f4a5cbe28626e024e13664a0488c2f04f8f79cb4598f24d995bc838b803",
+    },
 }
 
 

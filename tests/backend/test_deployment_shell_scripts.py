@@ -370,6 +370,25 @@ def testDeployServerBacksUpSqliteAtomicallyAndRetainsThreeBackups() -> None:
     assert "for stale_backup in backups[3:]:" in script
 
 
+def testAdminApiKeyEncryptionKeyProvisioningPrecedesDeploymentValidation() -> None:
+    script = readScript("deploy-server.sh")
+    ensureBody = script.split("ensure_admin_api_key_encryption_key() {", 1)[1].split(
+        "\n}\n\nvalidate_auth_configuration() {",
+        1,
+    )[0]
+    deployRelease = script.split("deploy_release() {", 1)[1].split("\n}\n\nmain() {", 1)[0]
+
+    assert "普通目录且不能是符号链接" in ensureBody
+    assert '"0:10001:750"' in ensureBody
+    assert ensureBody.index('[[ -e "${ADMIN_API_KEY_ENCRYPTION_KEY_FILE}" ]]') < (
+        ensureBody.index("head -c 32 /dev/urandom")
+    )
+    assert 'ln -- "${temporaryPath}" "${ADMIN_API_KEY_ENCRYPTION_KEY_FILE}"' in ensureBody
+    assert deployRelease.index("ensure_admin_api_key_encryption_key") < deployRelease.index(
+        "validate_auth_configuration"
+    )
+
+
 def testDeployServerPublishesCurrentOnlyAfterContainerAndPublicShaChecks() -> None:
     script = readScript("deploy-server.sh")
     deployRelease = script.split("deploy_release() {", 1)[1].split("\n}\n\nmain() {", 1)[0]

@@ -78,6 +78,12 @@ from backend.app.cognition.models import (
     TrustProfile,
     VolatilityRegime,
 )
+from backend.app.cognition.persistent_credentials import (
+    AdminPersistentCredentialVault,
+    AdminPersistentCredentialView,
+    PersistentCredentialUnavailableError,
+    adminCredentialReference,
+)
 from backend.app.cognition.policy import (
     CognitiveOrderIntent,
     DeterministicOrderPolicyConfig,
@@ -188,6 +194,10 @@ __all__ = [
     "CostSettlement",
     "CognitiveOrderIntent",
     "CredentialNotConfiguredError",
+    "AdminPersistentCredentialVault",
+    "AdminPersistentCredentialView",
+    "PersistentCredentialUnavailableError",
+    "adminCredentialReference",
     "DeterministicOrderPolicyConfig",
     "Direction",
     "DeepSeekRestGateway",

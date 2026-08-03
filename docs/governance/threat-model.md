@@ -2,13 +2,13 @@
 
 ## 范围与状态
 
-本威胁模型覆盖浏览器、Caddy、FastAPI、SQLite、Event Pack、导出、智谱模型调用、内存 BYOK、仿真内核和自托管服务器。它是工程团队的当前威胁清单，不是独立渗透测试或安全认证。
+本威胁模型覆盖浏览器、Caddy、FastAPI、SQLite、Event Pack、导出、模型供应商调用、普通用户内存 BYOK、指定管理员加密持久凭据、仿真内核和自托管服务器。它是工程团队的当前威胁清单，不是独立渗透测试或安全认证。
 
 独立安全审查状态：`PENDING_HUMAN_EVIDENCE`。
 
 ## 受保护资产
 
-- 用户提供的智谱 API Key。
+- 用户提供的模型供应商 API Key、管理员凭据密文及其独立加密主密钥。
 - 匿名 Session 的 Event Pack 草稿、审核记录、场景、实验和导出。
 - Canonical Event Pack 的事实、来源层级、knownAt 和校验值。
 - 模型提示词、Schema、缓存键、决策和评估 artifact。
@@ -22,10 +22,13 @@
 flowchart LR
     U["Browser and anonymous session"] -->|"HTTPS"| C["Caddy"]
     C --> A["FastAPI application"]
-    A --> D["SQLite control plane"]
+    A --> D["SQLite control plane and encrypted admin credential"]
     A --> E["Deterministic simulation"]
     A --> K["In-memory BYOK store"]
-    K -->|"Bearer credential"| Z["Zhipu API"]
+    S["Root-managed read-only encryption key"] --> A
+    D -->|"authenticated ciphertext"| A
+    K -->|"Bearer credential"| Z["Allowlisted provider API"]
+    A -->|"transiently decrypted bearer credential"| Z
     U -->|"Untrusted source text"| A
     A -->|"Delimited untrusted JSON"| Z
     Z -->|"Untrusted model JSON"| A
@@ -50,7 +53,8 @@ flowchart LR
 - 服务器操作系统、Docker、DNS 和云账户由用户控制。
 - HTTPS 证书由 Caddy 自动申请和续期。
 - 没有真实交易连接或资金接口。
-- BYOK 只在进程内存中保存，且 API 不回显完整 Key。
+- 普通用户 BYOK 只在进程内存中保存；只有部署指定管理员可主动保存一份认证加密密文。API 永不回显完整 Key。
+- 主机 root、Docker 管理员、能读取主密钥的运维人员和运行中应用进程属于信任边界；数据库密文不是针对这些主体的防护。
 - 匿名 Session ID 不承担强身份认证。
 - 用户不会上传必须满足医疗、金融隐私或其他受监管保密要求的数据。
 
@@ -69,7 +73,7 @@ flowchart LR
 | Cost exhaustion | 反复触发重试、repair 或大输出 | 最大 3 次 transport attempt、1 次 repair、max_tokens、API rate limit、缓存 | 缺少全局美元预算和 Provider 日度限额，`CONTROL_GAP` |
 | Source tier promotion | T4/T5 内容冒充 T1 FACT | SourceTier 与 InformationType 约束、T4/T5 FACT 拒绝、人工审核 | 来源元数据仍可能被录错或伪造 |
 | Export traversal | ID 或文件名包含父目录跳转 | Session 绑定数据库查找、服务器固定 ZIP entry 名、无用户控制路径 | 需要完整恶意 ID 回归和 ZIP 消费端审查 |
-| Secret disclosure | Key 出现在 API、异常、repr、日志、DB 或 ZIP | 内存存储、TTL、`repr=False`、掩码视图、Caddy 删除 Session Header 日志 | Crash dump、Host 内存、代理和第三方日志需人工检查，`PENDING_HUMAN_EVIDENCE` |
+| Secret disclosure | Key 出现在 API、异常、repr、日志、浏览器存储、SQLite 明文字段或 ZIP；攻击者同时取得管理员密文和主密钥 | 普通用户内存 TTL、指定管理员 Fernet 密文、独立只读主密钥、owner 校验、`repr=False`、掩码视图、导出排除、Caddy 删除 Session Header 日志 | Host root/Docker/应用进程、Crash dump、备份共置、代理和第三方日志需人工检查，`PENDING_HUMAN_EVIDENCE` |
 
 对应机器可执行定义位于 `backend/app/governance/redteam.py`。定义存在不代表测试已运行。
 
@@ -106,7 +110,7 @@ Python 依赖锁定到具体版本，Python 与 Caddy 镜像使用 digest。应�
 - 增加账号、组织或多租户敏感数据。
 - 接入真实交易、经纪商或支付工具。
 - 允许 LLM 调用写操作工具。
-- 保存 BYOK 到磁盘或外部 Secret 服务。
+- 向普通用户开放持久 BYOK、改变主密钥/加密算法、迁移或扩展持久凭据表。
 - 接入真实社交用户和个人数据。
 - 公布授权行情、指数数据或新闻全文。
 - 将单进程部署扩展为分布式 Worker。
@@ -116,7 +120,7 @@ Python 依赖锁定到具体版本，Python 与 Caddy 镜像使用 digest。应�
 
 - 完整十类红队运行 artifact：`NOT_EVALUATED`
 - 主机与容器渗透/配置审查：`PENDING_HUMAN_EVIDENCE`
-- Secret 在日志、Crash Dump 与 Host 内存中的复核：`PENDING_HUMAN_EVIDENCE`
+- Secret 在日志、SQLite/WAL、备份、Crash Dump、容器挂载与 Host 内存中的复核：`PENDING_HUMAN_EVIDENCE`
 - 全局模型成本预算：`CONTROL_GAP`
 - 强身份认证：`OUT_OF_SCOPE_FOR_CURRENT_ANONYMOUS_DEMO`
 - 批量 artifact invalidation：`CONTROL_GAP`

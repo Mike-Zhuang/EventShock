@@ -3,6 +3,7 @@ import type {
   AccountDeletionReceipt,
   AdminActivity,
   AdminActivityPage,
+  AdminLlmCredentialView,
   AdminUserPage,
   AdminUserStatistics,
   AdminUserSummary,
@@ -3010,9 +3011,53 @@ export function normalizeLlmConfig(value: unknown): LlmConfigView {
     thinkingEnabled: asBoolean(read(value, 'thinkingEnabled', 'thinking_enabled')),
     maxTokens: asNumber(read(value, 'maxTokens', 'max_tokens')),
     advancedParameters,
-    credentialHint: asOptionalString(read(value, 'credentialHint', 'credential_hint')),
+    credentialHint: normalizeCredentialHint(read(value, 'credentialHint', 'credential_hint')),
+    credentialSource: (() => {
+      const source = asOptionalString(read(value, 'credentialSource', 'credential_source'));
+      return source === 'SESSION' || source === 'ADMIN_SERVER_ENCRYPTED' ? source : undefined;
+    })(),
     expiresAt: asOptionalString(read(value, 'expiresAt', 'expires_at')),
   };
+}
+
+export function normalizeAdminLlmCredential(value: unknown): AdminLlmCredentialView {
+  if (!isRecord(value)) {
+    throw new TypeError('Administrator model credential response is not an object.');
+  }
+  const advancedValue = read(value, 'advancedParameters', 'advanced_parameters');
+  const advancedRecord = isRecord(advancedValue) ? advancedValue : {};
+  const configured = asBoolean(read(value, 'configured')) ?? false;
+  const storageScope = asOptionalString(read(value, 'storageScope', 'storage_scope'));
+  if (storageScope !== 'ADMIN_SERVER_ENCRYPTED') {
+    throw new TypeError('Administrator model credential storage scope is invalid.');
+  }
+  return {
+    available: asBoolean(read(value, 'available')) ?? false,
+    configured,
+    storageScope,
+    provider: asLlmProviderId(read(value, 'provider')),
+    model: asOptionalString(read(value, 'model')),
+    thinkingEnabled: asBoolean(read(value, 'thinkingEnabled', 'thinking_enabled')),
+    maxTokens: asNumber(read(value, 'maxTokens', 'max_tokens')),
+    advancedParameters: {
+      temperature: asNumber(read(advancedRecord, 'temperature')),
+      topP: asNumber(read(advancedRecord, 'topP', 'top_p')),
+      presencePenalty: asNumber(read(advancedRecord, 'presencePenalty', 'presence_penalty')),
+      frequencyPenalty: asNumber(read(advancedRecord, 'frequencyPenalty', 'frequency_penalty')),
+      seed: asNumber(read(advancedRecord, 'seed')),
+      timeoutSeconds: asNumber(read(advancedRecord, 'timeoutSeconds', 'timeout_seconds')),
+    },
+    credentialHint: normalizeCredentialHint(read(value, 'credentialHint', 'credential_hint')),
+    persistedAt: asOptionalString(read(value, 'persistedAt', 'persisted_at')),
+    updatedAt: asOptionalString(read(value, 'updatedAt', 'updated_at')),
+  };
+}
+
+function normalizeCredentialHint(value: unknown): string | undefined {
+  const hint = asOptionalString(value);
+  // API 只能展示四个固定掩码字符和最多四位 ASCII 后缀；任何异常响应都
+  // 失败关闭为不显示，避免后端回归时把完整凭据误当作 hint 渲染。
+  return hint && /^••••[A-Za-z0-9_-]{4}$/.test(hint) ? hint : undefined;
 }
 
 export function normalizeLlmConnectionTest(value: unknown): LlmConnectionTest {

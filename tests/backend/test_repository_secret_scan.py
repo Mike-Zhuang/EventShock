@@ -42,6 +42,7 @@ def test_secret_scanner_allows_documented_placeholders_and_ci_fixtures() -> None
             'password = "change-me-before-production"',
             'secret = "ci-auth-secret-with-at-least-thirty-two-bytes"',
             'password = "ValidPassword123!"',
+            'currentPassword = "irrelevant-after-session-expiry"',
         )
     )
 

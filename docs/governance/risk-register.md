@@ -19,7 +19,7 @@
 | R-006 | Action overreach | LLM 输出订单、数量、账本修改或工具调用 | Low | Critical | Belief-only Schema、Deterministic Policy、无真实工具 | 禁用模型路线、阻断 Intent | Market/Platform | 未来增加工具会显著提高风险 |
 | R-007 | Schema drift | Unknown Version 或额外字段进入系统 | Medium | High | Literal Version、extra=forbid、Rule fallback | Reject、Repair、ABSTAIN | LLM Lead | Provider 稳定 ID 仍可能漂移 |
 | R-008 | Cross-session 访问 | Session A 读取 Session B 状态或 Key | Medium | Critical | Session-bound queries、内存 Key、掩码视图 | 停服、清 Key、审计、轮换 Session | Platform Lead | 匿名 Session 不是认证，`CONTROL_GAP` for sensitive use |
-| R-009 | API Key 泄漏 | Key 出现在 Response、Log、DB、ZIP 或 Crash | Medium | Critical | Memory-only、TTL、repr=False、masked view、Log filtering | 清除、吊销、扫描影响面、通知 | Platform Lead | Host/Crash 审查 `PENDING_HUMAN_EVIDENCE` |
+| R-009 | API Key 泄漏 | Key 出现在 Response、Log、浏览器存储、SQLite 明文、ZIP 或 Crash；管理员密文与主密钥同时泄露 | Medium | Critical | 普通用户 Memory-only/TTL；指定管理员 Fernet 密文、独立只读主密钥、owner gate、repr=False、masked view、Log/导出过滤 | 停止外部调用，清除/删除凭据，在供应商侧吊销，轮换供应商 Key 与受影响主密钥，扫描 SQLite/WAL/备份/日志/Crash 影响面并通知 | Platform Lead | Host、Docker、备份分离、轮换与 Crash 审查 `PENDING_HUMAN_EVIDENCE` |
 | R-010 | Cost exhaustion | Provider Calls、Token 或账单异常增加 | High | High | Max Attempts、One Repair、Max Tokens、Cache、Rate limit | 关闭 Live LLM、Provider Budget、Rule-only | LLM/Platform | 全局美元预算 `CONTROL_GAP` |
 | R-011 | Source tier promotion | Social/Synthetic 内容成为 T1 FACT | Medium | Critical | Typed SourceTier、T4/T5 FACT Reject、Human Review | Quarantine Claim、修正来源、Invalidate | Data Lead | 元数据伪造仍需人工核实 |
 | R-012 | 数据许可违规 | 原文或行情进入公开仓库/ZIP | Medium | Critical | Link-only、Synthetic Market、Third-party register | 移除公开访问、调查 Fork/Artifact、法律复核 | Data Lead | 许可审查 `PENDING_HUMAN_EVIDENCE` |

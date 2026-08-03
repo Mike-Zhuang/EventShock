@@ -3,7 +3,9 @@ import {
   AccordionItem,
   Button,
   InlineNotification,
+  Modal,
   NumberInput,
+  PasswordInput,
   Select,
   SelectItem,
   Tag,
@@ -12,10 +14,11 @@ import {
 } from '@carbon/react';
 import { CheckCircle, FloppyDisk, Key, Plug, Trash } from '@phosphor-icons/react';
 import { useEffect, useMemo, useState } from 'react';
-import { api } from '../api/client';
+import { ApiError, api } from '../api/client';
 import type {
   AdvancedModelParameterName,
   AdvancedModelParameters,
+  AdminLlmCredentialView,
   CognitionEvaluationRun,
   LlmCatalog,
   LlmConfigView,
@@ -29,9 +32,30 @@ import { ErrorPanel, ExplainedLabel, LoadingPanel, Notice, PageHeader, Parameter
 import { useI18n } from '../i18n';
 import { getPageGuide } from '../page-guidance';
 import { getParameterHelp } from '../parameter-help';
+import { useAuth } from '../state/auth-context';
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function adminCredentialMessage(error: unknown, isZh: boolean): string {
+  if (error instanceof ApiError) {
+    if (error.code === 'ADMIN_REAUTHENTICATION_FAILED') {
+      return isZh ? '当前管理员密码不正确。' : 'The current administrator password is incorrect.';
+    }
+    if (error.code === 'RATE_LIMIT_EXCEEDED') {
+      return isZh
+        ? '管理员服务器密钥操作过于频繁。为防止密码猜测，每个账号和来源地址每小时最多尝试 5 次，请稍后再试。'
+        : 'Administrator server-credential operations are limited to five attempts per account and source address per hour. Try again later.';
+    }
+    if (error.code === 'ADMIN_LLM_CREDENTIAL_UNAVAILABLE'
+      || error.code === 'ADMIN_LLM_CREDENTIAL_STORAGE_UNAVAILABLE') {
+      return isZh
+        ? '服务器加密密钥库当前不可用，请联系服务器管理员检查主密钥。'
+        : 'Encrypted server storage is unavailable. Ask the server operator to check the master key.';
+    }
+  }
+  return messageOf(error);
 }
 
 const ADVANCED_PARAMETER_NAMES: readonly AdvancedModelParameterName[] = [
@@ -187,7 +211,9 @@ function localizeStructuredOutput(mode: string | undefined, isZh: boolean): stri
 
 export function AiConfigurationPage() {
   const { language, t } = useI18n();
+  const { user } = useAuth();
   const isZh = language === 'zh-CN';
+  const isAdmin = user?.role === 'ADMIN';
   const explained = (key: string, label: string) => (
     <ExplainedLabel label={label} explanation={getParameterHelp(key, language) ?? label} />
   );
@@ -200,11 +226,18 @@ export function AiConfigurationPage() {
   const [provider, setProvider] = useState<LlmProviderId>('zhipu');
   const [model, setModel] = useState('glm-5.2');
   const [apiKey, setApiKey] = useState('');
+  const [adminCredential, setAdminCredential] = useState<AdminLlmCredentialView>();
+  const [adminCredentialLoading, setAdminCredentialLoading] = useState(false);
+  const [adminCredentialError, setAdminCredentialError] = useState<string>();
+  const [adminCredentialAction, setAdminCredentialAction] = useState<'save' | 'delete'>();
+  const [adminCurrentPassword, setAdminCurrentPassword] = useState('');
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [maxTokens, setMaxTokens] = useState(2_048);
   const [advancedParameters, setAdvancedParameters] = useState<AdvancedModelParameters>({});
   const [loading, setLoading] = useState(true);
-  const [busyAction, setBusyAction] = useState<'save' | 'test' | 'clear'>();
+  const [busyAction, setBusyAction] = useState<
+    'save' | 'test' | 'clear' | 'save-admin' | 'delete-admin'
+  >();
   const [error, setError] = useState<string>();
   const [testResult, setTestResult] = useState<LlmConnectionTest>();
   const [evaluationRun, setEvaluationRun] = useState<CognitionEvaluationRun>();
@@ -239,6 +272,18 @@ export function AiConfigurationPage() {
             ? requestedMaxTokens
             : Math.min(requestedMaxTokens, outputLimit));
           setAdvancedParameters(configuredModel ? nextConfig.advancedParameters ?? {} : {});
+        }
+      }
+      if (isAdmin) {
+        setAdminCredentialLoading(true);
+        setAdminCredentialError(undefined);
+        try {
+          setAdminCredential(await api.getAdminLlmCredential());
+        } catch (adminLoadError) {
+          setAdminCredential(undefined);
+          setAdminCredentialError(messageOf(adminLoadError));
+        } finally {
+          setAdminCredentialLoading(false);
         }
       }
     } catch (loadError) {
@@ -277,6 +322,9 @@ export function AiConfigurationPage() {
     advancedParameters,
   );
   const hasUnsavedDraft = hasActiveConfig && !hasMatchingConfig;
+  const hasSessionCredential = Boolean(
+    config?.configured && config.credentialSource !== 'ADMIN_SERVER_ENCRYPTED',
+  );
 
   const changeProvider = (nextProviderId: LlmProviderId) => {
     const nextProvider = catalog?.providers.find((item) => item.id === nextProviderId);
@@ -343,6 +391,51 @@ export function AiConfigurationPage() {
     }
   };
 
+  const closeAdminCredentialDialog = () => {
+    if (busyAction === 'save-admin' || busyAction === 'delete-admin') return;
+    setAdminCredentialAction(undefined);
+    setAdminCurrentPassword('');
+  };
+
+  const submitAdminCredentialAction = async () => {
+    if (!adminCredentialAction || !adminCurrentPassword) return;
+    const action = adminCredentialAction;
+    setBusyAction(action === 'save' ? 'save-admin' : 'delete-admin');
+    setAdminCredentialError(undefined);
+    setTestResult(undefined);
+    try {
+      const nextCredential = action === 'save'
+        ? await api.saveAdminLlmCredential({
+          currentPassword: adminCurrentPassword,
+          provider,
+          model,
+          apiKey,
+          thinkingEnabled: effectiveThinkingSetting(selectedModel, thinkingEnabled),
+          maxTokens,
+          advancedParameters,
+        })
+        : await api.deleteAdminLlmCredential({ currentPassword: adminCurrentPassword });
+      setAdminCredential(nextCredential);
+      setConfig(nextCredential.configured ? {
+        configured: true,
+        provider: nextCredential.provider,
+        model: nextCredential.model,
+        thinkingEnabled: nextCredential.thinkingEnabled,
+        maxTokens: nextCredential.maxTokens,
+        advancedParameters: nextCredential.advancedParameters,
+        credentialHint: nextCredential.credentialHint,
+        credentialSource: 'ADMIN_SERVER_ENCRYPTED',
+      } : { configured: false });
+      setApiKey('');
+      setAdminCredentialAction(undefined);
+      setAdminCurrentPassword('');
+    } catch (adminActionError) {
+      setAdminCredentialError(adminCredentialMessage(adminActionError, isZh));
+    } finally {
+      setBusyAction(undefined);
+    }
+  };
+
   const runEvaluation = async (mode: CognitionEvaluationRun['mode']) => {
     setEvaluationBusy(mode);
     setEvaluationRun(undefined);
@@ -385,8 +478,8 @@ export function AiConfigurationPage() {
       <PageHeader
         title={isZh ? 'AI 模型配置' : 'AI Model Configuration'}
         subtitle={isZh
-          ? '选择用于证据抽取与代表性认知智能体的模型供应商。智谱仍是默认选项；密钥仅绑定当前登录会话并短时驻留服务器内存，不写入账户、数据库或浏览器存储。'
-          : 'Choose a model provider for evidence extraction and representative cognitive agents. Zhipu remains the default; the key is bound only to this sign-in session, kept briefly in server memory, and never written to the account, database, or browser storage.'}
+          ? '选择用于证据抽取与代表性认知智能体的模型供应商。普通用户的密钥仅短时驻留服务器内存；管理员还可明确选择服务器加密持久存储，密钥绝不写入浏览器存储或回传明文。'
+          : 'Choose a model provider for evidence extraction and representative cognitive agents. User keys remain temporary server memory; an administrator may explicitly choose encrypted server persistence. Keys are never written to browser storage or returned in plaintext.'}
         guide={getPageGuide('ai', language)}
         actions={<StatusBadge status={hasActiveConfig ? 'CONFIGURED' : 'RULE ONLY'} />}
       />
@@ -422,8 +515,8 @@ export function AiConfigurationPage() {
           hideCloseButton
           title={isZh ? '当前表单是尚未生效的草稿' : 'The current form is an unapplied draft'}
           subtitle={isZh
-            ? `服务器仍使用 ${config?.provider ?? '—'} / ${config?.model ?? '—'}、最大输出 ${config?.maxTokens ?? '—'} token 的临时凭据。重新提交 API Key 前，连接测试和真实模型评估仍针对这套已生效配置。`
-            : `The server still uses the temporary credential for ${config?.provider ?? '—'} / ${config?.model ?? '—'} with a ${config?.maxTokens ?? '—'}-token output limit. Until you submit an API key again, connection tests and live evaluations continue to use that active configuration.`}
+            ? `服务器仍使用 ${config?.provider ?? '—'} / ${config?.model ?? '—'}、最大输出 ${config?.maxTokens ?? '—'} token 的已生效凭据（${config?.credentialSource ?? 'SESSION'}）。提交新密钥前，连接测试和真实模型评估仍针对这套配置。`
+            : `The server still uses the active ${config?.provider ?? '—'} / ${config?.model ?? '—'} credential (${config?.credentialSource ?? 'SESSION'}) with a ${config?.maxTokens ?? '—'}-token output limit. Tests and live evaluations continue to use it until a new credential is submitted.`}
         />
       ) : null}
       {catalog ? (
@@ -443,7 +536,7 @@ export function AiConfigurationPage() {
         <section className="ai-config-panel" aria-labelledby="provider-settings-heading">
           <div className="section-heading">
             <h2 id="provider-settings-heading">{isZh ? '供应商与凭据' : 'Provider and credential'}</h2>
-            <p>{isZh ? '浏览器只把密钥发送到同源后端，不直接请求供应商；退出、过期、切换供应商或服务重启后需要重新填写。' : 'The browser sends the key only to the same-origin backend and never calls the provider directly. Re-enter it after sign-out, expiry, provider changes, or a service restart.'}</p>
+            <p>{isZh ? '浏览器只把密钥发送到同源后端，不直接请求供应商。临时模式在退出、过期、切换供应商或服务重启后需要重新填写；管理员持久模式由服务器加密保管。' : 'The browser sends the key only to the same-origin backend and never calls the provider directly. Temporary mode requires re-entry after sign-out, expiry, provider changes, or restart; administrator persistence is encrypted by the server.'}</p>
           </div>
           <div className="config-form-grid">
             <Select
@@ -492,12 +585,12 @@ export function AiConfigurationPage() {
               type="password"
               labelText={`${selectedProvider?.name ?? provider} API Key`}
               helperText={hasMatchingConfig
-                ? `${isZh ? '当前配置' : 'Current credential'}: ${config?.credentialHint ?? 'hidden'}`
+                ? `${isZh ? '当前配置' : 'Current credential'}: ${config?.credentialHint ?? 'hidden'}${config?.credentialSource === 'ADMIN_SERVER_ENCRYPTED' ? ` · ADMIN_SERVER_ENCRYPTED` : ''}`
                 : hasActiveConfig
                   ? isZh ? '当前表单与已生效配置不同；重新提交密钥后才会切换。' : 'This draft differs from the active configuration; submit a key to switch.'
                   : isZh ? '仅为当前登录会话临时启用；保存后输入框立即清空。' : 'Used temporarily for this sign-in session only; the field clears immediately after saving.'}
               value={apiKey}
-              autoComplete="off"
+              autoComplete="new-password"
               onChange={(event) => setApiKey(event.target.value)}
             />
             <NumberInput
@@ -686,11 +779,100 @@ export function AiConfigurationPage() {
                 hideCloseButton
                 title={isZh ? '固定的安全边界' : 'Fixed security boundary'}
                 subtitle={isZh
-                  ? '不接受自定义 base URL 或请求头，以防止服务端请求伪造（SSRF）和凭据外泄；系统提示词与工具权限由应用版本控制，不能在此改写，以避免权限扩大。API Key 仍只在当前登录的服务器内存中短时保存。'
-                  : 'Custom base URLs and headers are not accepted, preventing server-side request forgery (SSRF) and credential leakage. System prompts and tool permissions remain application-versioned and cannot be overridden here, preventing privilege expansion. The API key still lives briefly in server memory for this sign-in only.'}
+                  ? '不接受自定义 base URL 或请求头，以防止服务端请求伪造（SSRF）和凭据外泄；系统提示词与工具权限由应用版本控制，不能在此改写。普通流程的 Key 仅短时驻留内存；只有管理员主动确认后才会加密持久保存。'
+                  : 'Custom base URLs and headers are not accepted, preventing server-side request forgery (SSRF) and credential leakage. System prompts and tool permissions remain application-versioned. Normal keys remain temporary memory; only an explicit administrator action creates encrypted persistence.'}
               />
             </AccordionItem>
           </Accordion>
+          {isAdmin ? (
+            <section className="admin-credential-state" aria-labelledby="admin-credential-heading">
+              <Key size={20} aria-hidden="true" />
+              <div>
+                <div className="section-heading">
+                  <h3 id="admin-credential-heading">
+                    {isZh ? '管理员服务器密钥库' : 'Administrator server credential'}
+                  </h3>
+                  <p>{isZh
+                    ? '仅管理员可保存、替换或删除。服务器使用独立主密钥加密落盘，API 只返回掩码；主机 root 运维权限仍属于服务器信任边界。'
+                    : 'Only an administrator may save, replace, or delete this credential. The server encrypts it with an independent master key and returns only a mask; host root access remains inside the server trust boundary.'}</p>
+                </div>
+                {adminCredentialLoading ? (
+                  <span>{isZh ? '正在读取服务器密钥状态…' : 'Loading server credential status…'}</span>
+                ) : null}
+                {adminCredentialError ? (
+                  <InlineNotification
+                    kind="error"
+                    lowContrast
+                    hideCloseButton
+                    title={isZh ? '管理员密钥操作失败' : 'Administrator credential action failed'}
+                    subtitle={adminCredentialError}
+                  />
+                ) : null}
+                {adminCredential && !adminCredential.available ? (
+                  <InlineNotification
+                    kind="error"
+                    lowContrast
+                    hideCloseButton
+                    title={isZh ? '服务器加密密钥库不可用' : 'Encrypted server storage is unavailable'}
+                    subtitle={isZh
+                      ? '服务端未配置独立加密主密钥，因此永久保存会失败关闭；临时会话模式仍可使用。'
+                      : 'The server has no independent encryption master key, so persistence fails closed. Temporary session mode remains available.'}
+                  />
+                ) : null}
+                {adminCredential?.configured ? (
+                  <div role="status" aria-live="polite">
+                    <strong>{isZh ? '已加密保存' : 'Encrypted credential stored'}</strong>
+                    <span>
+                      {adminCredential.provider ?? '—'} / {adminCredential.model ?? '—'}
+                      {' · '}{adminCredential.credentialHint ?? '••••'}
+                    </span>
+                    <span><code>{adminCredential.storageScope}</code></span>
+                    <span>{adminCredential.updatedAt
+                      ? new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' })
+                        .format(new Date(adminCredential.updatedAt))
+                      : ''}</span>
+                  </div>
+                ) : !adminCredentialLoading ? (
+                  <span>{isZh ? '尚未在服务器保存管理员 API Key。' : 'No administrator API key is stored on the server.'}</span>
+                ) : null}
+                <div className="ai-config-actions">
+                  <Button
+                    kind="tertiary"
+                    size="sm"
+                    renderIcon={FloppyDisk}
+                    disabled={
+                      !apiKey.trim()
+                      || !adminCredential?.available
+                      || busyAction !== undefined
+                      || !isModelCallable(selectedModel)
+                    }
+                    onClick={() => {
+                      setAdminCredentialError(undefined);
+                      setAdminCurrentPassword('');
+                      setAdminCredentialAction('save');
+                    }}
+                  >
+                    {adminCredential?.configured
+                      ? isZh ? '替换服务器密钥' : 'Replace server credential'
+                      : isZh ? '加密保存到服务器' : 'Save encrypted on server'}
+                  </Button>
+                  <Button
+                    kind="danger--tertiary"
+                    size="sm"
+                    renderIcon={Trash}
+                    disabled={!adminCredential?.configured || busyAction !== undefined}
+                    onClick={() => {
+                      setAdminCredentialError(undefined);
+                      setAdminCurrentPassword('');
+                      setAdminCredentialAction('delete');
+                    }}
+                  >
+                    {isZh ? '删除服务器密钥' : 'Delete server credential'}
+                  </Button>
+                </div>
+              </div>
+            </section>
+          ) : null}
           <div className="ai-config-actions">
             <Button
               renderIcon={FloppyDisk}
@@ -714,10 +896,10 @@ export function AiConfigurationPage() {
             <Button
               kind="danger--tertiary"
               renderIcon={Trash}
-              disabled={!config?.configured || busyAction !== undefined}
+              disabled={!hasSessionCredential || busyAction !== undefined}
               onClick={() => void clear()}
             >
-              {isZh ? '清除密钥' : 'Clear key'}
+              {isZh ? '清除当前会话密钥' : 'Clear session credential'}
             </Button>
           </div>
         </section>
@@ -813,8 +995,11 @@ export function AiConfigurationPage() {
             <div className="credential-state">
               <Key size={20} />
               <div>
-                <strong>{isZh ? '当前登录已有临时凭据' : 'Temporary credential active for this sign-in'}</strong>
+                <strong>{config?.credentialSource === 'ADMIN_SERVER_ENCRYPTED'
+                  ? isZh ? '当前使用管理员服务器密钥' : 'Administrator server credential active'
+                  : isZh ? '当前登录已有临时凭据' : 'Temporary credential active for this sign-in'}</strong>
                 <span>{config?.provider ?? '—'} / {config?.model ?? '—'} · {config?.maxTokens ?? '—'} tokens</span>
+                {config?.credentialSource ? <span><code>{config.credentialSource}</code></span> : null}
                 <span>{config?.expiresAt ? new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(config.expiresAt)) : ''}</span>
               </div>
             </div>
@@ -880,7 +1065,7 @@ export function AiConfigurationPage() {
             {evaluationBusy === 'LIVE_CONFIGURED_MODEL' ? isZh ? '评估模型中' : 'Evaluating model' : isZh ? '运行真实配置模型评估' : 'Run live configured-model evaluation'}
           </Button>
         </div>
-        {!hasActiveConfig ? <Notice>{isZh ? '真实模型评估需要先为当前登录临时填写供应商和型号的 API Key。Key 不写入账户、数据库或浏览器存储；代码 grader 自检不需要密钥。' : 'Live-model evaluation requires a temporary provider API key for this sign-in. The key is never written to the account, database, or browser storage; the code-grader self-test does not require it.'}</Notice> : null}
+        {!hasActiveConfig ? <Notice>{isZh ? '真实模型评估需要先配置供应商和型号的 API Key。普通流程只短时驻留服务器内存；管理员可明确选择服务器加密持久存储。Key 不写入浏览器存储；代码 grader 自检不需要密钥。' : 'Live-model evaluation requires a configured provider API key. Normal credentials remain temporary server memory; an administrator may explicitly choose encrypted server persistence. Keys never enter browser storage, and the code-grader self-test needs no key.'}</Notice> : null}
         {evaluationRun ? (
           <div className="ai-evaluation-result">
             <div className="ai-evaluation-result__summary">
@@ -914,6 +1099,66 @@ export function AiConfigurationPage() {
           </div>
         ) : null}
       </section>
+      {adminCredentialAction ? <Modal
+        open
+        danger={adminCredentialAction === 'delete'}
+        modalLabel={isZh ? '管理员身份复验' : 'Administrator reauthentication'}
+        modalHeading={adminCredentialAction === 'delete'
+          ? isZh ? '删除服务器中的加密 API Key？' : 'Delete the encrypted server API key?'
+          : adminCredential?.configured
+            ? isZh ? '替换服务器中的加密 API Key？' : 'Replace the encrypted server API key?'
+            : isZh ? '加密保存 API Key 到服务器？' : 'Save the API key encrypted on the server?'}
+        primaryButtonText={busyAction === 'save-admin' || busyAction === 'delete-admin'
+          ? isZh ? '处理中' : 'Working'
+          : adminCredentialAction === 'delete'
+            ? isZh ? '确认删除' : 'Delete credential'
+            : isZh ? '确认加密保存' : 'Save encrypted'}
+        secondaryButtonText={isZh ? '取消' : 'Cancel'}
+        primaryButtonDisabled={
+          !adminCurrentPassword
+          || busyAction === 'save-admin'
+          || busyAction === 'delete-admin'
+          || (adminCredentialAction === 'save' && (!apiKey.trim() || !adminCredential?.available))
+        }
+        onRequestClose={closeAdminCredentialDialog}
+        onRequestSubmit={() => void submitAdminCredentialAction()}
+      >
+        <InlineNotification
+          kind={adminCredentialAction === 'delete' ? 'warning' : 'info'}
+          lowContrast
+          hideCloseButton
+          title={adminCredentialAction === 'delete'
+            ? isZh ? '删除后无法由应用恢复' : 'The application cannot recover it after deletion'
+            : isZh ? '服务器只会回传掩码' : 'The server returns only a mask'}
+          subtitle={adminCredentialAction === 'delete'
+            ? isZh
+              ? '删除会移除服务器密文，并清除使用该密钥的当前配置。以后需要重新输入完整 Key。'
+              : 'Deletion removes the server ciphertext and clears the active configuration that uses it. The full key must be entered again later.'
+            : isZh
+              ? '当前输入的完整 Key 将通过同源 HTTPS 发送，使用服务器独立主密钥加密；不会写入浏览器、日志或导出。保存同样会替换此前的管理员服务器密钥。'
+              : 'The entered key is sent over same-origin HTTPS and encrypted with the server master key. It is never written to browser storage, logs, or exports. Saving also replaces any existing administrator server credential.'}
+        />
+        {adminCredentialError ? (
+          <InlineNotification
+            kind="error"
+            lowContrast
+            hideCloseButton
+            title={isZh ? '操作未完成' : 'The action did not complete'}
+            subtitle={adminCredentialError}
+          />
+        ) : null}
+        <PasswordInput
+          id="admin-llm-credential-current-password"
+          labelText={isZh ? '当前管理员密码' : 'Current administrator password'}
+          helperText={isZh ? '用于本次高风险操作的身份复验，不会保存。' : 'Used only to reauthenticate this high-risk action; it is not stored.'}
+          value={adminCurrentPassword}
+          maxLength={128}
+          autoComplete="current-password"
+          required
+          disabled={busyAction === 'save-admin' || busyAction === 'delete-admin'}
+          onChange={(event) => setAdminCurrentPassword(event.target.value)}
+        />
+      </Modal> : null}
     </div>
   );
 }

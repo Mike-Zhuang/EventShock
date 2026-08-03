@@ -725,18 +725,25 @@ def _coreComponents() -> tuple[ComponentRecord, ...]:
         ),
         ComponentRecord(
             componentId="cognition.session-byok-store",
-            name="In-memory session-scoped BYOK store",
+            name="Session BYOK and encrypted administrator credential store",
             kind=ComponentKind.SECRET_CONTROL,
             owner="Full-stack / Platform & Design Lead",
-            purpose="Hold user-provided provider credentials in process memory with expiry and return only a masked configuration view.",
+            purpose=(
+                "Hold ordinary-user credentials in expiring process memory and optionally "
+                "persist only the deployment-configured administrator credential as "
+                "authenticated ciphertext; return masked configuration views only."
+            ),
             materiality=Materiality.CRITICAL,
             version="session-config-store-v1.0.0",
-            schemaRef="sessionId + apiKey -> RuntimeProviderConfig | masked view",
+            schemaRef=(
+                "temporary session reference + apiKey -> runtime config; configured admin "
+                "user -> encrypted envelope | masked view"
+            ),
             inputs=(
                 _input(
                     "apiKey",
                     "opaque provider credential",
-                    "User-provided model-provider API key scoped to one application session.",
+                    "User-provided model-provider API key; ordinary users remain session-scoped, while the configured administrator may explicitly choose encrypted server persistence.",
                     trustBoundary=TrustBoundary.SECRET,
                     containsSecrets=True,
                 ),
@@ -757,6 +764,13 @@ def _coreComponents() -> tuple[ComponentRecord, ...]:
                     "tests/backend/test_cognition.py",
                 ),
                 _control(
+                    "administrator-encrypted-persistence",
+                    "Tests cover configured-admin authorization, rate-limited password reauthentication, authenticated encryption, restart recovery, tamper failure, masking, and export exclusion.",
+                    ValidationStatus.TEST_VERIFIED,
+                    True,
+                    "tests/backend/test_persistent_credentials.py",
+                ),
+                _control(
                     "byok-production-security-review",
                     "A human security review of logs, crash dumps, TLS termination, memory exposure, and host access is not complete.",
                     ValidationStatus.PENDING_HUMAN_EVIDENCE,
@@ -766,16 +780,20 @@ def _coreComponents() -> tuple[ComponentRecord, ...]:
             ),
             limitations=(
                 "Process memory is not a hardware-backed secret vault.",
-                "A process restart clears credentials and interrupts live-model use.",
+                "A process restart clears ordinary-user credentials; only the configured administrator's explicitly persisted credential can be recovered.",
+                "Host root, Docker administrators, and the application process remain inside the server trust boundary.",
                 "Production host, proxy, logging, and memory-access controls need human security review.",
             ),
             fallback=_fallback(
                 ("missing key", "expired key", "cleared session", "provider disabled"),
                 "Disable live provider calls and use cached or rule-only cognition paths.",
-                "No credential is persisted to SQLite, logs, exports, or the repository.",
+                "Ordinary-user credentials never enter SQLite; the configured administrator's credential enters SQLite only as authenticated ciphertext and never enters logs, exports, or the repository.",
             ),
             approvalStatus=ApprovalStatus.PENDING_HUMAN_EVIDENCE,
-            sourceFiles=("backend/app/cognition/config_store.py",),
+            sourceFiles=(
+                "backend/app/cognition/config_store.py",
+                "backend/app/cognition/persistent_credentials.py",
+            ),
         ),
         ComponentRecord(
             componentId="analytics.matched-seed-metrics",
