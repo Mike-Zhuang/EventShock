@@ -221,7 +221,7 @@ describe('API client event stream', () => {
     )));
 
     await expect(api.deleteAdminLlmCredential({
-      currentPassword: 'irrelevant-after-session-expiry',
+      currentPassword: 'dummy-session-expiry',
     })).rejects.toMatchObject({ status: 401 });
 
     expect(listener).toHaveBeenCalledTimes(1);

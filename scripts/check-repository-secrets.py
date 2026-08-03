@@ -66,6 +66,7 @@ _SAFE_VALUE_TOKENS = (
     "ci-",
     "current-password",
     "new-password",
+    "session-expiry",
     "${",
     "{{",
     "{",
