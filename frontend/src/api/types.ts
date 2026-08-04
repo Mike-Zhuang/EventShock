@@ -70,6 +70,8 @@ export interface UserPreferences {
   onboardingVersion?: string;
   onboardingCompletedAt?: string;
   updatedAt?: string;
+  preferredLlmProvider?: LlmProviderId;
+  preferredLlmModel?: string;
 }
 
 export interface LegalConsentInput {
@@ -577,6 +579,7 @@ export interface GuidedEventMetadata {
   summaryZh?: string;
   instrument: string;
   asOf: string;
+  asOfPrecision?: 'DAY' | 'SECOND';
   researchQuestion: string;
 }
 
@@ -599,6 +602,7 @@ export interface GuidedWorkflowProposal {
   nextQuestionOptions: string[];
   readyForHumanReview: boolean;
   blockedReasons: string[];
+  missingFields?: Array<'title' | 'summary' | 'instrument' | 'asOf' | 'researchQuestion'>;
 }
 
 export interface GuidedWorkflowMessage {
@@ -808,6 +812,7 @@ export interface PromptRegistryItem {
 
 export interface LlmConfigView {
   configured: boolean;
+  credentialStatus?: 'ACTIVE' | 'EXPIRED' | 'NOT_CONFIGURED';
   provider?: LlmProviderId;
   model?: string;
   thinkingEnabled?: boolean;
@@ -816,6 +821,7 @@ export interface LlmConfigView {
   credentialHint?: string;
   credentialSource?: 'SESSION' | 'ADMIN_SERVER_ENCRYPTED';
   expiresAt?: string;
+  absoluteExpiresAt?: string;
 }
 
 export interface LlmConfigInput {
@@ -843,6 +849,14 @@ export interface AdminLlmCredentialView {
 
 export interface AdminLlmCredentialInput extends LlmConfigInput {
   currentPassword: string;
+}
+
+export interface AdminLlmCredentialPatchInput {
+  currentPassword: string;
+  model: string;
+  thinkingEnabled: boolean;
+  maxTokens: number;
+  advancedParameters: AdvancedModelParameters;
 }
 
 export interface AdminLlmCredentialDeleteInput {
@@ -1041,6 +1055,13 @@ export interface ScenarioValidation {
   llmCostCapUsd?: number;
   llmPricingStatus?: string;
   llmMinimumCallReservationUsd?: number;
+  checkpointCapacity?: {
+    sampleCount: number;
+    confidence: 'LOW' | 'MEDIUM' | 'HIGH' | string;
+    estimatedStoredBytes?: number;
+    estimatedPairStoredBytes?: number;
+    warning: boolean;
+  };
   interpretationBoundary?: string;
   warnings?: string[];
 }

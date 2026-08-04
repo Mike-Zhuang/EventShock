@@ -123,6 +123,40 @@ describe('PreflightPage 面向用户的枚举与停止规则', () => {
     expect(screen.queryByText(/SpaceX/)).not.toBeInTheDocument();
   });
 
+  it('shows checkpoint capacity as a soft warning instead of blocking launch', () => {
+    const current = vi.mocked(useWorkflow)();
+    const validation = current.validation!;
+    vi.mocked(useWorkflow).mockReturnValue({
+      ...current,
+      validation: {
+        ...validation,
+        checkpointCapacity: {
+          estimatedStoredBytes: 24 * 1024 * 1024,
+          warning: true,
+          confidence: 'MEDIUM',
+          sampleCount: 8,
+        },
+        checks: [
+          ...validation.checks,
+          {
+            id: 'CHECKPOINT_CAPACITY',
+            label: 'CHECKPOINT_CAPACITY',
+            passed: true,
+            severity: 'WARN',
+            detail: 'Measured checkpoint telemetry predicts elevated retained storage usage.',
+          },
+        ],
+      },
+    } as ReturnType<typeof useWorkflow>);
+
+    render(<I18nProvider><PreflightPage navigate={vi.fn()} /></I18nProvider>);
+
+    expect(screen.getByText('24.0 MiB · MEDIUM')).toBeInTheDocument();
+    expect(screen.getByText('Checkpoint storage capacity')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create and start experiment' }))
+      .toBeInTheDocument();
+  });
+
   it('requires an explicit RULE_ONLY switch and starts with the effective scenario', async () => {
     const navigate = vi.fn();
     createAndStartExperiment.mockResolvedValue({ id: 'exp-rule-only' });

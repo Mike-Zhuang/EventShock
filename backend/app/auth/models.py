@@ -69,6 +69,8 @@ class UserPreferences(BaseModel):
     onboardingVersion: str | None = None
     onboardingCompletedAt: datetime | None = None
     updatedAt: datetime | None = None
+    preferredLlmProvider: str | None = Field(default=None, max_length=32)
+    preferredLlmModel: str | None = Field(default=None, max_length=128)
 
 
 class PublicUser(BaseModel):

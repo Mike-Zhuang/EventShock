@@ -59,6 +59,7 @@ import type {
   AccountDeletionReceipt,
   AdminLlmCredentialDeleteInput,
   AdminLlmCredentialInput,
+  AdminLlmCredentialPatchInput,
   AdminLlmCredentialView,
   AdminActivityPage,
   AdminUserPage,
@@ -924,6 +925,15 @@ export const api = {
   async saveAdminLlmCredential(input: AdminLlmCredentialInput): Promise<AdminLlmCredentialView> {
     return normalizeAdminLlmCredential(await requestJson('/v1/admin/llm-credential', {
       method: 'PUT',
+      body: JSON.stringify(input),
+    }));
+  },
+
+  async updateAdminLlmCredential(
+    input: AdminLlmCredentialPatchInput,
+  ): Promise<AdminLlmCredentialView> {
+    return normalizeAdminLlmCredential(await requestJson('/v1/admin/llm-credential', {
+      method: 'PATCH',
       body: JSON.stringify(input),
     }));
   },

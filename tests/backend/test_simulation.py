@@ -4,6 +4,7 @@ from copy import deepcopy
 
 import pytest
 
+from backend.app.service import _compactRunForAggregation, _prepareRunForCheckpoint
 from backend.app.simulation.agents import AgentType, buildPopulation
 from backend.app.simulation.analytics import aggregatePairedResults
 from backend.app.simulation.engine import (
@@ -85,6 +86,30 @@ def test_same_seed_replay_is_byte_stable() -> None:
     assert firstRun["invariants"]["selfTradePrevented"] is True
     assert firstRun["invariants"]["netPosition"] == 0
     assert firstRun["invariants"]["netCashChangeCents"] == 0
+
+
+def test_compact_checkpoint_runs_preserve_published_aggregate_and_trace_selection() -> None:
+    baselineRun = runCapacity(43, 1.0)
+    interventionRun = runCapacity(43, 0.65)
+    expected = aggregatePairedResults([baselineRun], [interventionRun])
+    checkpointBaseline = _prepareRunForCheckpoint(baselineRun)
+    checkpointIntervention = _prepareRunForCheckpoint(interventionRun)
+    compactBaseline = _compactRunForAggregation(checkpointBaseline)
+    compactIntervention = _compactRunForAggregation(checkpointIntervention)
+
+    observed = aggregatePairedResults(
+        [compactBaseline],
+        [compactIntervention],
+        representativeRunLoader=lambda _index: (
+            checkpointBaseline,
+            checkpointIntervention,
+        ),
+    )
+
+    assert len(checkpointBaseline["traces"]) <= 80
+    assert "traces" not in compactBaseline
+    assert "orderExecutionSummary" not in compactBaseline
+    assert observed == expected
 
 
 def test_trace_ordering_and_order_execution_summary_are_explicit() -> None:

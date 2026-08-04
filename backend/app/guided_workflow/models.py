@@ -74,6 +74,7 @@ class ProposedEventMetadata(StrictModel):
     summaryZh: str | None = Field(default=None, max_length=1_000)
     instrument: str = Field(min_length=1, max_length=32, pattern=r"^[A-Z0-9._-]+$")
     asOf: datetime
+    asOfPrecision: Literal["DAY", "SECOND"] = "SECOND"
     researchQuestion: str = Field(min_length=8, max_length=500)
 
 
@@ -123,6 +124,9 @@ class GuidedWorkflowProposal(StrictModel):
     nextQuestionOptions: tuple[str, ...] = Field(default=(), max_length=5)
     readyForHumanReview: bool
     blockedReasons: tuple[str, ...] = Field(default=(), max_length=8)
+    missingFields: tuple[
+        Literal["title", "summary", "instrument", "asOf", "researchQuestion"], ...
+    ] = Field(default=(), max_length=5)
 
     @model_validator(mode="after")
     def validateStageAuthority(self) -> GuidedWorkflowProposal:
@@ -146,6 +150,10 @@ class GuidedWorkflowProposal(StrictModel):
         for query in self.proposedSearchQueries:
             if not 2 <= len(query.strip()) <= 70:
                 raise ValueError("each proposed search query must contain 2 to 70 characters")
+        if self.proposedEventMetadata is not None and self.missingFields:
+            raise ValueError("a complete event metadata proposal cannot declare missing fields")
+        if self.readyForHumanReview and self.missingFields:
+            raise ValueError("a proposal with missing fields cannot be ready for human review")
         return self
 
 

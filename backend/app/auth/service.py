@@ -252,6 +252,24 @@ class AuthService:
         )
         return preferences
 
+    def saveLlmPreference(
+        self,
+        requester: AuthContext,
+        *,
+        provider: str,
+        model: str,
+    ) -> UserPreferences:
+        """记录模型选择但不记录凭据；目录校验由模型配置接口负责。"""
+
+        if not 1 <= len(provider) <= 32 or not 3 <= len(model) <= 128:
+            raise ValueError("model preference is invalid")
+        self.repository.saveLlmPreference(
+            userId=requester.userId,
+            provider=provider,
+            model=model,
+        )
+        return self.repository.getUserPreferences(requester.userId)
+
     async def requestPasswordResetCode(
         self,
         *,

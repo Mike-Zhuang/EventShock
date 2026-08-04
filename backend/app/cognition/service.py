@@ -622,7 +622,9 @@ class CognitionService:
             }
             for message in workflow.messages[-6:]
         ]
+        serverTimeUtc = datetime.now(UTC)
         payload = {
+            "serverTimeUtc": serverTimeUtc.isoformat(),
             "current_stage": workflow.stage.value,
             "requested_language": requestedLanguage,
             "current_draft": workflow.draft.model_dump(mode="json"),
@@ -709,7 +711,36 @@ class CognitionService:
                     "parseCompleted": True,
                 },
             )
-        return result.data
+        proposal = result.data
+        if not isinstance(proposal, GuidedWorkflowProposal):
+            raise ModelGatewayError(
+                FailureCode.SCHEMA_INVALID,
+                "gateway returned the wrong guided-workflow schema",
+            )
+        futureReason = "FUTURE_EVENT_REQUIRES_HUMAN_CONFIRMATION"
+        blockedReasons = tuple(
+            reason for reason in proposal.blockedReasons if reason != futureReason
+        )
+        assistantMessage = proposal.assistantMessage
+        metadata = proposal.proposedEventMetadata
+        if metadata is not None and metadata.asOf > serverTimeUtc:
+            blockedReasons = (*blockedReasons, futureReason)
+            warning = (
+                "这是未来计划事件情景，日期尚未发生；应用候选即表示你已人工确认该时间边界。"
+                if requestedLanguage == "zh-CN"
+                else "This is a planned future-event scenario whose date has not occurred; "
+                "applying the candidate confirms that time boundary."
+            )
+            if warning not in assistantMessage:
+                assistantMessage = f"{warning} {assistantMessage}"[:2_000]
+        proposal = GuidedWorkflowProposal.model_validate(
+            {
+                **proposal.model_dump(mode="python"),
+                "assistantMessage": assistantMessage,
+                "blockedReasons": blockedReasons,
+            }
+        )
+        return proposal
 
     async def generateBeliefDecision(
         self,
@@ -1230,6 +1261,12 @@ class CognitionService:
                     ) from error
                 if resultValidator is not None:
                     resultValidator(result)
+                if (
+                    request.credentialSessionId is not None
+                    and not result.cacheHit
+                    and not result.fallbackUsed
+                ):
+                    self._configStore.markProviderCallSucceeded(request.credentialSessionId)
             except ModelGatewayError as error:
                 if costBudget is not None and reservation is not None:
                     costBudget.failClosed(reservation)
@@ -1292,6 +1329,7 @@ class CognitionService:
             observationHash=observationHash,
             allowedEvidenceIds=allowedEvidenceIds,
             allowedActionValues=allowedActionValues,
+            credentialSessionId=sessionId,
             samplingConfig=SamplingConfig(
                 thinking_enabled=False,
                 do_sample=samplingRequested,

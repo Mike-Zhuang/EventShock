@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from backend.app.auth import (
+    AssistancePreference,
     AuthContext,
     AuthenticationError,
     AuthorizationError,
@@ -16,9 +17,12 @@ from backend.app.auth import (
     AuthService,
     ChallengePurpose,
     ChallengeVerificationError,
+    ExperienceLevel,
+    FirstGoal,
     PasswordPolicyError,
     UserRole,
     UserStatus,
+    WorkspaceMode,
     hashPassword,
     normalizeEmail,
     verifyPassword,
@@ -121,6 +125,43 @@ def _register(service: AuthService, mailer: FakeMailer, email: str) -> str:
         )
     )
     return user.id
+
+
+def test_model_preference_persists_without_storing_api_key(tmp_path: Path) -> None:
+    database, repository, service, mailer, _now = _authFixture(tmp_path)
+    userId = _register(service, mailer, "preference@example.com")
+    repository.saveUserPreferences(
+        userId=userId,
+        experienceLevel=ExperienceLevel.NEW,
+        workspaceMode=WorkspaceMode.GUIDED,
+        assistancePreference=AssistancePreference.STEP_BY_STEP,
+        firstGoal=FirstGoal.TRY_DEMO,
+    )
+
+    assert (
+        repository.saveLlmPreference(
+            userId=userId,
+            provider="zhipu",
+            model="glm-5.2",
+        )
+        is True
+    )
+    repository.initialize()
+    preferences = repository.getUserPreferences(userId)
+
+    assert preferences.preferredLlmProvider == "zhipu"
+    assert preferences.preferredLlmModel == "glm-5.2"
+    with database.connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM auth_user_preferences WHERE user_id=?",
+            (userId,),
+        ).fetchone()
+        columns = {
+            str(column[1]).lower()
+            for column in connection.execute("PRAGMA table_info(auth_user_preferences)")
+        }
+    assert row is not None
+    assert not {"api_key", "apikey", "credential", "secret"}.intersection(columns)
 
 
 def test_legal_document_content_change_requires_intentional_version_snapshot() -> None:

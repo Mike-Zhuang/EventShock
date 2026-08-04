@@ -212,7 +212,7 @@ function localizeStructuredOutput(mode: string | undefined, isZh: boolean): stri
 
 export function AiConfigurationPage() {
   const { language, t } = useI18n();
-  const { user } = useAuth();
+  const { user, preferences } = useAuth();
   const isZh = language === 'zh-CN';
   const isAdmin = user?.role === 'ADMIN';
   const explained = (key: string, label: string) => (
@@ -230,17 +230,25 @@ export function AiConfigurationPage() {
   const [adminCredential, setAdminCredential] = useState<AdminLlmCredentialView>();
   const [adminCredentialLoading, setAdminCredentialLoading] = useState(false);
   const [adminCredentialError, setAdminCredentialError] = useState<string>();
-  const [adminCredentialAction, setAdminCredentialAction] = useState<'save' | 'delete'>();
+  const [adminCredentialAction, setAdminCredentialAction] = useState<
+    'save' | 'update' | 'delete'
+  >();
   const [adminCurrentPassword, setAdminCurrentPassword] = useState('');
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [maxTokens, setMaxTokens] = useState(2_048);
   const [advancedParameters, setAdvancedParameters] = useState<AdvancedModelParameters>({});
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<
-    'save' | 'test' | 'clear' | 'save-admin' | 'delete-admin'
+    'save' | 'test' | 'clear' | 'save-admin' | 'update-admin' | 'delete-admin'
   >();
   const [error, setError] = useState<string>();
   const [testResult, setTestResult] = useState<LlmConnectionTest>();
+  const [currentTimeMs, setCurrentTimeMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setCurrentTimeMs(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
   const [evaluationRun, setEvaluationRun] = useState<CognitionEvaluationRun>();
   const [evaluationBusy, setEvaluationBusy] = useState<CognitionEvaluationRun['mode']>();
   const [evaluationMaximumCases, setEvaluationMaximumCases] = useState(3);
@@ -258,12 +266,18 @@ export function AiConfigurationPage() {
       setConfig(nextConfig);
       setPrompts(nextPrompts);
       const nextProvider = nextCatalog.providers.find((item) => item.id === nextConfig.provider)
+        ?? nextCatalog.providers.find(
+          (item) => !nextConfig.configured && item.id === preferences?.preferredLlmProvider,
+        )
         ?? nextCatalog.providers.find((item) => item.id === nextCatalog.defaultProvider)
         ?? nextCatalog.providers[0];
       if (nextProvider) {
         setProvider(nextProvider.id);
         const configuredModel = nextProvider.models.find((item) => item.id === nextConfig.model);
-        const nextModel = configuredModel ?? selectRecommendedPricedModel(nextProvider);
+        const preferredModel = nextProvider.models.find(
+          (item) => !nextConfig.configured && item.id === preferences?.preferredLlmModel,
+        );
+        const nextModel = configuredModel ?? preferredModel ?? selectRecommendedPricedModel(nextProvider);
         if (nextModel) {
           setModel(nextModel.id);
           setThinkingEnabled(effectiveThinkingSetting(nextModel, nextConfig.thinkingEnabled));
@@ -323,8 +337,28 @@ export function AiConfigurationPage() {
     advancedParameters,
   );
   const hasUnsavedDraft = hasActiveConfig && !hasMatchingConfig;
+  const hasMatchingAdminCredential = configurationMatchesDraft(
+    adminCredential,
+    provider,
+    model,
+    selectedModel,
+    thinkingEnabled,
+    maxTokens,
+    advancedParameters,
+  );
   const hasSessionCredential = Boolean(
     config?.configured && config.credentialSource !== 'ADMIN_SERVER_ENCRYPTED',
+  );
+  const sessionCredentialExpired = Boolean(
+    hasSessionCredential
+    && config?.expiresAt
+    && new Date(config.expiresAt).getTime() <= currentTimeMs
+  );
+  const sessionCredentialExpiresSoon = Boolean(
+    hasSessionCredential
+    && !sessionCredentialExpired
+    && config?.expiresAt
+    && new Date(config.expiresAt).getTime() - currentTimeMs <= 5 * 60 * 1_000,
   );
 
   const changeProvider = (nextProviderId: LlmProviderId) => {
@@ -370,7 +404,9 @@ export function AiConfigurationPage() {
     setError(undefined);
     setTestResult(undefined);
     try {
-      setTestResult(await api.testLlmConfig());
+      const nextTestResult = await api.testLlmConfig();
+      setTestResult(nextTestResult);
+      if (nextTestResult.ok) setConfig(await api.getLlmConfig());
     } catch (testError) {
       setError(messageOf(testError));
     } finally {
@@ -393,7 +429,11 @@ export function AiConfigurationPage() {
   };
 
   const closeAdminCredentialDialog = () => {
-    if (busyAction === 'save-admin' || busyAction === 'delete-admin') return;
+    if (
+      busyAction === 'save-admin'
+      || busyAction === 'update-admin'
+      || busyAction === 'delete-admin'
+    ) return;
     setAdminCredentialAction(undefined);
     setAdminCurrentPassword('');
   };
@@ -401,7 +441,11 @@ export function AiConfigurationPage() {
   const submitAdminCredentialAction = async () => {
     if (!adminCredentialAction || !adminCurrentPassword) return;
     const action = adminCredentialAction;
-    setBusyAction(action === 'save' ? 'save-admin' : 'delete-admin');
+    setBusyAction(
+      action === 'save'
+        ? 'save-admin'
+        : action === 'update' ? 'update-admin' : 'delete-admin',
+    );
     setAdminCredentialError(undefined);
     setTestResult(undefined);
     try {
@@ -415,7 +459,15 @@ export function AiConfigurationPage() {
           maxTokens,
           advancedParameters,
         })
-        : await api.deleteAdminLlmCredential({ currentPassword: adminCurrentPassword });
+        : action === 'update'
+          ? await api.updateAdminLlmCredential({
+            currentPassword: adminCurrentPassword,
+            model,
+            thinkingEnabled: effectiveThinkingSetting(selectedModel, thinkingEnabled),
+            maxTokens,
+            advancedParameters,
+          })
+          : await api.deleteAdminLlmCredential({ currentPassword: adminCurrentPassword });
       setAdminCredential(nextCredential);
       setConfig(nextCredential.configured ? {
         configured: true,
@@ -492,6 +544,28 @@ export function AiConfigurationPage() {
           hideCloseButton
           title={isZh ? '配置操作失败' : 'Configuration action failed'}
           subtitle={error}
+        />
+      ) : null}
+      {config?.credentialStatus === 'EXPIRED' || sessionCredentialExpired ? (
+        <InlineNotification
+          kind="warning"
+          lowContrast
+          hideCloseButton
+          title={isZh ? '临时 API Key 已过期' : 'Temporary API key expired'}
+          subtitle={isZh
+            ? '输入过期前没有成功的供应商调用，或已达到 12 小时绝对上限。请重新填写 Key；模型偏好仍会保留。'
+            : 'No successful provider call renewed the inactivity window, or the 12-hour absolute limit was reached. Enter the key again; your model preference remains saved.'}
+        />
+      ) : null}
+      {sessionCredentialExpiresSoon ? (
+        <InlineNotification
+          kind="warning"
+          lowContrast
+          hideCloseButton
+          title={isZh ? '临时凭据即将过期' : 'Temporary credential expires soon'}
+          subtitle={isZh
+            ? '点击下方“测试并续期”发起一次真实结构化调用；只有调用成功才会续期，单纯打开页面不会续期。'
+            : 'Use “Test and renew” below. Only a successful live structured call renews the inactivity window; viewing this page does not.'}
         />
       ) : null}
       {testResult ? (
@@ -845,6 +919,25 @@ export function AiConfigurationPage() {
                     size="sm"
                     renderIcon={FloppyDisk}
                     disabled={
+                      !adminCredential?.configured
+                      || adminCredential.provider !== provider
+                      || hasMatchingAdminCredential
+                      || busyAction !== undefined
+                      || !isModelCallable(selectedModel)
+                    }
+                    onClick={() => {
+                      setAdminCredentialError(undefined);
+                      setAdminCurrentPassword('');
+                      setAdminCredentialAction('update');
+                    }}
+                  >
+                    {isZh ? '更新模型设置（保留 Key）' : 'Update model settings (keep key)'}
+                  </Button>
+                  <Button
+                    kind="tertiary"
+                    size="sm"
+                    renderIcon={FloppyDisk}
+                    disabled={
                       !apiKey.trim()
                       || !adminCredential?.available
                       || busyAction !== undefined
@@ -893,6 +986,8 @@ export function AiConfigurationPage() {
             >
               {busyAction === 'test'
                 ? isZh ? '测试中' : 'Testing'
+                : sessionCredentialExpiresSoon
+                  ? isZh ? '测试并续期' : 'Test and renew'
                 : hasUnsavedDraft
                   ? isZh ? '测试已生效配置' : 'Test active configuration'
                   : isZh ? '测试 JSON 输出' : 'Test JSON output'}
@@ -1109,20 +1204,33 @@ export function AiConfigurationPage() {
         modalLabel={isZh ? '管理员身份复验' : 'Administrator reauthentication'}
         modalHeading={adminCredentialAction === 'delete'
           ? isZh ? '删除服务器中的加密 API Key？' : 'Delete the encrypted server API key?'
-          : adminCredential?.configured
+          : adminCredentialAction === 'update'
+            ? isZh ? '保留 Key 并更新模型设置？' : 'Keep the key and update model settings?'
+            : adminCredential?.configured
             ? isZh ? '替换服务器中的加密 API Key？' : 'Replace the encrypted server API key?'
             : isZh ? '加密保存 API Key 到服务器？' : 'Save the API key encrypted on the server?'}
-        primaryButtonText={busyAction === 'save-admin' || busyAction === 'delete-admin'
+        primaryButtonText={
+          busyAction === 'save-admin'
+          || busyAction === 'update-admin'
+          || busyAction === 'delete-admin'
           ? isZh ? '处理中' : 'Working'
           : adminCredentialAction === 'delete'
             ? isZh ? '确认删除' : 'Delete credential'
-            : isZh ? '确认加密保存' : 'Save encrypted'}
+            : adminCredentialAction === 'update'
+              ? isZh ? '确认更新' : 'Update settings'
+              : isZh ? '确认加密保存' : 'Save encrypted'}
         secondaryButtonText={isZh ? '取消' : 'Cancel'}
         primaryButtonDisabled={
           !adminCurrentPassword
           || busyAction === 'save-admin'
+          || busyAction === 'update-admin'
           || busyAction === 'delete-admin'
           || (adminCredentialAction === 'save' && (!apiKey.trim() || !adminCredential?.available))
+          || (adminCredentialAction === 'update' && (
+            !adminCredential?.configured
+            || adminCredential.provider !== provider
+            || !isModelCallable(selectedModel)
+          ))
         }
         onRequestClose={closeAdminCredentialDialog}
         onRequestSubmit={() => void submitAdminCredentialAction()}
@@ -1133,14 +1241,20 @@ export function AiConfigurationPage() {
           hideCloseButton
           title={adminCredentialAction === 'delete'
             ? isZh ? '删除后无法由应用恢复' : 'The application cannot recover it after deletion'
-            : isZh ? '服务器只会回传掩码' : 'The server returns only a mask'}
+            : adminCredentialAction === 'update'
+              ? isZh ? '完整 Key 不会离开加密密钥库' : 'The full key stays in encrypted storage'
+              : isZh ? '服务器只会回传掩码' : 'The server returns only a mask'}
           subtitle={adminCredentialAction === 'delete'
             ? isZh
               ? '删除会移除服务器密文，并清除使用该密钥的当前配置。以后需要重新输入完整 Key。'
               : 'Deletion removes the server ciphertext and clears the active configuration that uses it. The full key must be entered again later.'
-            : isZh
-              ? '当前输入的完整 Key 将通过同源 HTTPS 发送，使用服务器独立主密钥加密；不会写入浏览器、日志或导出。保存同样会替换此前的管理员服务器密钥。'
-              : 'The entered key is sent over same-origin HTTPS and encrypted with the server master key. It is never written to browser storage, logs, or exports. Saving also replaces any existing administrator server credential.'}
+            : adminCredentialAction === 'update'
+              ? isZh
+                ? '本次请求只提交模型与推理选项。服务器会重新校验配置并保留现有供应商和加密 API Key。'
+                : 'This request submits only model and inference settings. The server revalidates them while preserving the provider and encrypted API key.'
+              : isZh
+                ? '当前输入的完整 Key 将通过同源 HTTPS 发送，使用服务器独立主密钥加密；不会写入浏览器、日志或导出。保存同样会替换此前的管理员服务器密钥。'
+                : 'The entered key is sent over same-origin HTTPS and encrypted with the server master key. It is never written to browser storage, logs, or exports. Saving also replaces any existing administrator server credential.'}
         />
         {adminCredentialError ? (
           <InlineNotification
@@ -1159,7 +1273,11 @@ export function AiConfigurationPage() {
           maxLength={128}
           autoComplete="current-password"
           required
-          disabled={busyAction === 'save-admin' || busyAction === 'delete-admin'}
+          disabled={
+            busyAction === 'save-admin'
+            || busyAction === 'update-admin'
+            || busyAction === 'delete-admin'
+          }
           onChange={(event) => setAdminCurrentPassword(event.target.value)}
         />
       </Modal> : null}

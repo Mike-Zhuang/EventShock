@@ -420,12 +420,16 @@ describe('API normalizers', () => {
       assistance_preference: 'STEP_BY_STEP',
       first_goal: 'RESEARCH_NEW_EVENT',
       onboarding_version: '2026-07-22-v1',
+      preferred_llm_provider: 'zhipu',
+      preferred_llm_model: 'glm-5.2',
     })).toMatchObject({
       onboardingRequired: false,
       experienceLevel: 'NEW',
       workspaceMode: 'GUIDED',
       assistancePreference: 'STEP_BY_STEP',
       firstGoal: 'RESEARCH_NEW_EVENT',
+      preferredLlmProvider: 'zhipu',
+      preferredLlmModel: 'glm-5.2',
     });
   });
 

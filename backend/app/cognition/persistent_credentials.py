@@ -126,6 +126,45 @@ class AdminPersistentCredentialVault:
             advancedParameters=validatedAdvancedParameters,
             apiKey=apiKey,
         )
+        self._storeEnvelope(envelope)
+        return self.getView(userId)
+
+    def updateConfiguration(
+        self,
+        *,
+        userId: str,
+        model: str,
+        thinkingEnabled: bool,
+        maxTokens: int,
+        advancedParameters: AdvancedModelParameters,
+    ) -> AdminPersistentCredentialView:
+        """保留已加密 Key 和供应商，仅替换通过校验的非秘密模型选项。"""
+
+        self._requireConfiguredAdministrator(userId)
+        row = self._credentialRow(userId)
+        if row is None:
+            raise ValueError("administrator model credential is not configured")
+        current = self._decryptRow(row, expectedUserId=userId)
+        validatedAdvancedParameters = validateProviderConfiguration(
+            provider=current.provider,
+            model=model,
+            thinkingEnabled=thinkingEnabled,
+            maxTokens=maxTokens,
+            advancedParameters=advancedParameters,
+        )
+        envelope = PersistentCredentialEnvelope(
+            ownerUserId=userId,
+            provider=current.provider,
+            model=model,
+            thinkingEnabled=thinkingEnabled,
+            maxTokens=maxTokens,
+            advancedParameters=validatedAdvancedParameters,
+            apiKey=current.apiKey,
+        )
+        self._storeEnvelope(envelope)
+        return self.getView(userId)
+
+    def _storeEnvelope(self, envelope: PersistentCredentialEnvelope) -> None:
         serialized = json.dumps(
             envelope.model_dump(mode="json"),
             sort_keys=True,
@@ -147,10 +186,16 @@ class AdminPersistentCredentialVault:
                     encrypted_payload=excluded.encrypted_payload,
                     updated_at=excluded.updated_at
                 """,
-                (userId, ENCRYPTION_VERSION, self._keyId, encryptedPayload, now, now),
+                (
+                    envelope.ownerUserId,
+                    ENCRYPTION_VERSION,
+                    self._keyId,
+                    encryptedPayload,
+                    now,
+                    now,
+                ),
             )
         self._checkpointWal()
-        return self.getView(userId)
 
     def getView(self, userId: str) -> AdminPersistentCredentialView:
         self._requireConfiguredAdministrator(userId)
@@ -208,6 +253,7 @@ class AdminPersistentCredentialVault:
         envelope = self._decryptRow(row, expectedUserId=userId)
         return SessionProviderConfigView(
             configured=True,
+            credential_status="ACTIVE",
             provider=envelope.provider,
             model=envelope.model,
             thinking_enabled=envelope.thinkingEnabled,

@@ -116,6 +116,10 @@ function preflightCheckLabel(code: string, fallback: string, isZh: boolean): str
       en: 'Borrow and margin controls',
       zh: '借券与保证金控制',
     },
+    CHECKPOINT_CAPACITY: {
+      en: 'Checkpoint storage capacity',
+      zh: '检查点存储容量',
+    },
     LLM_RUNTIME_CONFIG: { en: 'Model runtime configuration', zh: '模型运行配置' },
     LLM_CALL_BUDGET: { en: 'Model-call budget', zh: '模型调用预算' },
     LLM_COST_CONTROL: { en: 'Model cost control', zh: '模型费用控制' },
@@ -336,6 +340,14 @@ export function PreflightPage({ navigate }: { navigate: (view: ViewId) => void }
             <div><dt>{explained('costCap', language === 'zh-CN' ? '最大费用责任上限（非预计账单）' : 'Maximum cost liability (not forecast spend)')}</dt><dd>${(validation.llmCostCapUsd ?? scenario.llmPolicy?.maxCostUsd ?? 0).toFixed(2)} USD</dd></div>
             <div><dt>{language === 'zh-CN' ? '价格核验状态' : 'Pricing verification'}</dt><dd>{pricingStatusLabel(validation.llmPricingStatus ?? (scenario.llmPolicy?.mode === 'RULE_ONLY' ? 'NOT_APPLICABLE' : 'UNAVAILABLE'), isZh)}</dd></div>
             {validation.llmMinimumCallReservationUsd !== undefined ? <div><dt>{language === 'zh-CN' ? '单次调用前最坏预留' : 'Worst-case pre-dispatch reservation'}</dt><dd>${validation.llmMinimumCallReservationUsd.toFixed(6)} USD</dd></div> : null}
+            <div>
+              <dt>{language === 'zh-CN' ? '检查点容量估计' : 'Checkpoint capacity estimate'}</dt>
+              <dd>
+                {validation.checkpointCapacity?.estimatedStoredBytes !== undefined
+                  ? `${(validation.checkpointCapacity.estimatedStoredBytes / 1024 / 1024).toFixed(1)} MiB · ${validation.checkpointCapacity.confidence}`
+                  : language === 'zh-CN' ? '暂无历史样本（低置信度）' : 'No historical sample (low confidence)'}
+              </dd>
+            </div>
             <div><dt>{language === 'zh-CN' ? '数据许可边界' : 'Data-license boundary'}</dt><dd>{language === 'zh-CN' ? '导出来源元数据与哈希，不重新分发来源全文；公开再分发仍需人工许可审核。' : 'Export source metadata and hashes, not full source text. Public redistribution still requires human license review.'}</dd></div>
             <div><dt>{language === 'zh-CN' ? '解释上限' : 'Interpretation boundary'}</dt><dd>{interpretationBoundaryLabel(validation.interpretationBoundary, isZh)}</dd></div>
             <div>

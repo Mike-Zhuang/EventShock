@@ -4610,6 +4610,19 @@ code {
 }
 
 @media (max-width: 760px) {
+  .guided-event-goal-helper__fields {
+    grid-template-columns: 1fr;
+  }
+
+  .guided-event-goal-helper__fields label:has(textarea) {
+    grid-column: auto;
+  }
+
+  .guided-event-goal-helper__actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .fact-review-summary,
   .governance-stat-grid,
   .live-market-status,
@@ -8916,6 +8929,81 @@ code {
 
 .guided-stage-header h2 {
   font-size: 24px;
+}
+
+.guided-event-goal-helper {
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  background: var(--surface-subtle);
+}
+
+.guided-inline-error {
+  display: grid;
+  gap: var(--space-3);
+  justify-items: start;
+}
+
+.guided-proposal__precision {
+  display: block;
+  margin-block-start: 0.25rem;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
+.guided-event-goal-helper > header,
+.guided-event-goal-helper__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.guided-event-goal-helper h3,
+.guided-event-goal-helper p {
+  margin: 0;
+}
+
+.guided-event-goal-helper > p {
+  margin-top: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.guided-event-goal-helper details {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.guided-event-goal-helper__fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.guided-event-goal-helper__fields label {
+  display: grid;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.guided-event-goal-helper__fields label:has(textarea) {
+  grid-column: 1 / -1;
+}
+
+.guided-event-goal-helper__fields input,
+.guided-event-goal-helper__fields textarea {
+  width: 100%;
+  padding: 12px;
+  border: 0;
+  border-bottom: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-primary);
+  font: inherit;
 }
 
 .guided-conversation {

@@ -242,6 +242,47 @@ def test_session_config_store_never_echoes_key_and_expires() -> None:
     assert store.clear("session-a-12345") is False
 
 
+def test_session_config_slides_only_after_successful_provider_call_and_honors_absolute_cap() -> (
+    None
+):
+    now = [1_000.0]
+    store = SessionConfigStore(
+        ttlSeconds=30,
+        absoluteMaxSeconds=60,
+        clock=lambda: now[0],
+    )
+    initial = store.setConfig(
+        sessionId="session-sliding-12345",
+        apiKey=API_KEY,
+        model="glm-5.2",
+        maxTokens=2_048,
+    )
+
+    now[0] = 1_020.0
+    readOnly = store.getView("session-sliding-12345")
+    assert readOnly.expires_at == initial.expires_at
+
+    now[0] = 1_025.0
+    assert store.markProviderCallSucceeded("session-sliding-12345") is True
+    firstRenewal = store.getView("session-sliding-12345")
+    assert firstRenewal.expires_at is not None
+    assert firstRenewal.expires_at.timestamp() == 1_055.0
+
+    now[0] = 1_050.0
+    assert store.markProviderCallSucceeded("session-sliding-12345") is True
+    cappedRenewal = store.getView("session-sliding-12345")
+    assert cappedRenewal.expires_at is not None
+    assert cappedRenewal.absolute_expires_at is not None
+    assert cappedRenewal.expires_at.timestamp() == 1_060.0
+    assert cappedRenewal.absolute_expires_at.timestamp() == 1_060.0
+
+    now[0] = 1_061.0
+    expired = store.getView("session-sliding-12345")
+    assert expired.configured is False
+    assert expired.credential_status == "EXPIRED"
+    assert store.markProviderCallSucceeded("session-sliding-12345") is False
+
+
 def test_official_zhipu_catalog_contains_current_models_and_legacy_marker() -> None:
     modelIds = [model.model_id for model in listZhipuModels()]
 

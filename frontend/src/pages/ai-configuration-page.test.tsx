@@ -21,6 +21,7 @@ vi.mock('../api/client', () => ({
     clearLlmConfig: vi.fn(),
     getAdminLlmCredential: vi.fn(),
     saveAdminLlmCredential: vi.fn(),
+    updateAdminLlmCredential: vi.fn(),
     deleteAdminLlmCredential: vi.fn(),
     runEvaluation: vi.fn(),
   },
@@ -338,6 +339,25 @@ describe('多供应商 AI 配置', () => {
     expect(screen.getByRole('button', { name: 'Use for this sign-in' })).toBeInTheDocument();
   });
 
+  it('页面停留期间也会将已过本地到期时点的临时 Key 标为过期', async () => {
+    vi.mocked(api.getLlmConfig).mockResolvedValue({
+      configured: true,
+      credentialStatus: 'ACTIVE',
+      credentialSource: 'SESSION',
+      provider: 'zhipu',
+      model: 'glm-5.2',
+      thinkingEnabled: false,
+      maxTokens: 2_048,
+      advancedParameters: {},
+      expiresAt: '2000-01-01T00:00:00Z',
+    });
+
+    render(<I18nProvider><AiConfigurationPage /></I18nProvider>);
+
+    expect(await screen.findByText('Temporary API key expired')).toBeInTheDocument();
+    expect(screen.queryByText('Temporary credential expires soon')).not.toBeInTheDocument();
+  });
+
   it('管理员复验密码后把密钥加密保存到服务器且浏览器不持久化明文', async () => {
     authState.role = 'ADMIN';
     const user = userEvent.setup();
@@ -428,5 +448,51 @@ describe('多供应商 AI 配置', () => {
       .toBeInTheDocument();
     expect(screen.queryByText('The application cannot recover it after deletion'))
       .not.toBeInTheDocument();
+  });
+
+  it('管理员可以保留现有 Key 并只更新模型设置', async () => {
+    authState.role = 'ADMIN';
+    const user = userEvent.setup();
+    vi.mocked(api.getAdminLlmCredential).mockResolvedValue({
+      available: true,
+      configured: true,
+      storageScope: 'ADMIN_SERVER_ENCRYPTED',
+      provider: 'zhipu',
+      model: 'glm-5.2',
+      thinkingEnabled: false,
+      maxTokens: 1_024,
+      advancedParameters: {},
+      credentialHint: '••••test',
+      updatedAt: '2026-08-03T10:00:00Z',
+    });
+    vi.mocked(api.updateAdminLlmCredential).mockResolvedValue({
+      available: true,
+      configured: true,
+      storageScope: 'ADMIN_SERVER_ENCRYPTED',
+      provider: 'zhipu',
+      model: 'glm-5.2',
+      thinkingEnabled: false,
+      maxTokens: 2_048,
+      advancedParameters: {},
+      credentialHint: '••••test',
+      updatedAt: '2026-08-04T10:00:00Z',
+    });
+    render(<I18nProvider><AiConfigurationPage /></I18nProvider>);
+
+    await user.click(await screen.findByRole('button', {
+      name: 'Update model settings (keep key)',
+    }));
+    expect(screen.getByText('The full key stays in encrypted storage')).toBeInTheDocument();
+    await user.type(screen.getByLabelText('Current administrator password'), 'Admin password 123!');
+    await user.click(screen.getByRole('button', { name: 'Update settings' }));
+
+    await waitFor(() => expect(api.updateAdminLlmCredential).toHaveBeenCalledWith({
+      currentPassword: 'Admin password 123!',
+      model: 'glm-5.2',
+      thinkingEnabled: false,
+      maxTokens: 2_048,
+      advancedParameters: {},
+    }));
+    expect(api.saveAdminLlmCredential).not.toHaveBeenCalled();
   });
 });

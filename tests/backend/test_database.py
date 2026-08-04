@@ -8,7 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from backend.app.database import DEFAULT_EXPERIMENT_RETENTION_DAYS, Database
+import backend.app.database as databaseModule
+from backend.app.database import (
+    DEFAULT_EXPERIMENT_RETENTION_DAYS,
+    CheckpointTooLargeError,
+    Database,
+)
 
 
 def test_initialize_marks_interrupted_experiment_retryable(tmp_path: Path) -> None:
@@ -337,6 +342,142 @@ def test_experiment_runtime_and_compressed_checkpoint_round_trip(tmp_path: Path)
         ).fetchone()
     assert row is not None
     assert b'"baselineRuns"' not in row["checkpoint_blob"]
+
+
+@pytest.mark.parametrize("seedCount", [25, 50])
+def test_normalized_checkpoint_pairs_round_trip_without_growing_metadata_blob(
+    tmp_path: Path,
+    seedCount: int,
+) -> None:
+    database = Database(tmp_path / "eventshock.db")
+    database.initialize()
+    experimentId = "exp-normalized-checkpoint"
+    owner = "checkpoint-session"
+    database.createExperiment(
+        experimentId,
+        owner,
+        {"eventPackId": "spacex-synthetic-v1", "seedCount": seedCount},
+        None,
+    )
+    metadata = {
+        "schemaVersion": "2.0.0",
+        "pairStorage": "NORMALIZED_V1",
+        "completedPairs": 0,
+        "cognitionRun": {"signals": []},
+    }
+    database.updateExperiment(
+        experimentId,
+        owner,
+        checkpoint_blob=metadata,
+        completed_pairs=0,
+    )
+    with database.connection() as connection:
+        initialMetadataBytes = len(
+            connection.execute(
+                "SELECT checkpoint_blob FROM experiments WHERE id=?",
+                (experimentId,),
+            ).fetchone()[0]
+        )
+
+    for pairIndex in range(seedCount):
+        seed = 2026070700 + pairIndex
+        telemetry = database.saveExperimentCheckpointPair(
+            experimentId=experimentId,
+            ownerUserId=owner,
+            pairIndex=pairIndex,
+            seed=seed,
+            baselineRun={"seed": seed, "metrics": {"maxSpreadBps": 10 + pairIndex}},
+            interventionRun={"seed": seed, "metrics": {"maxSpreadBps": 12 + pairIndex}},
+            populationSize=56,
+            steps=120,
+        )
+        metadata["completedPairs"] = pairIndex + 1
+        database.updateExperiment(
+            experimentId,
+            owner,
+            checkpoint_blob=metadata,
+            completed_pairs=pairIndex + 1,
+        )
+
+    # 模拟服务进程重启：新实例必须能从 SQLite 恢复元数据和所有配对行。
+    restartedDatabase = Database(tmp_path / "eventshock.db")
+    restartedDatabase.initialize()
+    restored = restartedDatabase.getExperiment(experimentId, owner)
+    with database.connection() as connection:
+        finalMetadataBytes = len(
+            connection.execute(
+                "SELECT checkpoint_blob FROM experiments WHERE id=?",
+                (experimentId,),
+            ).fetchone()[0]
+        )
+    estimate = restartedDatabase.estimateCheckpointCapacity(
+        populationSize=56,
+        steps=120,
+        seedCount=seedCount,
+    )
+
+    assert restored is not None
+    assert restored["checkpoint"]["completedPairs"] == seedCount
+    assert len(restored["checkpointPairs"]) == seedCount
+    assert restored["checkpointPairs"][0]["seed"] == 2026070700
+    assert restored["checkpointPairs"][-1]["seed"] == 2026070700 + seedCount - 1
+    assert telemetry["pairCount"] == seedCount
+    assert finalMetadataBytes - initialMetadataBytes < 32
+    assert estimate["sampleCount"] == seedCount
+    assert estimate["estimatedStoredBytes"] > 0
+
+
+def test_normalized_checkpoint_detects_hash_corruption_and_pair_size_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = Database(tmp_path / "eventshock.db")
+    database.initialize()
+    experimentId = "exp-normalized-corrupt"
+    owner = "checkpoint-session"
+    database.createExperiment(experimentId, owner, {"seedCount": 10}, None)
+    database.updateExperiment(
+        experimentId,
+        owner,
+        checkpoint_blob={
+            "schemaVersion": "2.0.0",
+            "pairStorage": "NORMALIZED_V1",
+            "completedPairs": 1,
+        },
+        completed_pairs=1,
+    )
+    database.saveExperimentCheckpointPair(
+        experimentId=experimentId,
+        ownerUserId=owner,
+        pairIndex=0,
+        seed=101,
+        baselineRun={"seed": 101, "metrics": {}},
+        interventionRun={"seed": 101, "metrics": {}},
+        populationSize=56,
+        steps=120,
+    )
+    with database.writeLock, database.connection() as connection:
+        connection.execute(
+            "UPDATE experiment_checkpoint_pairs SET payload_hash=? WHERE experiment_id=?",
+            ("0" * 64, experimentId),
+        )
+    corrupted = database.getExperiment(experimentId, owner)
+    assert corrupted is not None
+    assert corrupted["checkpointCorrupted"] is True
+    assert corrupted["checkpointErrorCode"] == "CHECKPOINT_CORRUPTED"
+
+    monkeypatch.setattr(databaseModule, "MAX_CHECKPOINT_PAIR_UNCOMPRESSED_BYTES", 256)
+    with pytest.raises(CheckpointTooLargeError, match="reviewed limit"):
+        database.saveExperimentCheckpointPair(
+            experimentId=experimentId,
+            ownerUserId=owner,
+            pairIndex=1,
+            seed=102,
+            baselineRun={"seed": 102, "padding": "x" * 1_000},
+            interventionRun={"seed": 102, "metrics": {}},
+            populationSize=56,
+            steps=120,
+        )
 
 
 def test_retryable_claim_preserves_checkpoint_but_ready_claim_starts_clean(tmp_path: Path) -> None:

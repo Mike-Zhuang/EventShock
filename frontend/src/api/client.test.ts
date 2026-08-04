@@ -212,6 +212,43 @@ describe('API client event stream', () => {
     window.removeEventListener(AUTH_SESSION_EXPIRED_EVENT, listener);
   });
 
+  it('updates administrator model settings without sending provider or API key', async () => {
+    setCsrfToken('csrf-memory-only');
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      available: true,
+      configured: true,
+      storageScope: 'ADMIN_SERVER_ENCRYPTED',
+      provider: 'zhipu',
+      model: 'glm-5.2',
+      credentialHint: '••••7391',
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.updateAdminLlmCredential({
+      currentPassword: 'dummy-current-password',
+      model: 'glm-5.2',
+      thinkingEnabled: false,
+      maxTokens: 4_096,
+      advancedParameters: { temperature: 0.2 },
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/admin/llm-credential',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: expect.not.stringContaining('apiKey'),
+      }),
+    );
+    const requestBody = JSON.parse(
+      (fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.body as string,
+    ) as Record<string, unknown>;
+    expect(requestBody).not.toHaveProperty('provider');
+    expect(requestBody).not.toHaveProperty('apiKey');
+  });
+
   it('expires the session when an administrator credential request receives a real 401', async () => {
     const listener = vi.fn();
     window.addEventListener(AUTH_SESSION_EXPIRED_EVENT, listener);
