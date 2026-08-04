@@ -151,6 +151,11 @@ describe('TraceExplorerPage 稳定目标', () => {
     expect(tradeButton).toBeDefined();
     fireEvent.click(tradeButton!);
     expect(screen.getAllByText('Deleveraging trader').length).toBeGreaterThan(0);
+    const agentIdentity = screen.getByText('agent-1').closest('.trace-agent-identity');
+    expect(agentIdentity).not.toBeNull();
+    expect(agentIdentity?.children).toHaveLength(2);
+    expect(agentIdentity?.children[0]).toHaveTextContent('agent-1');
+    expect(agentIdentity?.children[1]).toHaveTextContent('Deleveraging trader');
     expect(screen.getByText('Order side')).toBeInTheDocument();
     expect(screen.getAllByText('Sell').length).toBeGreaterThan(0);
     expect(screen.getByText('Requested quantity')).toBeInTheDocument();

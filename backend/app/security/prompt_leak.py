@@ -88,6 +88,26 @@ _PUBLIC_OUTPUT_PHRASES = (
     "and not investment advice",
     "这是以合成假设为条件的情景分析不是预测也不构成投资建议",
 )
+_PUBLIC_OUTPUT_PATTERNS = (
+    re.compile(
+        r"\bthis(?:[^\w\u3400-\u9fff]+)is(?:[^\w\u3400-\u9fff]+)scenario"
+        r"(?:[^\w\u3400-\u9fff]+)analysis(?:[^\w\u3400-\u9fff]+)conditional"
+        r"(?:[^\w\u3400-\u9fff]+)on(?:[^\w\u3400-\u9fff]+)synthetic"
+        r"(?:[^\w\u3400-\u9fff]+)assumptions(?:[^\w\u3400-\u9fff]+)not"
+        r"(?:[^\w\u3400-\u9fff]+)a(?:[^\w\u3400-\u9fff]+)prediction"
+        r"(?:[^\w\u3400-\u9fff]+)and(?:[^\w\u3400-\u9fff]+)not"
+        r"(?:[^\w\u3400-\u9fff]+)investment(?:[^\w\u3400-\u9fff]+)advice\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"这是以合成假设为条件的情景分析"
+        r"[\s,，。;；:：!！?？—-]*"
+        r"不是预测"
+        r"[\s,，。;；:：!！?？—-]*"
+        r"也不构成投资建议"
+    ),
+)
+_PROMPT_LEAK_RULE_VERSION = "prompt-leak-v3"
 _COMMON_NGRAM_WORDS = frozenset(
     {
         "about",
@@ -136,9 +156,31 @@ class PromptLeakReason(StrEnum):
 class UnsafeModelOutputError(ValueError):
     """稳定、无原文的模型输出拒绝异常。"""
 
-    def __init__(self, reason: PromptLeakReason) -> None:
+    def __init__(
+        self,
+        reason: PromptLeakReason,
+        *,
+        fieldPath: str = "$",
+        textLength: int = 0,
+        contentDigest: str = "unavailable",
+    ) -> None:
         super().__init__("model output failed deterministic disclosure safety validation")
         self.reason = reason
+        self.fieldPath = fieldPath
+        self.textLength = max(0, textLength)
+        self.contentDigest = contentDigest
+        self.ruleVersion = _PROMPT_LEAK_RULE_VERSION
+
+    def auditMetadata(self) -> dict[str, str | int]:
+        """返回可审计但不包含提示词、模型正文或命中片段的诊断字段。"""
+
+        return {
+            "reason": self.reason.value,
+            "fieldPath": self.fieldPath,
+            "textLength": self.textLength,
+            "contentDigest": self.contentDigest,
+            "ruleVersion": self.ruleVersion,
+        }
 
 
 def _normalizeForComparison(value: str) -> str:
@@ -155,6 +197,8 @@ def _withoutPublicPhrases(value: str) -> str:
     normalized = value
     for phrase in _PUBLIC_OUTPUT_PHRASES:
         normalized = normalized.replace(phrase, " ")
+    for pattern in _PUBLIC_OUTPUT_PATTERNS:
+        normalized = pattern.sub(" ", normalized)
     return " ".join(normalized.split())
 
 
@@ -193,20 +237,24 @@ def _rareNgramDigests(value: str) -> frozenset[bytes]:
     return frozenset(digests)
 
 
-def _iterTextValues(value: Any) -> Iterable[str]:
+def _iterTextValuesWithPaths(value: Any, path: str = "$") -> Iterable[tuple[str, str]]:
+    """遍历结构化输出字符串，并只暴露 schema 风格的安全字段位置。"""
+
     if isinstance(value, str):
-        yield value
+        yield path, value
         return
     if isinstance(value, BaseModel):
-        yield from _iterTextValues(value.model_dump(mode="python"))
+        yield from _iterTextValuesWithPaths(value.model_dump(mode="python"), path)
         return
     if isinstance(value, Mapping):
-        for item in value.values():
-            yield from _iterTextValues(item)
+        for key, item in value.items():
+            safeKey = str(key) if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", str(key)) else "*"
+            yield from _iterTextValuesWithPaths(item, f"{path}.{safeKey}")
         return
     if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
-        for item in value:
-            yield from _iterTextValues(item)
+        for index, item in enumerate(value):
+            yield from _iterTextValuesWithPaths(item, f"{path}[{index}]")
+        return
 
 
 def _iterDecodedBase64Texts(value: str) -> Iterable[str]:
@@ -276,34 +324,52 @@ class PromptLeakValidator:
 
         return _normalizeForComparison(value)
 
-    def validateText(self, value: str) -> None:
-        self._validatePlainText(value)
+    def validateText(self, value: str, *, fieldPath: str = "$") -> None:
+        self._validatePlainText(value, fieldPath=fieldPath)
         for decodedText in _iterDecodedBase64Texts(value):
-            self._validatePlainText(decodedText)
+            self._validatePlainText(decodedText, fieldPath=f"{fieldPath}.decodedBase64")
 
-    def _validatePlainText(self, value: str) -> None:
+    def _raiseUnsafe(
+        self,
+        reason: PromptLeakReason,
+        value: str,
+        *,
+        fieldPath: str,
+    ) -> None:
+        normalized = _normalizeForComparison(value)
+        digest = hashlib.sha256(f"{_PROMPT_LEAK_RULE_VERSION}\0{normalized}".encode()).hexdigest()[
+            :16
+        ]
+        raise UnsafeModelOutputError(
+            reason,
+            fieldPath=fieldPath,
+            textLength=len(value),
+            contentDigest=digest,
+        )
+
+    def _validatePlainText(self, value: str, *, fieldPath: str) -> None:
         if any(
             character in _ZERO_WIDTH_AND_DIRECTIONAL or unicodedata.category(character) == "Cf"
             for character in value
         ):
             # 即使清理后文本看似安全，也不把不可见控制字符带到 Markdown/DOM。
-            raise UnsafeModelOutputError(PromptLeakReason.INVISIBLE_CONTROL)
+            self._raiseUnsafe(PromptLeakReason.INVISIBLE_CONTROL, value, fieldPath=fieldPath)
 
         normalized = _normalizeForComparison(value)
         if _CONTROL_DISCLOSURE_PATTERN.search(normalized):
-            raise UnsafeModelOutputError(PromptLeakReason.PROMPT_CONTROL_LANGUAGE)
+            self._raiseUnsafe(PromptLeakReason.PROMPT_CONTROL_LANGUAGE, value, fieldPath=fieldPath)
         if any(pattern.search(normalized) for pattern in _CREDENTIAL_PATTERNS):
-            raise UnsafeModelOutputError(PromptLeakReason.CREDENTIAL_PATTERN)
+            self._raiseUnsafe(PromptLeakReason.CREDENTIAL_PATTERN, value, fieldPath=fieldPath)
         if _RAW_HTML_PATTERN.search(normalized):
-            raise UnsafeModelOutputError(PromptLeakReason.RAW_HTML)
+            self._raiseUnsafe(PromptLeakReason.RAW_HTML, value, fieldPath=fieldPath)
         if _DANGEROUS_URL_PATTERN.search(normalized):
-            raise UnsafeModelOutputError(PromptLeakReason.DANGEROUS_URL)
+            self._raiseUnsafe(PromptLeakReason.DANGEROUS_URL, value, fieldPath=fieldPath)
 
         comparisonText = _withoutPublicPhrases(normalized)
         if self._containsLongPromptFragment(comparisonText):
-            raise UnsafeModelOutputError(PromptLeakReason.PROMPT_FRAGMENT_OVERLAP)
+            self._raiseUnsafe(PromptLeakReason.PROMPT_FRAGMENT_OVERLAP, value, fieldPath=fieldPath)
         if self._rareNgramDigests & _rareNgramDigests(comparisonText):
-            raise UnsafeModelOutputError(PromptLeakReason.PROMPT_NGRAM_OVERLAP)
+            self._raiseUnsafe(PromptLeakReason.PROMPT_NGRAM_OVERLAP, value, fieldPath=fieldPath)
 
     def validateModelOutput(
         self,
@@ -313,7 +379,8 @@ class PromptLeakValidator:
     ) -> None:
         """检查结构化结果中的全部字符串；异常绝不附带原始字段。"""
 
-        texts = tuple(_iterTextValues(value))
+        textEntries = tuple(_iterTextValuesWithPaths(value))
+        texts = tuple(text for _, text in textEntries)
         secretVariants = frozenset(
             variant
             for secret in protectedSecrets
@@ -324,10 +391,14 @@ class PromptLeakValidator:
             # 同时检查字段拼接，避免模型把密钥拆到相邻结构化字段以绕过单字段校验。
             searchableValues = (*texts, "".join(texts))
             if any(variant in text for text in searchableValues for variant in secretVariants):
-                raise UnsafeModelOutputError(PromptLeakReason.PROTECTED_SECRET)
+                self._raiseUnsafe(
+                    PromptLeakReason.PROTECTED_SECRET,
+                    "".join(texts),
+                    fieldPath="$",
+                )
 
-        for text in texts:
-            self.validateText(text)
+        for fieldPath, text in textEntries:
+            self.validateText(text, fieldPath=fieldPath)
 
     def _containsLongPromptFragment(self, value: str) -> bool:
         if len(value) < _LONG_FRAGMENT_LENGTH:

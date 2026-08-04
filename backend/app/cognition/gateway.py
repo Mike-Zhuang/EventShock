@@ -96,6 +96,7 @@ class ModelGatewayError(RuntimeError):
         attempts: int = 0,
         uncertainBillableAttempts: int = 0,
         repairUsed: bool = False,
+        safeDiagnostics: dict[str, str | int] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -105,6 +106,7 @@ class ModelGatewayError(RuntimeError):
         self.attempts = attempts
         self.uncertainBillableAttempts = uncertainBillableAttempts
         self.repairUsed = repairUsed
+        self.safeDiagnostics = dict(safeDiagnostics or {})
 
 
 class AdvancedModelParameters(StrictFrozenModel):

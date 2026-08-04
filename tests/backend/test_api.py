@@ -249,6 +249,64 @@ def test_unfrozen_pack_blocks_experiment_and_multiple_interventions_are_rejected
     assert multiResponse.json()["error"]["code"] == "REQUEST_VALIDATION_ERROR"
 
 
+def test_scenario_validation_records_question_intervention_alignment(tmp_path: Path) -> None:
+    with TestClient(createApp(tmp_path)) as client:
+        approveAndFreeze(client, SESSION_A)
+        basePayload = experimentPayload()
+        missingConfirmation = client.post(
+            "/api/v1/scenarios/validate",
+            headers={"X-Session-ID": SESSION_A},
+            json=basePayload,
+        )
+        aligned = client.post(
+            "/api/v1/scenarios/validate",
+            headers={"X-Session-ID": SESSION_A},
+            json={
+                **basePayload,
+                "questionInterventionParameter": "marketMakerCapacity",
+            },
+        )
+        mismatched = client.post(
+            "/api/v1/scenarios/validate",
+            headers={"X-Session-ID": SESSION_A},
+            json={
+                **basePayload,
+                "questionInterventionParameter": "socialAmplification",
+            },
+        )
+
+    missingCheck = next(
+        item
+        for item in missingConfirmation.json()["checks"]
+        if item["code"] == "QUESTION_INTERVENTION_ALIGNMENT"
+    )
+    alignedCheck = next(
+        item
+        for item in aligned.json()["checks"]
+        if item["code"] == "QUESTION_INTERVENTION_ALIGNMENT"
+    )
+    mismatchedCheck = next(
+        item
+        for item in mismatched.json()["checks"]
+        if item["code"] == "QUESTION_INTERVENTION_ALIGNMENT"
+    )
+    assert missingConfirmation.status_code == 200
+    assert missingCheck["status"] == "WARN"
+    assert any(
+        warning["code"] == "QUESTION_INTERVENTION_REVIEW_REQUIRED"
+        for warning in missingConfirmation.json()["warnings"]
+    )
+    assert aligned.status_code == 200
+    assert alignedCheck["status"] == "PASS"
+    assert aligned.json()["valid"] is True
+    assert mismatched.status_code == 200
+    assert mismatchedCheck["status"] == "FAIL"
+    assert mismatched.json()["valid"] is False
+    assert any(
+        error["code"] == "QUESTION_INTERVENTION_MISMATCH" for error in mismatched.json()["errors"]
+    )
+
+
 def test_event_pack_review_and_freeze_are_session_isolated(tmp_path: Path) -> None:
     with TestClient(createApp(tmp_path)) as client:
         approveAndFreeze(client, SESSION_A)

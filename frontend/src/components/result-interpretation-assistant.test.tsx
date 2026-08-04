@@ -969,8 +969,16 @@ describe('结果解释助手', () => {
     await user.click(await screen.findByRole('button', { name: '生成解释' }));
     expect(await screen.findByText(/供应商未在时限内完成/)).toBeInTheDocument();
     expect(screen.queryByText('raw provider timeout')).not.toBeInTheDocument();
-    expect(screen.getByText('MODEL_TIMEOUT')).toBeInTheDocument();
-    expect(screen.getByText('REPAIRING')).toBeInTheDocument();
+    expect(screen.getAllByText(/模型未在超时时间内返回/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/服务器正在校验修复后的模型回复/).length).toBeGreaterThan(0);
+    const technicalCodes = screen.getByText('MODEL_TIMEOUT, REPAIRING');
+    expect(technicalCodes).not.toBeVisible();
+    await user.click(screen.getByText('技术详情'));
+    expect(technicalCodes).toBeVisible();
+    const traceId = screen.getByText('trace-safe');
+    expect(traceId).not.toBeVisible();
+    await user.click(screen.getByText('支持诊断信息'));
+    expect(traceId).toBeVisible();
     expect(screen.getByText('已尝试，未采用修复结果')).toBeInTheDocument();
     expect(screen.getByText('计费状态不确定')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '查看重试与费用提示' }));

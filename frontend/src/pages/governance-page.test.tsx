@@ -242,9 +242,20 @@ describe('GovernancePage 生产部署直接证据', () => {
       'href',
       `https://github.com/Mike-Zhuang/EventShock/commit/${GITHUB_MAIN_COMMIT}`,
     );
-    expect(screen.getByRole('heading', { name: 'Five-axis use boundary status' }))
-      .toBeInTheDocument();
-    expect(screen.getByText('Investment decision support')).toBeInTheDocument();
+    const useBoundaryHeading = screen.getByRole('heading', {
+      name: 'Five-axis use boundary status',
+    });
+    expect(useBoundaryHeading).toBeInTheDocument();
+    const useBoundarySection = useBoundaryHeading.closest('section');
+    expect(useBoundarySection).not.toBeNull();
+    const useBoundaryView = within(useBoundarySection as HTMLElement);
+    expect(useBoundaryView.getByText('Investment decision support')).toBeInTheDocument();
+    const prohibitedTag = useBoundaryView.getByText('PROHIBITED').closest('.cds--tag');
+    const blockedTags = useBoundaryView
+      .getAllByText('BLOCKED')
+      .map((item) => item.closest('.cds--tag'));
+    expect(prohibitedTag).toHaveClass('governance-status--prohibited');
+    blockedTags.forEach((tag) => expect(tag).not.toHaveClass('governance-status--prohibited'));
     expect(screen.getByRole('link', { name: 'Review action' })).toHaveAttribute(
       'href',
       '#gate-p0-model-validation-review',

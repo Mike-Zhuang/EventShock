@@ -239,6 +239,9 @@ class ExperimentRequest(StrictModel):
         max_length=500,
     )
     questionZh: str | None = Field(default=None, max_length=500)
+    # 研究问题不会在切换干预时被静默改写。该字段记录用户最后一次明确确认
+    # 问题语义所对应的干预参数，供前后端在进入预检前识别陈旧叙述。
+    questionInterventionParameter: InterventionParameter | None = None
     intervention: InterventionConfig
     seedCount: Literal[10, 25, 50] = 10
     populationSize: int = Field(default=56, ge=14, le=250)

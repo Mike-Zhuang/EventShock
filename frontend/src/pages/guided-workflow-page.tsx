@@ -38,6 +38,8 @@ import {
 import { useI18n } from '../i18n';
 import { useWorkflow } from '../state/workflow-context';
 import { safeDate } from '../utils/format';
+import { SyntheticInstrumentLabel } from '../components/synthetic-instrument-label';
+import { TechnicalCodeDisplay, technicalCodeLabel } from '../components/technical-code';
 
 const STAGES: GuidedStage[] = [
   'EVENT_GOAL',
@@ -334,7 +336,7 @@ function ProposalDetails({
         <dl>
           <div><dt>{isZh ? '标题' : 'Title'}</dt><dd>{isZh ? metadata.titleZh ?? metadata.title : metadata.title}</dd></div>
           <div><dt>{isZh ? '研究问题' : 'Research question'}</dt><dd>{metadata.researchQuestion}</dd></div>
-          <div><dt>{isZh ? '证券代码' : 'Instrument'}</dt><dd><code>{metadata.instrument}</code></dd></div>
+          <div><dt>{isZh ? '证券代码' : 'Instrument'}</dt><dd><SyntheticInstrumentLabel instrument={metadata.instrument} compact /></dd></div>
           <div><dt>{isZh ? '时点边界' : 'Point-in-time cutoff'}</dt><dd>{safeDate(metadata.asOf, isZh ? 'zh-CN' : 'en')}</dd></div>
           <div className="guided-proposal__wide"><dt>{isZh ? '摘要' : 'Summary'}</dt><dd>{isZh ? metadata.summaryZh ?? metadata.summary : metadata.summary}</dd></div>
         </dl>
@@ -932,6 +934,13 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
                     {item.role === 'assistant' ? <Robot size={18} aria-hidden="true" /> : <User size={18} aria-hidden="true" />}
                     <strong>{item.role === 'assistant' ? (isZh ? '引导助手' : 'Guided assistant') : (isZh ? '你' : 'You')}</strong>
                     <time dateTime={item.createdAt}>{safeDate(item.createdAt, language)}</time>
+                    {workflow.language !== language ? (
+                      <Tag type="cool-gray" size="sm">
+                        {isZh
+                          ? `此对话以${workflow.language === 'zh-CN' ? '中文' : '英文'}生成`
+                          : `Conversation generated in ${workflow.language === 'zh-CN' ? 'Chinese' : 'English'}`}
+                      </Tag>
+                    ) : null}
                   </header>
                   {item.role === 'assistant'
                     ? <SafeMarkdown content={item.content} />
@@ -977,8 +986,12 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
                   )}</strong>
                   <span>
                     {isZh
-                      ? `服务器阶段：${currentTurnOperation?.failureStage ?? '等待操作登记'} · 已真实等待 ${turnElapsedSeconds} 秒`
-                      : `Server stage: ${currentTurnOperation?.failureStage ?? 'awaiting operation record'} · Actual wait: ${turnElapsedSeconds} seconds`}
+                      ? `服务器阶段：${currentTurnOperation?.failureStage
+                        ? technicalCodeLabel(currentTurnOperation.failureStage, language)
+                        : '等待操作登记'} · 已真实等待 ${turnElapsedSeconds} 秒`
+                      : `Server stage: ${currentTurnOperation?.failureStage
+                        ? technicalCodeLabel(currentTurnOperation.failureStage, language)
+                        : 'awaiting operation record'} · Actual wait: ${turnElapsedSeconds} seconds`}
                   </span>
                 </div>
               </div>
@@ -1004,17 +1017,25 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
                         <strong>{guidedOperationStatus(operation.status, isZh)}</strong>
                         <span>{safeDate(operation.updatedAt, language)}</span>
                       </div>
-                      <Tag type="red" size="sm">{operation.errorCode ?? 'UNKNOWN'}</Tag>
+                      <Tag
+                        type="red"
+                        size="sm"
+                        title={technicalCodeLabel(operation.errorCode, language)}
+                      >
+                        {technicalCodeLabel(operation.errorCode, language)}
+                      </Tag>
                     </div>
                     {operation.requestMessage ? <p>{operation.requestMessage}</p> : null}
                     <dl>
                       <div>
                         <dt>{isZh ? '供应商请求' : 'Provider request'}</dt>
-                        <dd>{operation.providerRequestId ?? (isZh ? '未记录' : 'Not recorded')}</dd>
+                        <dd>{operation.providerRequestId
+                          ? isZh ? '已记录' : 'Recorded'
+                          : isZh ? '未记录' : 'Not recorded'}</dd>
                       </div>
                       <div>
                         <dt>{isZh ? '最后确认阶段' : 'Last confirmed stage'}</dt>
-                        <dd>{operation.failureStage ?? (isZh ? '未知' : 'Unknown')}</dd>
+                        <dd>{technicalCodeLabel(operation.failureStage, language)}</dd>
                       </div>
                       <div>
                         <dt>{isZh ? '收到 HTTP 响应' : 'HTTP response received'}</dt>
@@ -1031,6 +1052,23 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
                           : isZh ? '否' : 'No'}</dd>
                       </div>
                     </dl>
+                    <details className="guided-operation-technical-details">
+                      <summary>{isZh ? '技术详情' : 'Technical details'}</summary>
+                      <dl>
+                        <div>
+                          <dt>{isZh ? '客户端请求 ID' : 'Client request ID'}</dt>
+                          <dd><code>{operation.clientRequestId}</code></dd>
+                        </div>
+                        <div>
+                          <dt>{isZh ? '供应商请求 ID' : 'Provider request ID'}</dt>
+                          <dd><code>{operation.providerRequestId ?? (isZh ? '未记录' : 'Not recorded')}</code></dd>
+                        </div>
+                      </dl>
+                      <TechnicalCodeDisplay
+                        codes={[operation.errorCode, operation.failureStage]}
+                        language={language}
+                      />
+                    </details>
                     <div className="guided-operation-recovery__actions">
                       {operation.recoveryOptions.includes('RETRY_CACHED_COMMIT') ? (
                         <Button
@@ -1117,21 +1155,32 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
                     : `Model call and recovery history (${turnOperations.length})`}
                 </summary>
                 <ol>
-                  {turnOperations.map((operation) => (
+                  {turnOperations.map((operation, index) => (
                     <li key={operation.clientRequestId}>
                       <div>
-                        <strong>{guidedOperationStatus(operation.status, isZh)}</strong>
+                        <strong>{isZh
+                          ? `第 ${index + 1} 次调用 · ${guidedOperationStatus(operation.status, isZh)}`
+                          : `Call ${index + 1} · ${guidedOperationStatus(operation.status, isZh)}`}</strong>
                         <time dateTime={operation.updatedAt}>
                           {safeDate(operation.updatedAt, language)}
                         </time>
                       </div>
-                      <code>{operation.clientRequestId}</code>
-                      {operation.supersedesClientRequestId ? (
-                        <span>
-                          {isZh ? '替代调用：' : 'Supersedes: '}
-                          <code>{operation.supersedesClientRequestId}</code>
-                        </span>
-                      ) : null}
+                      <details className="guided-operation-history__technical">
+                        <summary>{isZh ? '技术详情' : 'Technical details'}</summary>
+                        <code>{operation.clientRequestId}</code>
+                        {operation.supersedesClientRequestId ? (
+                          <span>
+                            {isZh ? '替代调用：' : 'Supersedes: '}
+                            <code>{operation.supersedesClientRequestId}</code>
+                          </span>
+                        ) : null}
+                        {operation.providerRequestId ? (
+                          <span>
+                            {isZh ? '供应商请求：' : 'Provider request: '}
+                            <code>{operation.providerRequestId}</code>
+                          </span>
+                        ) : null}
+                      </details>
                     </li>
                   ))}
                 </ol>

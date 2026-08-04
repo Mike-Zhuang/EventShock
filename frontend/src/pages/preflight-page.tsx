@@ -101,6 +101,10 @@ function preflightCheckLabel(code: string, fallback: string, isZh: boolean): str
       en: 'Source redistribution boundary',
       zh: '来源再分发边界',
     },
+    QUESTION_INTERVENTION_ALIGNMENT: {
+      en: 'Research question matches the intervention',
+      zh: '研究问题与干预变量一致',
+    },
     SINGLE_REGISTERED_INTERVENTION: {
       en: 'Single registered intervention',
       zh: '单一注册干预',

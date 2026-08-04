@@ -128,6 +128,41 @@ def test_prompt_leak_validator_allows_safe_markdown_and_https_links() -> None:
     )
 
 
+def test_prompt_leak_validator_allows_punctuated_public_interpretation_boundary() -> None:
+    validator = PromptLeakValidator(
+        (
+            "Always begin with the public boundary: This is scenario analysis conditional "
+            "on synthetic assumptions, not a prediction, and not investment advice. "
+            "Then explain only evidence-backed aggregate results.",
+            "固定展示：这是以合成假设为条件的情景分析，不是预测，也不构成投资建议。",
+        )
+    )
+
+    validator.validateText(
+        "**This is scenario analysis conditional on synthetic assumptions — not a "
+        "prediction, and not investment advice.**"
+    )
+    validator.validateText("这是以合成假设为条件的情景分析；不是预测，也不构成投资建议！")
+
+
+def test_prompt_leak_rejection_exposes_only_redacted_audit_metadata() -> None:
+    validator = PromptLeakValidator(("A bounded system policy with unique controls.",))
+    unsafeText = "<script>private-model-body</script>"
+
+    with pytest.raises(UnsafeModelOutputError) as error:
+        validator.validateModelOutput({"answer": unsafeText})
+
+    metadata = error.value.auditMetadata()
+    assert metadata["reason"] == "RAW_HTML"
+    assert metadata["fieldPath"] == "$.answer"
+    assert metadata["textLength"] == len(unsafeText)
+    assert metadata["ruleVersion"] == "prompt-leak-v3"
+    assert isinstance(metadata["contentDigest"], str)
+    assert len(metadata["contentDigest"]) == 16
+    assert unsafeText not in json.dumps(metadata)
+    assert "private-model-body" not in str(error.value)
+
+
 def test_prompt_leak_validator_detects_fragment_from_arbitrary_prompt_offset() -> None:
     prompt = "".join(chr(0x4E00 + index) for index in range(220))
     validator = PromptLeakValidator((prompt,))
@@ -364,6 +399,12 @@ def test_zhipu_blocks_disclosure_before_immutable_cache_write(
                 )
             assert error.value.code is FailureCode.PROMPT_DISCLOSURE_BLOCKED
             assert unsafeText not in str(error.value)
+            assert error.value.safeDiagnostics["reason"] in {
+                "PROMPT_CONTROL_LANGUAGE",
+                "PROTECTED_SECRET",
+            }
+            assert error.value.safeDiagnostics["ruleVersion"] == "prompt-leak-v3"
+            assert unsafeText not in json.dumps(error.value.safeDiagnostics)
 
     asyncio.run(execute())
     assert calls == 1
@@ -441,5 +482,11 @@ def test_service_fail_closes_prompt_disclosure_and_applies_custom_timeout(
     assert error.value.code is FailureCode.PROMPT_DISCLOSURE_BLOCKED
     assert str(error.value) == ("model output failed deterministic disclosure safety validation")
     assert unsafeOutput.source_summary not in str(error.value)
+    assert error.value.safeDiagnostics["reason"] in {
+        "PROMPT_CONTROL_LANGUAGE",
+        "PROTECTED_SECRET",
+    }
+    assert error.value.safeDiagnostics["ruleVersion"] == "prompt-leak-v3"
+    assert unsafeOutput.source_summary not in json.dumps(error.value.safeDiagnostics)
     assert harness.policy is not None
     assert harness.policy.timeout_seconds == 73.0

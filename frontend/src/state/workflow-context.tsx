@@ -68,6 +68,7 @@ export function scenarioContentDigest(scenario: ScenarioDraft): string {
 
 const DEFAULT_SCENARIO: ScenarioDraft = {
   eventPackId: '',
+  questionInterventionParameter: 'marketMakerCapacity',
   intervention: {
     parameter: 'marketMakerCapacity',
     baselineValue: 1,

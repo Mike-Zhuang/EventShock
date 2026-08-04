@@ -184,6 +184,7 @@ export interface CaseSummary {
   description?: string;
   descriptionZh?: string;
   eventPackId?: string;
+  instrument?: string;
   status?: string;
   isSynthetic?: boolean;
   syntheticLabel?: string;
@@ -338,6 +339,7 @@ export interface ScenarioDraft {
   eventPackId: string;
   question?: string;
   questionZh?: string;
+  questionInterventionParameter?: InterventionParameter;
   intervention: InterventionDefinition;
   seedCount: 10 | 25 | 50;
   seedRoot?: number;
@@ -891,6 +893,8 @@ export interface ResultInterpretationAssistantMessage {
   cacheHit: boolean;
   repairUsed: boolean;
   plannerUsed: boolean;
+  semanticValidationStatus?: 'PASSED' | 'REPAIRED' | 'DETERMINISTIC_FALLBACK' | 'NOT_RECORDED';
+  deterministicFallbackUsed?: boolean;
   promptVersion: string;
   latencyMs: number;
   createdAt: string;

@@ -35,6 +35,7 @@ import type {
 } from '../api/types';
 import { api } from '../api/client';
 import { EmptyState, ExplainedLabel, Notice, PageHeader, ParameterHelp, StatusBadge } from '../components/common';
+import { SyntheticInstrumentLabel } from '../components/synthetic-instrument-label';
 import {
   clearScenarioGuidedHandoff,
   readScenarioGuidedHandoff,
@@ -150,6 +151,42 @@ const OUTCOME_OPTIONS = [
   { id: 'orderImbalance', key: 'metric.orderImbalance' as const },
   { id: 'cascadeScore', key: 'metric.cascadeScore' as const },
 ];
+
+const INTERVENTION_QUESTION_NAMES: Record<InterventionParameter, { en: string; zh: string }> = {
+  marketMakerCapacity: { en: 'market-making capacity', zh: '做市能力' },
+  socialAmplification: { en: 'social amplification', zh: '社交放大强度' },
+  stopLossSensitivity: { en: 'stop-loss sensitivity', zh: '止损敏感度' },
+  clarificationDelay: { en: 'clarification delay', zh: '澄清延迟' },
+  liquidityDepthMultiplier: { en: 'liquidity-depth multiplier', zh: '流动性深度乘数' },
+  passiveFlowMultiplier: { en: 'passive-flow multiplier', zh: '被动资金流乘数' },
+  informationLatency: { en: 'information latency', zh: '信息延迟' },
+};
+
+export function buildAlignedInterventionQuestions(
+  parameter: InterventionParameter,
+  instrument: string,
+): Pick<ScenarioDraft, 'question' | 'questionZh' | 'questionInterventionParameter'> {
+  const name = INTERVENTION_QUESTION_NAMES[parameter];
+  const visibleInstrument = instrument.trim() || 'the synthetic instrument';
+  return {
+    question: `Holding the frozen event evidence and all other scenario fields constant, how does changing the synthetic ${name.en} affect ${visibleInstrument}'s simulated market outcomes?`,
+    questionZh: `在冻结事件证据和其他情景字段保持不变的情况下，改变合成${name.zh}会如何影响 ${visibleInstrument} 的模拟市场结果？`,
+    questionInterventionParameter: parameter,
+  };
+}
+
+export function scenarioQuestionNeedsReview(scenario: ScenarioDraft): boolean {
+  return scenario.questionInterventionParameter !== scenario.intervention.parameter;
+}
+
+export function focusScenarioStep(targetId: string): boolean {
+  const target = document.getElementById(targetId);
+  if (!target) return false;
+  const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  target.scrollIntoView?.({ block: 'start', behavior: reducedMotion ? 'auto' : 'smooth' });
+  target.focus({ preventScroll: true });
+  return true;
+}
 
 function numericInputValue(value: string | number): number | undefined {
   const parsed = typeof value === 'number' ? value : Number(value);
@@ -338,6 +375,7 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
   const hasUnsavedContentChanges = !selectedSavedScenario || !draftMatchesSaved;
   const mechanismDisabledCheck = findMechanismDisabledCheck(validation);
   const clarificationClaimId = findClarificationClaimId(eventPack);
+  const questionNeedsReview = scenarioQuestionNeedsReview(scenario);
 
   useEffect(() => {
     if (!mechanismDisabledCheck) return;
@@ -386,6 +424,7 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
       ...scenario,
       eventPackId: guidedHandoff.eventPackId,
       question: guidedHandoff.eventMetadata.researchQuestion,
+      questionInterventionParameter: undefined,
       intervention: {
         parameter: guidedHandoff.intervention.parameter,
         baselineValue: guidedHandoff.intervention.baselineValue,
@@ -411,13 +450,14 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
     && (scenario.seedRoot ?? 2_026_070_700) <= 2_147_483_000
     && (scenario.stoppingRule?.minimumPairs ?? scenario.seedCount) >= 5
     && (scenario.stoppingRule?.minimumPairs ?? scenario.seedCount) <= scenario.seedCount
+    && !questionNeedsReview
     && network.averageDegree < scenario.populationSize
     && (llmPolicy.mode === 'RULE_ONLY' || (
       llmPolicy.representativeAgentCount > 0
       && llmPolicy.representativeAgentCount <= scenario.populationSize
       && llmPolicy.callBudget >= llmPolicy.representativeAgentCount
     ))
-  ), [llmPolicy, network.averageDegree, scenario, selectedOption]);
+  ), [llmPolicy, network.averageDegree, questionNeedsReview, scenario, selectedOption]);
 
   const update = (partial: Partial<ScenarioDraft>) => setScenario({ ...scenario, ...partial });
   const updateIntervention = (partial: Partial<ScenarioDraft['intervention']>) => {
@@ -446,6 +486,7 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
   const selectIntervention = (option: InterventionOption) => {
     setScenario({
       ...scenario,
+      questionInterventionParameter: undefined,
       intervention: {
         parameter: option.parameter,
         baselineValue: option.baselineValue,
@@ -753,16 +794,20 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
           ['intervention', isZh ? '干预' : 'Intervention'],
           ['review', isZh ? '复核' : 'Review'],
         ].map(([id, label], index) => (
-          <a key={id} href={`#scenario-step-${id}`}>
+          <button
+            key={id}
+            type="button"
+            onClick={() => focusScenarioStep(`scenario-step-${id}`)}
+          >
             <span>{index + 1}</span>
             {label}
-          </a>
+          </button>
         ))}
       </nav>
 
       <div className="scenario-layout">
         <div className="scenario-form">
-          <section id="scenario-step-event" className="form-section scenario-step-section">
+          <section id="scenario-step-event" className="form-section scenario-step-section" tabIndex={-1}>
             <div className="form-section__heading">
               <span className="step-kicker">01</span>
               <h2>{isZh ? '事件与研究问题' : 'Event and research question'}</h2>
@@ -771,7 +816,7 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
             <dl className="definition-list definition-list--compact">
               <div><dt>{t('scenario.eventPack')}</dt><dd>{isZh ? eventPack.nameZh ?? eventPack.name : eventPack.name} <StatusBadge status={eventPack.status} /></dd></div>
               <div><dt>{explained('asOf', isZh ? '截止时间 (asOf)' : 'Cutoff (asOf)')}</dt><dd>{eventPack.pointInTime ? new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(eventPack.pointInTime)) : t('common.unavailable')}</dd></div>
-              <div><dt>{explained('instrument', isZh ? '目标证券' : 'Target instrument')}</dt><dd>{eventPack.instrument ?? market.instrumentId}</dd></div>
+              <div><dt>{explained('instrument', isZh ? '目标证券' : 'Target instrument')}</dt><dd><SyntheticInstrumentLabel instrument={eventPack.instrument ?? market.instrumentId} /></dd></div>
             </dl>
             <div className="stacked-fields">
               <TextInput
@@ -779,19 +824,60 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
                 labelText={isZh ? '英文研究问题' : 'English research question'}
                 value={scenario.question ?? t('scenario.questionValue', { parameter: t(selectedOption.labelKey).toLowerCase() })}
                 maxLength={500}
-                onChange={(event) => update({ question: event.target.value })}
+                onChange={(event) => update({
+                  question: event.target.value,
+                  questionInterventionParameter: undefined,
+                })}
               />
               <TextInput
                 id="scenario-question-zh"
                 labelText={isZh ? '中文研究问题（可选）' : 'Chinese research question (optional)'}
                 value={scenario.questionZh ?? ''}
                 maxLength={500}
-                onChange={(event) => update({ questionZh: event.target.value })}
+                onChange={(event) => update({
+                  questionZh: event.target.value,
+                  questionInterventionParameter: undefined,
+                })}
               />
             </div>
+            {questionNeedsReview ? (
+              <div className="scenario-question-review" role="alert">
+                <InlineNotification
+                  kind="warning"
+                  lowContrast
+                  hideCloseButton
+                  title={isZh ? '研究问题需要重新确认' : 'Research question needs review'}
+                  subtitle={isZh
+                    ? '所选干预已变化，系统不会静默改写你的研究问题。请生成与当前干预一致的措辞，或人工确认现有措辞确实仍然适用。完成前不能进入运行前复核。'
+                    : 'The selected intervention changed. The system will not silently rewrite your question. Generate aligned wording or explicitly confirm that the current wording still applies before preflight.'}
+                />
+                <div className="scenario-question-review__actions">
+                  <Button
+                    kind="tertiary"
+                    size="sm"
+                    onClick={() => update(buildAlignedInterventionQuestions(
+                      scenario.intervention.parameter,
+                      eventPack.instrument ?? market.instrumentId,
+                    ))}
+                  >
+                    {isZh ? '生成与当前干预一致的研究问题' : 'Generate aligned research question'}
+                  </Button>
+                  <Button
+                    kind="ghost"
+                    size="sm"
+                    disabled={(scenario.question ?? '').trim().length < 8}
+                    onClick={() => update({
+                      questionInterventionParameter: scenario.intervention.parameter,
+                    })}
+                  >
+                    {isZh ? '保留现有措辞并确认' : 'Keep wording and confirm'}
+                  </Button>
+                </div>
+              </div>
+            ) : null}
           </section>
 
-          <section id="scenario-step-facts" className="form-section scenario-step-section">
+          <section id="scenario-step-facts" className="form-section scenario-step-section" tabIndex={-1}>
             <div className="form-section__heading">
               <span className="step-kicker">02</span>
               <h2>{isZh ? '冻结事实与来源边界' : 'Frozen facts and source boundary'}</h2>
@@ -815,7 +901,7 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
             <Button kind="ghost" size="sm" onClick={() => navigate('pack')}>{isZh ? '返回 Event Pack 审核' : 'Return to Event Pack review'}</Button>
           </section>
 
-          <section id="scenario-step-market" className="form-section scenario-step-section">
+          <section id="scenario-step-market" className="form-section scenario-step-section" tabIndex={-1}>
             <div className="form-section__heading">
               <span className="step-kicker">03</span>
               <h2>{isZh ? '市场与交易制度' : 'Market and trading rules'}</h2>
@@ -830,6 +916,12 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
               <NumberInput id="market-latency-ms" label={isZh ? '基础延迟（ms）' : 'Base latency (ms)'} decorator={parameterHelp('latencyMs', isZh ? '基础延迟（ms）' : 'Base latency (ms)')} min={0} max={60_000} value={market.latencyMs} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) updateMarket({ latencyMs: Math.round(value) }); }} />
               <NumberInput id="market-price-collar" label={isZh ? '价格保护带（bps）' : 'Price collar (bps)'} decorator={parameterHelp('priceCollarBps', isZh ? '价格保护带（bps）' : 'Price collar (bps)')} min={10} max={10_000} value={market.priceCollarBps} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) updateMarket({ priceCollarBps: Math.round(value) }); }} />
             </div>
+            <div className="synthetic-instrument-note">
+              <SyntheticInstrumentLabel instrument={market.instrumentId} />
+              <span>{isZh
+                ? '这里的代码只是合成撮合引擎中的代理标识，不会读取或预测真实证券价格。'
+                : 'This code is only a proxy identifier inside the synthetic matching engine; it does not read or predict real security prices.'}</span>
+            </div>
             <div className="toggle-grid">
               <div className="toggle-with-help">
                 {explained('openingAuction', isZh ? '开盘集合竞价' : 'Opening auction')}
@@ -842,7 +934,7 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
             </div>
           </section>
 
-          <section id="scenario-step-population" className="form-section scenario-step-section">
+          <section id="scenario-step-population" className="form-section scenario-step-section" tabIndex={-1}>
             <div className="form-section__heading">
               <span className="step-kicker">04</span>
               <h2>{isZh ? '智能体人口与资产负债约束' : 'Agent population and balance-sheet constraints'}</h2>
@@ -944,7 +1036,7 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
             <Button kind="ghost" size="sm" onClick={() => navigate('ai')}>{isZh ? '配置 API Key 与测试 JSON 输出' : 'Configure API key and test JSON output'}</Button>
           </section>
 
-          <section id="scenario-step-network" className="form-section scenario-step-section">
+          <section id="scenario-step-network" className="form-section scenario-step-section" tabIndex={-1}>
             <div className="form-section__heading">
               <span className="step-kicker">05</span>
               <h2>{isZh ? '信息传播网络' : 'Information diffusion network'}</h2>
@@ -995,7 +1087,7 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
             </div>
           </section>
 
-          <section id="scenario-step-review" className="form-section scenario-step-section">
+          <section id="scenario-step-review" className="form-section scenario-step-section" tabIndex={-1}>
             <div className="form-section__heading">
               <span className="step-kicker">07</span>
               <h2>{isZh ? '实验设计与复核' : 'Experiment design and review'}</h2>

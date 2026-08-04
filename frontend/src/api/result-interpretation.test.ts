@@ -40,6 +40,8 @@ const VALID_RESPONSE = {
     cache_hit: false,
     repair_used: true,
     planner_used: false,
+    semantic_validation_status: 'REPAIRED',
+    deterministic_fallback_used: false,
     prompt_version: 'result_interpretation_v1.0.0',
     latency_ms: 125.5,
     created_at: '2026-07-22T12:00:00Z',
@@ -68,6 +70,8 @@ describe('结果解释响应归一化', () => {
         totalTokens: 200,
         latencyMs: 125.5,
         repairUsed: true,
+        semanticValidationStatus: 'REPAIRED',
+        deterministicFallbackUsed: false,
       },
     });
   });
@@ -208,6 +212,14 @@ describe('结果解释响应归一化', () => {
       },
     }],
     ['missing boolean', { ...VALID_RESPONSE, message: { ...VALID_RESPONSE.message, cache_hit: undefined } }],
+    ['invalid semantic status', {
+      ...VALID_RESPONSE,
+      message: { ...VALID_RESPONSE.message, semantic_validation_status: 'UNVERIFIED' },
+    }],
+    ['invalid fallback flag', {
+      ...VALID_RESPONSE,
+      message: { ...VALID_RESPONSE.message, deterministic_fallback_used: 'false' },
+    }],
     ['invalid timestamp', { ...VALID_RESPONSE, message: { ...VALID_RESPONSE.message, created_at: 'not-a-date' } }],
   ])('拒绝不完整或类型漂移的响应：%s', (_name, payload) => {
     expect(() => normalizeResultInterpretationChatResponse(payload)).toThrow(TypeError);

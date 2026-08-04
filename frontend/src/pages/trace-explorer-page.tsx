@@ -174,7 +174,7 @@ export function TraceExplorerPage() {
                   {selectedNode.agentId ? (
                     <div>
                       <dt>{t('common.agentId')}</dt>
-                      <dd>
+                      <dd className="trace-agent-identity">
                         <code>{selectedNode.agentId}</code>
                         {typeof selectedNode.payload?.agentType === 'string' ? (
                           <span title={traceAgentDisplay(selectedNode.payload.agentType, language).description}>

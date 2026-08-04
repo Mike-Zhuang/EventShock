@@ -1226,6 +1226,7 @@ class CognitionService:
                     raise ModelGatewayError(
                         FailureCode.PROMPT_DISCLOSURE_BLOCKED,
                         "model output failed deterministic disclosure safety validation",
+                        safeDiagnostics=error.auditMetadata(),
                     ) from error
                 if resultValidator is not None:
                     resultValidator(result)

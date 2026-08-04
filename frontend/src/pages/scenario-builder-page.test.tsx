@@ -11,11 +11,14 @@ import type {
 } from '../api/types';
 import { I18nProvider } from '../i18n';
 import {
+  buildAlignedInterventionQuestions,
   findMechanismDisabledCheck,
+  focusScenarioStep,
   getLlmModelAvailability,
   GuidedScenarioReplacementError,
   linkSavedScenarioToGuidedWorkflow,
   MechanismDisabledRecovery,
+  scenarioQuestionNeedsReview,
   scenariosHaveSameContent,
   SecondaryOutcomeOption,
 } from './scenario-builder-page';
@@ -61,6 +64,59 @@ describe('次要结果指标布局', () => {
 });
 
 describe('情景验证修复与草稿版本语义', () => {
+  it('切换干预后要求重新确认研究问题，并生成与干预一致的双语问题', () => {
+    const scenario: ScenarioDraft = {
+      eventPackId: 'pack-one',
+      question: 'How does lower market-making capacity affect the synthetic instrument?',
+      questionZh: '降低做市能力会如何影响合成标的？',
+      questionInterventionParameter: 'marketMakerCapacity',
+      intervention: {
+        parameter: 'marketMakerCapacity',
+        baselineValue: 1,
+        interventionValue: 0.45,
+      },
+      seedCount: 10,
+      populationSize: 56,
+      steps: 120,
+    };
+
+    expect(scenarioQuestionNeedsReview(scenario)).toBe(false);
+    const staleScenario = {
+      ...scenario,
+      intervention: {
+        parameter: 'socialAmplification' as const,
+        baselineValue: 1,
+        interventionValue: 1.6,
+      },
+    };
+    expect(scenarioQuestionNeedsReview(staleScenario)).toBe(true);
+
+    const aligned = buildAlignedInterventionQuestions('socialAmplification', 'SYNTH-BA');
+    expect(aligned.question).toContain('social amplification');
+    expect(aligned.question).toContain('SYNTH-BA');
+    expect(aligned.questionZh).toContain('社交放大强度');
+    expect(aligned.questionInterventionParameter).toBe('socialAmplification');
+    expect(scenarioQuestionNeedsReview({ ...staleScenario, ...aligned })).toBe(false);
+  });
+
+  it('步骤定位只滚动并聚焦目标，不污染当前 hash 路由', () => {
+    window.history.replaceState(null, '', '#/scenario');
+    const section = document.createElement('section');
+    section.id = 'scenario-market-section';
+    section.tabIndex = -1;
+    const scrollIntoView = vi.fn();
+    section.scrollIntoView = scrollIntoView;
+    document.body.append(section);
+
+    expect(focusScenarioStep(section.id)).toBe(true);
+    expect(document.activeElement).toBe(section);
+    expect(scrollIntoView).toHaveBeenCalledOnce();
+    expect(window.location.hash).toBe('#/scenario');
+    expect(focusScenarioStep('missing-scenario-section')).toBe(false);
+
+    section.remove();
+  });
+
   it('为机制禁用错误提供可直接执行的两个修复动作和折叠技术详情', async () => {
     const user = userEvent.setup();
     const onUseMarketMaker = vi.fn();
