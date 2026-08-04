@@ -48,7 +48,12 @@ from backend.app.cognition.result_semantics import (
     strongestMetricFacts,
 )
 from backend.app.cognition.streaming import ModelStreamProgress, ModelStreamStage
-from backend.app.database import Database, utcNow
+from backend.app.database import (
+    CheckpointStorageError,
+    CheckpointTooLargeError,
+    Database,
+    utcNow,
+)
 from backend.app.errors import ApiError
 from backend.app.event_pack_claims import (
     ALLOWED_IMPACT_CHANNELS,
@@ -78,7 +83,8 @@ MAX_QUEUED_EXPERIMENTS = 8
 MAX_EXPERIMENTS_PER_SESSION = 30
 MAX_STORED_EXPERIMENTS = 500
 MAX_RUNTIME_LOG_ENTRIES = 200
-EXPERIMENT_CHECKPOINT_SCHEMA_VERSION = "1.0.0"
+EXPERIMENT_CHECKPOINT_SCHEMA_VERSION = "2.0.0"
+LEGACY_EXPERIMENT_CHECKPOINT_SCHEMA_VERSION = "1.0.0"
 COGNITION_PILOT_SCHEDULE_MODE = "CLOSED_LOOP_PILOT_FROZEN_FOR_MATCHED_SEEDS"
 MODEL_GENERATED_SOCIAL_LABEL = "[MODEL-GENERATED — NOT NEW EVIDENCE]"
 SIMULATION_ENGINE_VERSION = "eventshock-simulation-0.3.0"
@@ -1059,6 +1065,37 @@ class EventPackService:
                 ),
             )
 
+        checkpointCapacity = self.database.estimateCheckpointCapacity(
+            populationSize=requestData.populationSize,
+            steps=requestData.steps,
+            seedCount=requestData.seedCount,
+        )
+        if checkpointCapacity["warning"]:
+            warnings.append(
+                {
+                    "code": "CHECKPOINT_CAPACITY_ESTIMATE_HIGH",
+                    "message": (
+                        "Recent measured runs suggest that retained per-pair checkpoints may "
+                        "use substantial storage. This is a soft estimate, not a launch block; "
+                        "each pair remains independently bounded and recoverable."
+                    ),
+                }
+            )
+            addCheck(
+                "CHECKPOINT_CAPACITY",
+                "WARN",
+                "Measured checkpoint telemetry predicts elevated retained storage usage.",
+            )
+        else:
+            addCheck(
+                "CHECKPOINT_CAPACITY",
+                "PASS",
+                (
+                    "Per-pair checkpoint storage is enabled; the estimate is based on "
+                    f"{checkpointCapacity['sampleCount']} recent measured pair(s)."
+                ),
+            )
+
         if requestData.llmPolicy.mode.value == "HYBRID_LLM":
             configView = (
                 self.cognition.getConfig(credentialSessionId or sessionId)
@@ -1281,6 +1318,7 @@ class EventPackService:
                 "interventionValue": requestData.intervention.interventionValue,
             },
             "estimatedRuns": requestData.seedCount * 2,
+            "checkpointCapacity": checkpointCapacity,
             "estimatedLlmCalls": (
                 min(
                     requestData.llmPolicy.callBudget,
@@ -1753,6 +1791,8 @@ class ExperimentService:
                 "cancelRequested",
                 "checkpoint",
                 "checkpointCorrupted",
+                "checkpointErrorCode",
+                "checkpointPairs",
             }
         }
         public.update(
@@ -1804,11 +1844,11 @@ class ExperimentService:
             )
             runtime = copy.deepcopy(experiment.get("runtime") or {})
             if restored is not None:
-                baselineRuns = restored["baselineRuns"]
-                interventionRuns = restored["interventionRuns"]
+                restoredBaselineRuns = restored["baselineRuns"]
+                restoredInterventionRuns = restored["interventionRuns"]
                 cognitionRun = restored["cognitionRun"]
                 stoppingDecision = restored["stoppingDecision"]
-                completedPairs = len(baselineRuns)
+                completedPairs = len(restoredBaselineRuns)
                 runtime.update(
                     {
                         "phase": "RUNNING",
@@ -1823,6 +1863,37 @@ class ExperimentService:
                     code="EXPERIMENT_RESUMED_FROM_CHECKPOINT",
                     parameters={"completedPairs": completedPairs},
                 )
+                if restored.get("legacy"):
+                    restoredBaselineRuns = [
+                        _prepareRunForCheckpoint(run) for run in restoredBaselineRuns
+                    ]
+                    restoredInterventionRuns = [
+                        _prepareRunForCheckpoint(run) for run in restoredInterventionRuns
+                    ]
+                    checkpointStorage = self.database.replaceExperimentCheckpointPairs(
+                        experimentId=experimentId,
+                        ownerUserId=sessionId,
+                        baselineRuns=restoredBaselineRuns,
+                        interventionRuns=restoredInterventionRuns,
+                        populationSize=requestData["populationSize"],
+                        steps=requestData["steps"],
+                    )
+                    checkpointStorage["migratedFromSchemaVersion"] = (
+                        LEGACY_EXPERIMENT_CHECKPOINT_SCHEMA_VERSION
+                    )
+                    runtime["checkpointStorage"] = checkpointStorage
+                    self._appendRuntimeLog(
+                        runtime,
+                        "INFO",
+                        "Legacy embedded checkpoint migrated to per-pair storage.",
+                        code="CHECKPOINT_STORAGE_MIGRATED",
+                        parameters={"completedPairs": completedPairs},
+                    )
+                baselineRuns = [_compactRunForAggregation(run) for run in restoredBaselineRuns]
+                interventionRuns = [
+                    _compactRunForAggregation(run) for run in restoredInterventionRuns
+                ]
+                del restoredBaselineRuns, restoredInterventionRuns
                 self.database.updateExperiment(
                     experimentId,
                     sessionId,
@@ -1831,6 +1902,14 @@ class ExperimentService:
                     completed_pairs=completedPairs,
                     runtime_json=runtime,
                     started_at=utcNow(),
+                    checkpoint_blob=self._checkpointPayload(
+                        requestHash=requestHash,
+                        eventPackHash=eventPackHash,
+                        seedListHash=seedListHash,
+                        completedPairs=completedPairs,
+                        cognitionRun=cognitionRun,
+                        stoppingDecision=stoppingDecision,
+                    ),
                 )
                 self.database.appendAuditEvent(
                     sessionId,
@@ -1969,8 +2048,7 @@ class ExperimentService:
                         requestHash=requestHash,
                         eventPackHash=eventPackHash,
                         seedListHash=seedListHash,
-                        baselineRuns=baselineRuns,
-                        interventionRuns=interventionRuns,
+                        completedPairs=0,
                         cognitionRun=cognitionRun,
                         stoppingDecision=stoppingDecision,
                     ),
@@ -2089,8 +2167,11 @@ class ExperimentService:
                         during="intervention",
                     )
                     return
-                baselineRuns.append(baselineRun)
-                interventionRuns.append(interventionRun)
+                checkpointBaselineRun = _prepareRunForCheckpoint(baselineRun)
+                checkpointInterventionRun = _prepareRunForCheckpoint(interventionRun)
+                del baselineRun, interventionRun
+                baselineRuns.append(_compactRunForAggregation(checkpointBaselineRun))
+                interventionRuns.append(_compactRunForAggregation(checkpointInterventionRun))
                 stoppingDecision = _stoppingDecision(
                     requestData,
                     baselineRuns,
@@ -2099,6 +2180,17 @@ class ExperimentService:
                 )
                 runtime["checkpointPairs"] = len(baselineRuns)
                 runtime["lastCompletedSeed"] = seed
+                checkpointStorage = self.database.saveExperimentCheckpointPair(
+                    experimentId=experimentId,
+                    ownerUserId=sessionId,
+                    pairIndex=index,
+                    seed=seed,
+                    baselineRun=checkpointBaselineRun,
+                    interventionRun=checkpointInterventionRun,
+                    populationSize=requestData["populationSize"],
+                    steps=requestData["steps"],
+                )
+                runtime["checkpointStorage"] = checkpointStorage
                 self._appendRuntimeLog(
                     runtime,
                     "INFO",
@@ -2117,12 +2209,12 @@ class ExperimentService:
                         requestHash=requestHash,
                         eventPackHash=eventPackHash,
                         seedListHash=seedListHash,
-                        baselineRuns=baselineRuns,
-                        interventionRuns=interventionRuns,
+                        completedPairs=len(baselineRuns),
                         cognitionRun=cognitionRun,
                         stoppingDecision=stoppingDecision,
                     ),
                 )
+                del checkpointBaselineRun, checkpointInterventionRun
                 if stoppingDecision["triggered"]:
                     self.database.appendAuditEvent(
                         sessionId,
@@ -2147,7 +2239,26 @@ class ExperimentService:
                 progress=0.94,
                 runtime_json=runtime,
             )
-            aggregate = aggregatePairedResults(baselineRuns, interventionRuns)
+
+            def loadRepresentativeRuns(
+                pairIndex: int,
+            ) -> tuple[dict[str, Any], dict[str, Any]]:
+                pair = self.database.getExperimentCheckpointPair(
+                    experimentId,
+                    sessionId,
+                    pairIndex,
+                )
+                if pair is None:
+                    raise CheckpointStorageError(
+                        "representative checkpoint pair could not be loaded"
+                    )
+                return pair["baselineRun"], pair["interventionRun"]
+
+            aggregate = aggregatePairedResults(
+                baselineRuns,
+                interventionRuns,
+                representativeRunLoader=loadRepresentativeRuns,
+            )
             usedSeeds = seeds[: len(baselineRuns)]
             result = self._buildResult(
                 experimentId,
@@ -2188,6 +2299,63 @@ class ExperimentService:
                     "stoppingReason": stoppingDecision["reason"],
                     "manifestHash": _hashJson(result["manifest"]),
                 },
+            )
+        except CheckpointTooLargeError as error:
+            LOGGER.exception(
+                "Experiment %s checkpoint pair exceeded its safety boundary",
+                experimentId,
+            )
+            runtime["phase"] = "FAILED_RETRYABLE"
+            runtime["checkpointFailure"] = {"code": error.code, "message": str(error)}
+            self._appendRuntimeLog(
+                runtime,
+                "ERROR",
+                (
+                    "A completed matched pair could not be checkpointed within the reviewed "
+                    "per-pair storage boundary. Reduce population or steps, or retry after "
+                    "adjusting the checkpoint capacity policy."
+                ),
+                code=error.code,
+            )
+            self.database.updateExperiment(
+                experimentId,
+                sessionId,
+                status="FAILED_RETRYABLE",
+                error_code=error.code,
+                completed_at=utcNow(),
+                runtime_json=runtime,
+            )
+            self.database.appendAuditEvent(
+                sessionId,
+                "EXPERIMENT",
+                experimentId,
+                "RUN_FAILED_RETRYABLE",
+                {"errorCode": error.code},
+            )
+        except CheckpointStorageError as error:
+            LOGGER.exception("Experiment %s checkpoint storage failed", experimentId)
+            runtime["phase"] = "FAILED_RETRYABLE"
+            runtime["checkpointFailure"] = {"code": error.code, "message": str(error)}
+            self._appendRuntimeLog(
+                runtime,
+                "ERROR",
+                "Checkpoint persistence or recovery failed; the experiment can be retried safely.",
+                code=error.code,
+            )
+            self.database.updateExperiment(
+                experimentId,
+                sessionId,
+                status="FAILED_RETRYABLE",
+                error_code=error.code,
+                completed_at=utcNow(),
+                runtime_json=runtime,
+            )
+            self.database.appendAuditEvent(
+                sessionId,
+                "EXPERIMENT",
+                experimentId,
+                "RUN_FAILED_RETRYABLE",
+                {"errorCode": error.code},
             )
         except _ModelCredentialStorageUnavailableError:
             LOGGER.exception(
@@ -2287,19 +2455,35 @@ class ExperimentService:
         requestHash: str,
         eventPackHash: str,
         seedListHash: str,
-        baselineRuns: list[dict[str, Any]],
-        interventionRuns: list[dict[str, Any]],
         cognitionRun: dict[str, Any],
         stoppingDecision: dict[str, Any],
+        completedPairs: int | None = None,
+        baselineRuns: list[dict[str, Any]] | None = None,
+        interventionRuns: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        # 仅供旧测试夹具与既有检查点兼容；生产写入一律使用 v2 元数据。
+        if completedPairs is None:
+            legacyBaseline = baselineRuns or []
+            legacyIntervention = interventionRuns or []
+            return {
+                "schemaVersion": LEGACY_EXPERIMENT_CHECKPOINT_SCHEMA_VERSION,
+                "requestHash": requestHash,
+                "eventPackHash": eventPackHash,
+                "seedListHash": seedListHash,
+                "completedPairs": len(legacyBaseline),
+                "baselineRuns": legacyBaseline,
+                "interventionRuns": legacyIntervention,
+                "cognitionRun": cognitionRun,
+                "stoppingDecision": stoppingDecision,
+                "writtenAt": utcNow(),
+            }
         return {
             "schemaVersion": EXPERIMENT_CHECKPOINT_SCHEMA_VERSION,
             "requestHash": requestHash,
             "eventPackHash": eventPackHash,
             "seedListHash": seedListHash,
-            "completedPairs": len(baselineRuns),
-            "baselineRuns": baselineRuns,
-            "interventionRuns": interventionRuns,
+            "completedPairs": completedPairs,
+            "pairStorage": "NORMALIZED_V1",
             "cognitionRun": cognitionRun,
             "stoppingDecision": stoppingDecision,
             "writtenAt": utcNow(),
@@ -2317,20 +2501,42 @@ class ExperimentService:
         checkpoint = experiment.get("checkpoint")
         if not isinstance(checkpoint, dict):
             return None
+        schemaVersion = checkpoint.get("schemaVersion")
         if (
-            checkpoint.get("schemaVersion") != EXPERIMENT_CHECKPOINT_SCHEMA_VERSION
+            schemaVersion
+            not in {
+                EXPERIMENT_CHECKPOINT_SCHEMA_VERSION,
+                LEGACY_EXPERIMENT_CHECKPOINT_SCHEMA_VERSION,
+            }
             or checkpoint.get("requestHash") != requestHash
             or checkpoint.get("eventPackHash") != eventPackHash
             or checkpoint.get("seedListHash") != seedListHash
         ):
             return None
-        baselineRuns = checkpoint.get("baselineRuns")
-        interventionRuns = checkpoint.get("interventionRuns")
+        legacy = schemaVersion == LEGACY_EXPERIMENT_CHECKPOINT_SCHEMA_VERSION
+        if legacy:
+            baselineRuns = checkpoint.get("baselineRuns")
+            interventionRuns = checkpoint.get("interventionRuns")
+        else:
+            completedPairs = checkpoint.get("completedPairs")
+            storedPairs = experiment.get("checkpointPairs")
+            if (
+                not isinstance(completedPairs, int)
+                or completedPairs < 0
+                or not isinstance(storedPairs, list)
+                or len(storedPairs) < completedPairs
+            ):
+                return None
+            authoritativePairs = storedPairs[:completedPairs]
+            baselineRuns = [pair.get("baselineRun") for pair in authoritativePairs]
+            interventionRuns = [pair.get("interventionRun") for pair in authoritativePairs]
         cognitionRun = checkpoint.get("cognitionRun")
         stoppingDecision = checkpoint.get("stoppingDecision")
         if (
             not isinstance(baselineRuns, list)
             or not isinstance(interventionRuns, list)
+            or not all(isinstance(run, dict) for run in baselineRuns)
+            or not all(isinstance(run, dict) for run in interventionRuns)
             or len(baselineRuns) != len(interventionRuns)
             or len(baselineRuns) > len(seeds)
             or not isinstance(cognitionRun, dict)
@@ -2348,6 +2554,7 @@ class ExperimentService:
             "interventionRuns": interventionRuns,
             "cognitionRun": cognitionRun,
             "stoppingDecision": stoppingDecision,
+            "legacy": legacy,
         }
 
     def _liveProgressCallback(
@@ -3663,6 +3870,32 @@ class ExperimentService:
     def _removeFuture(self, experimentId: str) -> None:
         with self.futureLock:
             self.futures.pop(experimentId, None)
+
+
+def _compactRunForAggregation(run: dict[str, Any]) -> dict[str, Any]:
+    """保留统计量，把大体积诊断明细交给 SQLite 按代表性配对延迟加载。"""
+
+    return {
+        key: value for key, value in run.items() if key not in {"traces", "orderExecutionSummary"}
+    }
+
+
+def _prepareRunForCheckpoint(run: dict[str, Any]) -> dict[str, Any]:
+    """只保留结果页会公开的诊断追踪，避免为每个种子保存数万条冗余事件。"""
+
+    traces = run.get("traces")
+    if not isinstance(traces, list):
+        return {**run, "traces": []}
+    initialTraces = traces[:40]
+    importantTraces = [
+        trace for trace in traces if isinstance(trace, dict) and trace.get("important")
+    ]
+    deduplicatedTraces = {
+        trace["traceId"]: trace
+        for trace in [*initialTraces, *importantTraces]
+        if isinstance(trace, dict) and isinstance(trace.get("traceId"), str)
+    }
+    return {**run, "traces": list(deduplicatedTraces.values())[:80]}
 
 
 def _stoppingDecision(

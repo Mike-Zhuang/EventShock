@@ -191,6 +191,20 @@ class AuthRepository:
                 FROM auth_legal_acceptances;
                 """
             )
+            preferenceColumns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(auth_user_preferences)").fetchall()
+            }
+            # 供应商和模型只是普通偏好，不含 API Key。使用增量列迁移，避免
+            # 破坏已经完成 onboarding 的账号及其首页模式选择。
+            if "preferred_llm_provider" not in preferenceColumns:
+                connection.execute(
+                    "ALTER TABLE auth_user_preferences ADD COLUMN preferred_llm_provider TEXT"
+                )
+            if "preferred_llm_model" not in preferenceColumns:
+                connection.execute(
+                    "ALTER TABLE auth_user_preferences ADD COLUMN preferred_llm_model TEXT"
+                )
         self.purgeExpired()
 
     def createUser(
@@ -378,8 +392,14 @@ class AuthRepository:
                 "SELECT * FROM auth_user_preferences WHERE user_id=?",
                 (userId,),
             ).fetchone()
-        if row is None or row["onboarding_version"] != CURRENT_ONBOARDING_VERSION:
+        if row is None:
             return UserPreferences(onboardingRequired=True)
+        preferredFields = {
+            "preferredLlmProvider": row["preferred_llm_provider"],
+            "preferredLlmModel": row["preferred_llm_model"],
+        }
+        if row["onboarding_version"] != CURRENT_ONBOARDING_VERSION:
+            return UserPreferences(onboardingRequired=True, **preferredFields)
         return UserPreferences(
             onboardingRequired=False,
             experienceLevel=ExperienceLevel(row["experience_level"]),
@@ -389,6 +409,7 @@ class AuthRepository:
             onboardingVersion=row["onboarding_version"],
             onboardingCompletedAt=_datetime(row["onboarding_completed_at"]),
             updatedAt=_datetime(row["updated_at"]),
+            **preferredFields,
         )
 
     def saveUserPreferences(
@@ -431,6 +452,27 @@ class AuthRepository:
             if cursor.rowcount < 1:
                 raise RuntimeError("user preferences were not persisted")
         return self.getUserPreferences(userId)
+
+    def saveLlmPreference(
+        self,
+        *,
+        userId: str,
+        provider: str,
+        model: str,
+    ) -> bool:
+        """保存非秘密模型偏好；绝不在此表写入或派生 API Key。"""
+
+        now = utcNow()
+        with self.database.writeLock, self.database.connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE auth_user_preferences
+                SET preferred_llm_provider=?, preferred_llm_model=?, updated_at=?
+                WHERE user_id=?
+                """,
+                (provider, model, now, userId),
+            )
+        return cursor.rowcount == 1
 
     @staticmethod
     def _insertLegalAcceptances(

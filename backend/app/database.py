@@ -17,6 +17,10 @@ from typing import Any
 from backend.app.security import scanTextContent
 
 MAX_CHECKPOINT_UNCOMPRESSED_BYTES = 32 * 1024 * 1024
+MAX_CHECKPOINT_STORED_BYTES = 32 * 1024 * 1024
+MAX_CHECKPOINT_PAIR_UNCOMPRESSED_BYTES = 16 * 1024 * 1024
+MAX_CHECKPOINT_PAIR_STORED_BYTES = 8 * 1024 * 1024
+MAX_CHECKPOINT_CAPACITY_SAMPLES = 2_000
 DEFAULT_EXPERIMENT_RETENTION_DAYS = 90
 DEFAULT_INTERPRETATION_RETENTION_DAYS = 90
 MAX_INTERPRETATION_EXCHANGES_PER_OWNER = 300
@@ -97,6 +101,24 @@ class ResultInterpretationRequestConflictError(ValueError):
 
 class ResultInterpretationConversationDeletedError(ValueError):
     """已删除会话的旧请求不得通过缓存或重放重新写回。"""
+
+
+class CheckpointStorageError(RuntimeError):
+    """检查点无法安全持久化或恢复时使用的可分类异常。"""
+
+    code = "CHECKPOINT_STORAGE_FAILED"
+
+
+class CheckpointTooLargeError(CheckpointStorageError):
+    """检查点或单个配对超过经过审查的存储边界。"""
+
+    code = "CHECKPOINT_PAIR_TOO_LARGE"
+
+
+class CheckpointDecodeError(CheckpointStorageError):
+    """检查点损坏、截断或违反解压边界。"""
+
+    code = "CHECKPOINT_CORRUPTED"
 
 
 def utcNow() -> str:
@@ -189,6 +211,32 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_experiments_session_created
                 ON experiments(session_id, created_at DESC);
+                CREATE TABLE IF NOT EXISTS experiment_checkpoint_pairs (
+                    experiment_id TEXT NOT NULL
+                        REFERENCES experiments(id) ON DELETE CASCADE,
+                    pair_index INTEGER NOT NULL CHECK(pair_index >= 0),
+                    seed INTEGER NOT NULL,
+                    pair_blob BLOB NOT NULL,
+                    payload_hash TEXT NOT NULL CHECK(length(payload_hash)=64),
+                    uncompressed_bytes INTEGER NOT NULL CHECK(uncompressed_bytes > 0),
+                    stored_bytes INTEGER NOT NULL CHECK(stored_bytes > 0),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (experiment_id, pair_index)
+                );
+                CREATE INDEX IF NOT EXISTS idx_checkpoint_pairs_experiment_seed
+                ON experiment_checkpoint_pairs(experiment_id, seed);
+                CREATE TABLE IF NOT EXISTS checkpoint_capacity_samples (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    population_size INTEGER NOT NULL CHECK(population_size > 0),
+                    steps INTEGER NOT NULL CHECK(steps > 0),
+                    trace_event_count INTEGER NOT NULL CHECK(trace_event_count >= 0),
+                    uncompressed_bytes INTEGER NOT NULL CHECK(uncompressed_bytes > 0),
+                    stored_bytes INTEGER NOT NULL CHECK(stored_bytes > 0),
+                    observed_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_checkpoint_capacity_observed
+                ON checkpoint_capacity_samples(observed_at DESC);
                 CREATE TABLE IF NOT EXISTS result_interpretation_exchanges (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     owner_user_id TEXT NOT NULL CHECK(
@@ -1114,6 +1162,13 @@ class Database:
     def claimExperimentForQueue(self, experimentId: str, sessionId: str) -> bool:
         now = utcNow()
         with self.writeLock, self.connection() as connection:
+            previous = connection.execute(
+                """
+                SELECT status FROM experiments
+                WHERE id=? AND COALESCE(owner_user_id, session_id)=?
+                """,
+                (experimentId, sessionId),
+            ).fetchone()
             cursor = connection.execute(
                 """
                 UPDATE experiments
@@ -1127,6 +1182,11 @@ class Database:
                 """,
                 (now, experimentId, sessionId),
             )
+            if cursor.rowcount == 1 and previous is not None and previous["status"] == "READY":
+                connection.execute(
+                    "DELETE FROM experiment_checkpoint_pairs WHERE experiment_id=?",
+                    (experimentId,),
+                )
             return cursor.rowcount == 1
 
     def countExperiments(self, sessionId: str | None = None) -> int:
@@ -1252,7 +1312,22 @@ class Database:
                 """,
                 (experimentId, sessionId),
             ).fetchone()
-        return self._experimentFromRow(row) if row is not None else None
+        if row is None:
+            return None
+        experiment = self._experimentFromRow(row)
+        checkpoint = experiment.get("checkpoint")
+        if isinstance(checkpoint, dict) and checkpoint.get("pairStorage") == "NORMALIZED_V1":
+            try:
+                experiment["checkpointPairs"] = self.listExperimentCheckpointPairs(
+                    experimentId,
+                    sessionId,
+                    includeRunDetails=False,
+                )
+            except CheckpointStorageError as error:
+                experiment["checkpointPairs"] = []
+                experiment["checkpointCorrupted"] = True
+                experiment["checkpointErrorCode"] = error.code
+        return experiment
 
     def listExperiments(self, sessionId: str) -> list[dict[str, Any]]:
         with self.connection() as connection:
@@ -1265,6 +1340,375 @@ class Database:
                 (sessionId,),
             ).fetchall()
         return [self._experimentFromRow(row, includeCheckpoint=False) for row in rows]
+
+    def saveExperimentCheckpointPair(
+        self,
+        *,
+        experimentId: str,
+        ownerUserId: str,
+        pairIndex: int,
+        seed: int,
+        baselineRun: dict[str, Any],
+        interventionRun: dict[str, Any],
+        populationSize: int,
+        steps: int,
+    ) -> dict[str, int]:
+        """以单个配对为原子写入检查点，避免重复重写全部已完成路径。"""
+
+        payload = {
+            "schemaVersion": "experiment_checkpoint_pair_v1.0.0",
+            "pairIndex": pairIndex,
+            "seed": seed,
+            "baselineRun": baselineRun,
+            "interventionRun": interventionRun,
+        }
+        blob, uncompressedBytes, storedBytes, payloadHash = _encodeCompressedJson(
+            payload,
+            maxUncompressedBytes=MAX_CHECKPOINT_PAIR_UNCOMPRESSED_BYTES,
+            maxStoredBytes=MAX_CHECKPOINT_PAIR_STORED_BYTES,
+            label=f"experiment checkpoint pair {pairIndex + 1}",
+        )
+        traceEventCount = sum(
+            len(run.get("traces", []))
+            for run in (baselineRun, interventionRun)
+            if isinstance(run.get("traces"), list)
+        )
+        now = utcNow()
+        try:
+            with self.writeLock, self.connection() as connection:
+                owner = connection.execute(
+                    """
+                SELECT 1 FROM experiments
+                WHERE id=? AND COALESCE(owner_user_id, session_id)=?
+                """,
+                    (experimentId, ownerUserId),
+                ).fetchone()
+                if owner is None:
+                    raise CheckpointStorageError("experiment checkpoint owner does not exist")
+                connection.execute(
+                    """
+                INSERT INTO experiment_checkpoint_pairs(
+                    experiment_id, pair_index, seed, pair_blob, payload_hash,
+                    uncompressed_bytes, stored_bytes, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(experiment_id, pair_index) DO UPDATE SET
+                    seed=excluded.seed,
+                    pair_blob=excluded.pair_blob,
+                    payload_hash=excluded.payload_hash,
+                    uncompressed_bytes=excluded.uncompressed_bytes,
+                    stored_bytes=excluded.stored_bytes,
+                    updated_at=excluded.updated_at
+                """,
+                    (
+                        experimentId,
+                        pairIndex,
+                        seed,
+                        blob,
+                        payloadHash,
+                        uncompressedBytes,
+                        storedBytes,
+                        now,
+                        now,
+                    ),
+                )
+                connection.execute(
+                    """
+                INSERT INTO checkpoint_capacity_samples(
+                    population_size, steps, trace_event_count,
+                    uncompressed_bytes, stored_bytes, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                    (
+                        populationSize,
+                        steps,
+                        traceEventCount,
+                        uncompressedBytes,
+                        storedBytes,
+                        now,
+                    ),
+                )
+                connection.execute(
+                    """
+                DELETE FROM checkpoint_capacity_samples WHERE id IN (
+                    SELECT id FROM checkpoint_capacity_samples
+                    ORDER BY observed_at DESC, id DESC LIMIT -1 OFFSET ?
+                )
+                """,
+                    (MAX_CHECKPOINT_CAPACITY_SAMPLES,),
+                )
+                totals = connection.execute(
+                    """
+                SELECT COUNT(*) AS pair_count,
+                       COALESCE(SUM(uncompressed_bytes), 0) AS uncompressed_bytes,
+                       COALESCE(SUM(stored_bytes), 0) AS stored_bytes
+                FROM experiment_checkpoint_pairs WHERE experiment_id=?
+                """,
+                    (experimentId,),
+                ).fetchone()
+        except CheckpointStorageError:
+            raise
+        except sqlite3.Error as error:
+            raise CheckpointStorageError(
+                "experiment checkpoint pair could not be stored"
+            ) from error
+        return {
+            "pairCount": int(totals["pair_count"]),
+            "uncompressedBytes": int(totals["uncompressed_bytes"]),
+            "storedBytes": int(totals["stored_bytes"]),
+            "latestPairUncompressedBytes": uncompressedBytes,
+            "latestPairStoredBytes": storedBytes,
+        }
+
+    def replaceExperimentCheckpointPairs(
+        self,
+        *,
+        experimentId: str,
+        ownerUserId: str,
+        baselineRuns: list[dict[str, Any]],
+        interventionRuns: list[dict[str, Any]],
+        populationSize: int,
+        steps: int,
+    ) -> dict[str, int]:
+        """将旧版内嵌检查点一次性迁移到规范化配对存储。"""
+
+        if len(baselineRuns) != len(interventionRuns):
+            raise CheckpointDecodeError("legacy checkpoint contains unmatched paired runs")
+        encodedRows: list[tuple[Any, ...]] = []
+        now = utcNow()
+        for pairIndex, (baselineRun, interventionRun) in enumerate(
+            zip(baselineRuns, interventionRuns, strict=True)
+        ):
+            seed = baselineRun.get("seed")
+            if not isinstance(seed, int) or interventionRun.get("seed") != seed:
+                raise CheckpointDecodeError("legacy checkpoint contains inconsistent seeds")
+            payload = {
+                "schemaVersion": "experiment_checkpoint_pair_v1.0.0",
+                "pairIndex": pairIndex,
+                "seed": seed,
+                "baselineRun": baselineRun,
+                "interventionRun": interventionRun,
+            }
+            blob, uncompressedBytes, storedBytes, payloadHash = _encodeCompressedJson(
+                payload,
+                maxUncompressedBytes=MAX_CHECKPOINT_PAIR_UNCOMPRESSED_BYTES,
+                maxStoredBytes=MAX_CHECKPOINT_PAIR_STORED_BYTES,
+                label=f"legacy experiment checkpoint pair {pairIndex + 1}",
+            )
+            traceEventCount = sum(
+                len(run.get("traces", []))
+                for run in (baselineRun, interventionRun)
+                if isinstance(run.get("traces"), list)
+            )
+            encodedRows.append(
+                (
+                    experimentId,
+                    pairIndex,
+                    seed,
+                    blob,
+                    payloadHash,
+                    uncompressedBytes,
+                    storedBytes,
+                    now,
+                    now,
+                    traceEventCount,
+                )
+            )
+        try:
+            with self.writeLock, self.connection() as connection:
+                owner = connection.execute(
+                    """
+                SELECT 1 FROM experiments
+                WHERE id=? AND COALESCE(owner_user_id, session_id)=?
+                """,
+                    (experimentId, ownerUserId),
+                ).fetchone()
+                if owner is None:
+                    raise CheckpointStorageError("experiment checkpoint owner does not exist")
+                connection.execute(
+                    "DELETE FROM experiment_checkpoint_pairs WHERE experiment_id=?",
+                    (experimentId,),
+                )
+                for row in encodedRows:
+                    connection.execute(
+                        """
+                    INSERT INTO experiment_checkpoint_pairs(
+                        experiment_id, pair_index, seed, pair_blob, payload_hash,
+                        uncompressed_bytes, stored_bytes, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                        row[:9],
+                    )
+                    connection.execute(
+                        """
+                    INSERT INTO checkpoint_capacity_samples(
+                        population_size, steps, trace_event_count,
+                        uncompressed_bytes, stored_bytes, observed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                        (populationSize, steps, row[9], row[5], row[6], now),
+                    )
+                connection.execute(
+                    """
+                    DELETE FROM checkpoint_capacity_samples WHERE id IN (
+                        SELECT id FROM checkpoint_capacity_samples
+                        ORDER BY observed_at DESC, id DESC LIMIT -1 OFFSET ?
+                    )
+                    """,
+                    (MAX_CHECKPOINT_CAPACITY_SAMPLES,),
+                )
+                totals = connection.execute(
+                    """
+                SELECT COUNT(*) AS pair_count,
+                       COALESCE(SUM(uncompressed_bytes), 0) AS uncompressed_bytes,
+                       COALESCE(SUM(stored_bytes), 0) AS stored_bytes
+                FROM experiment_checkpoint_pairs WHERE experiment_id=?
+                """,
+                    (experimentId,),
+                ).fetchone()
+        except CheckpointStorageError:
+            raise
+        except sqlite3.Error as error:
+            raise CheckpointStorageError(
+                "legacy experiment checkpoint pairs could not be migrated"
+            ) from error
+        return {
+            "pairCount": int(totals["pair_count"]),
+            "uncompressedBytes": int(totals["uncompressed_bytes"]),
+            "storedBytes": int(totals["stored_bytes"]),
+        }
+
+    def listExperimentCheckpointPairs(
+        self,
+        experimentId: str,
+        ownerUserId: str,
+        *,
+        includeRunDetails: bool = True,
+    ) -> list[dict[str, Any]]:
+        with self.connection() as connection:
+            owner = connection.execute(
+                """
+                SELECT 1 FROM experiments
+                WHERE id=? AND COALESCE(owner_user_id, session_id)=?
+                """,
+                (experimentId, ownerUserId),
+            ).fetchone()
+            if owner is None:
+                return []
+            rows = connection.execute(
+                """
+                SELECT * FROM experiment_checkpoint_pairs
+                WHERE experiment_id=? ORDER BY pair_index ASC
+                """,
+                (experimentId,),
+            ).fetchall()
+        pairs: list[dict[str, Any]] = []
+        for row in rows:
+            pairs.append(
+                self._checkpointPairFromRow(
+                    row,
+                    includeRunDetails=includeRunDetails,
+                )
+            )
+        return pairs
+
+    def getExperimentCheckpointPair(
+        self,
+        experimentId: str,
+        ownerUserId: str,
+        pairIndex: int,
+    ) -> dict[str, Any] | None:
+        """只解码最终汇总所需的一对完整路径，避免 50 对同时驻留内存。"""
+
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT checkpoint_pairs.*
+                FROM experiment_checkpoint_pairs AS checkpoint_pairs
+                JOIN experiments ON experiments.id=checkpoint_pairs.experiment_id
+                WHERE checkpoint_pairs.experiment_id=?
+                  AND checkpoint_pairs.pair_index=?
+                  AND COALESCE(experiments.owner_user_id, experiments.session_id)=?
+                """,
+                (experimentId, pairIndex, ownerUserId),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._checkpointPairFromRow(row, includeRunDetails=True)
+
+    @staticmethod
+    def _checkpointPairFromRow(
+        row: sqlite3.Row,
+        *,
+        includeRunDetails: bool,
+    ) -> dict[str, Any]:
+        payload = _decodeCompressedJson(
+            row["pair_blob"],
+            maxUncompressedBytes=MAX_CHECKPOINT_PAIR_UNCOMPRESSED_BYTES,
+            maxStoredBytes=MAX_CHECKPOINT_PAIR_STORED_BYTES,
+            label=f"experiment checkpoint pair {int(row['pair_index']) + 1}",
+        )
+        if not isinstance(payload, dict):
+            raise CheckpointDecodeError("experiment checkpoint pair is not an object")
+        actualHash = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if actualHash != row["payload_hash"]:
+            raise CheckpointDecodeError("experiment checkpoint pair hash does not match")
+        if payload.get("pairIndex") != row["pair_index"] or payload.get("seed") != row["seed"]:
+            raise CheckpointDecodeError("experiment checkpoint pair metadata does not match")
+        if not includeRunDetails:
+            for runKey in ("baselineRun", "interventionRun"):
+                run = payload.get(runKey)
+                if not isinstance(run, dict):
+                    raise CheckpointDecodeError("experiment checkpoint run is not an object")
+                # 全量追踪与订单摘要只在最终选定代表性路径时按需解码。
+                payload[runKey] = {
+                    key: value
+                    for key, value in run.items()
+                    if key not in {"traces", "orderExecutionSummary"}
+                }
+        return payload
+
+    def estimateCheckpointCapacity(
+        self,
+        *,
+        populationSize: int,
+        steps: int,
+        seedCount: int,
+    ) -> dict[str, Any]:
+        """基于近期实测配对给出软容量提示；没有样本时明确返回低置信度。"""
+
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT population_size, steps, stored_bytes
+                FROM checkpoint_capacity_samples
+                ORDER BY observed_at DESC, id DESC LIMIT 200
+                """
+            ).fetchall()
+        if not rows:
+            return {
+                "sampleCount": 0,
+                "confidence": "LOW",
+                "estimatedStoredBytes": None,
+                "warning": False,
+            }
+        targetWork = max(1, populationSize * steps)
+        normalized = sorted(
+            int(row["stored_bytes"])
+            * targetWork
+            / max(1, int(row["population_size"]) * int(row["steps"]))
+            for row in rows
+        )
+        perPair = int(normalized[len(normalized) // 2])
+        estimated = perPair * seedCount
+        return {
+            "sampleCount": len(rows),
+            "confidence": "HIGH" if len(rows) >= 20 else "MEDIUM" if len(rows) >= 5 else "LOW",
+            "estimatedStoredBytes": estimated,
+            "estimatedPairStoredBytes": perPair,
+            "warning": estimated >= MAX_CHECKPOINT_STORED_BYTES,
+        }
 
     def saveResultInterpretationExchange(
         self,
@@ -1755,6 +2199,11 @@ class Database:
                 "WHERE id=? AND COALESCE(owner_user_id, session_id)=?",
                 (*values, experimentId, ownerUserId),
             )
+            if "checkpoint_blob" in changes and changes["checkpoint_blob"] is None:
+                connection.execute(
+                    "DELETE FROM experiment_checkpoint_pairs WHERE experiment_id=?",
+                    (experimentId,),
+                )
 
     def cancelRequested(self, experimentId: str, ownerUserId: str) -> bool:
         with self.connection() as connection:
@@ -1784,7 +2233,13 @@ class Database:
         *,
         includeCheckpoint: bool = True,
     ) -> dict[str, Any]:
-        checkpoint = _decodeCheckpoint(row["checkpoint_blob"]) if includeCheckpoint else None
+        checkpoint = None
+        checkpointErrorCode = None
+        if includeCheckpoint and row["checkpoint_blob"]:
+            try:
+                checkpoint = _decodeCheckpoint(row["checkpoint_blob"])
+            except CheckpointStorageError as error:
+                checkpointErrorCode = error.code
         return {
             "id": row["id"],
             "sessionId": row["session_id"],
@@ -1806,9 +2261,8 @@ class Database:
             "invalidationReason": row["invalidation_reason"],
             "runtime": json.loads(row["runtime_json"]) if row["runtime_json"] else None,
             "checkpoint": checkpoint,
-            "checkpointCorrupted": bool(
-                includeCheckpoint and row["checkpoint_blob"] and checkpoint is None
-            ),
+            "checkpointCorrupted": checkpointErrorCode is not None,
+            "checkpointErrorCode": checkpointErrorCode,
         }
 
     @staticmethod
@@ -2003,22 +2457,72 @@ class Database:
         )
 
 
-def _encodeCheckpoint(value: Any) -> bytes:
+def _encodeCompressedJson(
+    value: Any,
+    *,
+    maxUncompressedBytes: int,
+    maxStoredBytes: int,
+    label: str,
+) -> tuple[bytes, int, int, str]:
     serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    if len(serialized) > MAX_CHECKPOINT_UNCOMPRESSED_BYTES:
-        raise ValueError("experiment checkpoint exceeds the 32 MiB safety limit")
-    return zlib.compress(serialized, level=6)
+    uncompressedBytes = len(serialized)
+    if uncompressedBytes > maxUncompressedBytes:
+        raise CheckpointTooLargeError(
+            f"{label} is {uncompressedBytes} bytes before compression; "
+            f"the reviewed limit is {maxUncompressedBytes} bytes"
+        )
+    blob = zlib.compress(serialized, level=6)
+    storedBytes = len(blob)
+    if storedBytes > maxStoredBytes:
+        raise CheckpointTooLargeError(
+            f"{label} is {storedBytes} bytes after compression; "
+            f"the reviewed limit is {maxStoredBytes} bytes"
+        )
+    return blob, uncompressedBytes, storedBytes, hashlib.sha256(serialized).hexdigest()
+
+
+def _encodeCheckpoint(value: Any) -> bytes:
+    blob, _, _, _ = _encodeCompressedJson(
+        value,
+        maxUncompressedBytes=MAX_CHECKPOINT_UNCOMPRESSED_BYTES,
+        maxStoredBytes=MAX_CHECKPOINT_STORED_BYTES,
+        label="experiment checkpoint metadata",
+    )
+    return blob
+
+
+def _decodeCompressedJson(
+    value: bytes,
+    *,
+    maxUncompressedBytes: int,
+    maxStoredBytes: int,
+    label: str,
+) -> Any:
+    if len(value) > maxStoredBytes:
+        raise CheckpointDecodeError(f"{label} exceeds the compressed storage boundary")
+    try:
+        decompressor = zlib.decompressobj()
+        decoded = decompressor.decompress(value, maxUncompressedBytes + 1)
+        if len(decoded) > maxUncompressedBytes:
+            raise CheckpointDecodeError(f"{label} exceeds the decompression boundary")
+        if not decompressor.eof or decompressor.unused_data:
+            raise CheckpointDecodeError(f"{label} is truncated or has trailing bytes")
+        return json.loads(decoded)
+    except CheckpointDecodeError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, zlib.error) as error:
+        raise CheckpointDecodeError(f"{label} cannot be decoded") from error
 
 
 def _decodeCheckpoint(value: bytes | None) -> dict[str, Any] | None:
     if value is None:
         return None
-    try:
-        decompressor = zlib.decompressobj()
-        decoded = decompressor.decompress(value, MAX_CHECKPOINT_UNCOMPRESSED_BYTES + 1)
-        if len(decoded) > MAX_CHECKPOINT_UNCOMPRESSED_BYTES or not decompressor.eof:
-            return None
-        payload = json.loads(decoded)
-        return payload if isinstance(payload, dict) else None
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, zlib.error):
-        return None
+    payload = _decodeCompressedJson(
+        value,
+        maxUncompressedBytes=MAX_CHECKPOINT_UNCOMPRESSED_BYTES,
+        maxStoredBytes=MAX_CHECKPOINT_STORED_BYTES,
+        label="experiment checkpoint metadata",
+    )
+    if not isinstance(payload, dict):
+        raise CheckpointDecodeError("experiment checkpoint metadata is not an object")
+    return payload

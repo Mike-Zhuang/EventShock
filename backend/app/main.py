@@ -155,6 +155,7 @@ from backend.app.rate_limit import RateLimitExceeded, RateLimitRule, SlidingWind
 from backend.app.scenario_service import ScenarioService
 from backend.app.schemas import (
     AdminLlmCredentialDeleteRequest,
+    AdminLlmCredentialPatchRequest,
     AdminLlmCredentialRequest,
     BulkClaimApprovalRequest,
     ClaimReviewRequest,
@@ -1219,6 +1220,28 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                     "guided workflow messages must not contain secrets, personal data, "
                     "executable content, or prompt-injection instructions"
                 )
+            replayed = service.replayTurnIfKnown(
+                workflowId=workflowId,
+                ownerUserId=ownerUserId,
+                request=payload,
+            )
+            if replayed is not None:
+                return replayed.model_dump(mode="json")
+            credentialView = cognition.getConfig(credentialId)
+            if not credentialView.configured:
+                if credentialView.credential_status == "EXPIRED":
+                    raise ApiError(
+                        "LLM_CREDENTIAL_EXPIRED",
+                        409,
+                        "The temporary model credential expired after its inactivity window; "
+                        "configure it again and resubmit the preserved message.",
+                    )
+                raise ApiError(
+                    "LLM_CREDENTIAL_NOT_CONFIGURED",
+                    409,
+                    "Configure a model credential before sending an AI-guided turn; "
+                    "the message has not been consumed.",
+                )
             claim = service.claimTurn(
                 workflowId=workflowId,
                 ownerUserId=ownerUserId,
@@ -1227,7 +1250,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             if claim.replayed:
                 return claim.workflow.model_dump(mode="json")
             try:
-                if cognition.getConfig(credentialId).configured:
+                if credentialView.configured:
 
                     def recordGuidedProviderProgress(
                         stage: str,
@@ -1303,10 +1326,21 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         except GuidedWorkflowConflictError as error:
             raise ApiError("GUIDED_WORKFLOW_CONFLICT", 409, str(error)) from error
         except CredentialNotConfiguredError as error:
+            credentialStatus = cognition.getConfig(credentialId).credential_status
+            code = (
+                "LLM_CREDENTIAL_EXPIRED"
+                if credentialStatus == "EXPIRED"
+                else "LLM_CREDENTIAL_NOT_CONFIGURED"
+            )
             raise ApiError(
-                "LLM_CREDENTIAL_NOT_CONFIGURED",
+                code,
                 409,
-                "The temporary model credential expired; configure it again.",
+                (
+                    "The temporary model credential expired; configure it again and "
+                    "recover the preserved request."
+                    if credentialStatus == "EXPIRED"
+                    else "Configure a model credential before retrying the preserved request."
+                ),
             ) from error
         except ModelGatewayError as error:
             raise _modelGatewayApiError(error) from error
@@ -2469,6 +2503,49 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         )
         return view.model_dump(mode="json")
 
+    @appInstance.patch("/api/v1/admin/llm-credential")
+    async def updateAdminLlmCredentialConfiguration(
+        config: AdminLlmCredentialPatchRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        context = _configuredAdministratorContext(request)
+        authService = _requiredAuthService(request)
+        _verifyAdministratorCredentialPassword(
+            authService,
+            context,
+            config.currentPassword,
+        )
+        vault = _requiredAdminCredentialVault(request)
+        try:
+            view = vault.updateConfiguration(
+                userId=context.userId,
+                model=config.model,
+                thinkingEnabled=config.thinkingEnabled,
+                maxTokens=config.maxTokens,
+                advancedParameters=config.advancedParameters,
+            )
+        except ValueError as error:
+            LOGGER.warning(
+                "Rejected invalid administrator LLM credential settings traceId=%s errorType=%s",
+                getattr(request.state, "traceId", "unavailable"),
+                type(error).__name__,
+            )
+            raise ApiError(
+                "INVALID_ADMIN_LLM_CREDENTIAL",
+                422,
+                "The administrator model credential configuration is invalid.",
+            ) from error
+        except PermissionError as error:
+            raise AuthorizationError("configured administrator access is required") from error
+        cognition: CognitionService = request.app.state.cognitionService
+        cognition.clearConfig(credentialSessionId(request, context.userId))
+        authService.repository.recordActivity(
+            userId=context.userId,
+            action="ADMIN_LLM_CREDENTIAL_SETTINGS_UPDATED",
+            metadata={"provider": view.provider, "model": view.model},
+        )
+        return view.model_dump(mode="json")
+
     @appInstance.put("/api/v1/llm/config")
     async def saveLlmConfig(
         config: LlmConfigRequest,
@@ -2507,6 +2584,15 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 ),
             },
         )
+        context = getattr(request.state, "authContext", None)
+        if isinstance(context, AuthContext):
+            authService = getattr(request.app.state, "authService", None)
+            if isinstance(authService, AuthService):
+                authService.saveLlmPreference(
+                    context,
+                    provider=config.provider,
+                    model=config.model,
+                )
         return view.model_dump(mode="json")
 
     @appInstance.delete("/api/v1/llm/config")

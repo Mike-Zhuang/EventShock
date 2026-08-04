@@ -145,6 +145,23 @@ class GuidedWorkflowService:
             now=datetime.now(UTC),
         )
 
+    def replayTurnIfKnown(
+        self,
+        *,
+        workflowId: str,
+        ownerUserId: str,
+        request: GuidedTurnRequest,
+    ) -> GuidedWorkflowView | None:
+        """在查凭据前恢复既有幂等结果，不为新请求创建占用记录。"""
+
+        self._validateUserMessage(request.message)
+        return self.repository.replayTurnIfKnown(
+            workflowId=workflowId,
+            ownerUserId=ownerUserId,
+            clientRequestId=request.clientRequestId,
+            requestHash=self._requestHash(request),
+        )
+
     def cacheValidatedProposal(
         self,
         *,
@@ -394,6 +411,11 @@ class GuidedWorkflowService:
             clarificationRequired=True,
             readyForHumanReview=False,
             blockedReasons=("LLM_CREDENTIAL_NOT_CONFIGURED",),
+            missingFields=(
+                ("title", "summary", "instrument", "asOf", "researchQuestion")
+                if workflow.stage is GuidedStage.EVENT_GOAL
+                else ()
+            ),
         )
 
     def applyProposal(

@@ -271,6 +271,9 @@ function normalizeUserPreferences(value: unknown): UserPreferences {
     read(value, 'assistancePreference', 'assistance_preference'),
   );
   const firstGoal = asOptionalString(read(value, 'firstGoal', 'first_goal'));
+  const preferredLlmProvider = asLlmProviderId(
+    read(value, 'preferredLlmProvider', 'preferred_llm_provider'),
+  );
   if (experienceLevel && !['NEW', 'INTERMEDIATE', 'ADVANCED'].includes(experienceLevel)) {
     throw new TypeError('User preferences contain an unsupported experience level.');
   }
@@ -302,6 +305,10 @@ function normalizeUserPreferences(value: unknown): UserPreferences {
       read(value, 'onboardingCompletedAt', 'onboarding_completed_at'),
     ),
     updatedAt: asOptionalString(read(value, 'updatedAt', 'updated_at')),
+    preferredLlmProvider,
+    preferredLlmModel: asOptionalString(
+      read(value, 'preferredLlmModel', 'preferred_llm_model'),
+    ),
   };
 }
 
@@ -631,6 +638,9 @@ function normalizeGuidedEventMetadata(value: unknown): GuidedEventMetadata {
     summaryZh: asOptionalString(read(value, 'summaryZh', 'summary_zh')),
     instrument: requiredString(read(value, 'instrument'), 'eventMetadata.instrument'),
     asOf: requiredString(read(value, 'asOf', 'as_of'), 'eventMetadata.asOf'),
+    asOfPrecision: asOptionalString(
+      read(value, 'asOfPrecision', 'as_of_precision'),
+    ) as GuidedEventMetadata['asOfPrecision'],
     researchQuestion: requiredString(
       read(value, 'researchQuestion', 'research_question'),
       'eventMetadata.researchQuestion',
@@ -697,6 +707,9 @@ function normalizeGuidedProposal(value: unknown): GuidedWorkflowProposal {
       read(value, 'readyForHumanReview', 'ready_for_human_review'),
     ) ?? false,
     blockedReasons: asStringArray(read(value, 'blockedReasons', 'blocked_reasons')),
+    missingFields: asStringArray(
+      read(value, 'missingFields', 'missing_fields'),
+    ) as GuidedWorkflowProposal['missingFields'],
   };
 }
 
@@ -2729,6 +2742,24 @@ export function normalizeValidation(value: unknown): ScenarioValidation {
       ]
     : [...errors, ...warnings];
   const valid = asBoolean(read(value, 'valid')) ?? errors.length === 0;
+  const rawCheckpointCapacity = read(
+    value,
+    'checkpointCapacity',
+    'checkpoint_capacity',
+  );
+  const checkpointCapacity = isRecord(rawCheckpointCapacity)
+    ? {
+        sampleCount: asNumber(read(rawCheckpointCapacity, 'sampleCount', 'sample_count')) ?? 0,
+        confidence: asOptionalString(read(rawCheckpointCapacity, 'confidence')) ?? 'LOW',
+        estimatedStoredBytes: asNumber(
+          read(rawCheckpointCapacity, 'estimatedStoredBytes', 'estimated_stored_bytes'),
+        ),
+        estimatedPairStoredBytes: asNumber(
+          read(rawCheckpointCapacity, 'estimatedPairStoredBytes', 'estimated_pair_stored_bytes'),
+        ),
+        warning: asBoolean(read(rawCheckpointCapacity, 'warning')) ?? false,
+      }
+    : undefined;
   return {
     valid,
     simulationRunnable: asBoolean(
@@ -2757,6 +2788,7 @@ export function normalizeValidation(value: unknown): ScenarioValidation {
     llmCostCapUsd: asNumber(read(value, 'llmCostCapUsd', 'llm_cost_cap_usd')),
     llmPricingStatus: asOptionalString(read(value, 'llmPricingStatus', 'llm_pricing_status')),
     llmMinimumCallReservationUsd: asNumber(read(value, 'llmMinimumCallReservationUsd', 'llm_minimum_call_reservation_usd')),
+    checkpointCapacity,
     interpretationBoundary: asOptionalString(read(value, 'interpretationBoundary', 'interpretation_boundary')),
     warnings: warnings.map((item) => item.detail ?? item.label),
   };
@@ -3041,6 +3073,9 @@ export function normalizeLlmConfig(value: unknown): LlmConfigView {
   };
   return {
     configured: asBoolean(read(value, 'configured')) ?? false,
+    credentialStatus: asOptionalString(
+      read(value, 'credentialStatus', 'credential_status'),
+    ) as LlmConfigView['credentialStatus'],
     provider: asLlmProviderId(read(value, 'provider')),
     model: asOptionalString(read(value, 'model')),
     thinkingEnabled: asBoolean(read(value, 'thinkingEnabled', 'thinking_enabled')),
@@ -3052,6 +3087,9 @@ export function normalizeLlmConfig(value: unknown): LlmConfigView {
       return source === 'SESSION' || source === 'ADMIN_SERVER_ENCRYPTED' ? source : undefined;
     })(),
     expiresAt: asOptionalString(read(value, 'expiresAt', 'expires_at')),
+    absoluteExpiresAt: asOptionalString(
+      read(value, 'absoluteExpiresAt', 'absolute_expires_at'),
+    ),
   };
 }
 

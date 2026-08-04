@@ -644,6 +644,56 @@ describe('guided workflow page', () => {
     expect(api.advanceGuidedWorkflow).not.toHaveBeenCalled();
   });
 
+  it('shows day precision and a friendly non-blocking future-event warning', async () => {
+    const precisionWorkflow: GuidedWorkflow = {
+      ...guidedWorkflow,
+      pendingProposal: {
+        ...guidedWorkflow.pendingProposal!,
+        proposedEventMetadata: {
+          ...guidedWorkflow.pendingProposal!.proposedEventMetadata!,
+          asOfPrecision: 'DAY',
+        },
+        blockedReasons: ['FUTURE_EVENT_REQUIRES_HUMAN_CONFIRMATION'],
+      },
+    };
+    vi.mocked(api.getGuidedWorkflows).mockResolvedValue([precisionWorkflow]);
+    vi.mocked(api.getGuidedWorkflow).mockResolvedValue(precisionWorkflow);
+
+    render(
+      <I18nProvider>
+        <GuidedWorkflowPage navigate={vi.fn()} />
+      </I18nProvider>,
+    );
+
+    expect(await screen.findByText('Day precision; no time was inferred')).toBeInTheDocument();
+    expect(screen.getByText(/This is a planned future-event scenario/)).toBeInTheDocument();
+    expect(screen.queryByText('FUTURE_EVENT_REQUIRES_HUMAN_CONFIRMATION'))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Apply reviewed candidate' })).toBeEnabled();
+  });
+
+  it('updates event-goal field progress while the user completes the batch panel', async () => {
+    const user = userEvent.setup();
+    const incompleteWorkflow: GuidedWorkflow = {
+      ...guidedWorkflow,
+      pendingProposal: undefined,
+      pendingProposalId: undefined,
+    };
+    vi.mocked(api.getGuidedWorkflows).mockResolvedValue([incompleteWorkflow]);
+    vi.mocked(api.getGuidedWorkflow).mockResolvedValue(incompleteWorkflow);
+
+    render(
+      <I18nProvider>
+        <GuidedWorkflowPage navigate={vi.fn()} />
+      </I18nProvider>,
+    );
+
+    expect(await screen.findByText('0/5 complete')).toBeInTheDocument();
+    await user.click(screen.getByText('Complete every field in one batch'));
+    await user.type(screen.getByLabelText('Event title'), 'A bounded event');
+    expect(screen.getByText('1/5 complete')).toBeInTheDocument();
+  });
+
   it('immediately keeps the submitted user message visible and shows local elapsed progress', async () => {
     const user = userEvent.setup();
     let resolveTurn: (value: GuidedWorkflow) => void = () => undefined;
@@ -712,6 +762,35 @@ describe('guided workflow page', () => {
     expect(screen.getByTestId('guided-local-turn')).toHaveTextContent(
       'Failed; input restored',
     );
+  });
+
+  it('preserves an expired-credential turn and links directly to AI configuration', async () => {
+    const user = userEvent.setup();
+    const navigate = vi.fn();
+    vi.mocked(api.sendGuidedTurn).mockRejectedValueOnce(new ApiError(
+      'The temporary model credential expired.',
+      409,
+      undefined,
+      'LLM_CREDENTIAL_EXPIRED',
+    ));
+
+    render(
+      <I18nProvider>
+        <GuidedWorkflowPage navigate={navigate} />
+      </I18nProvider>,
+    );
+
+    const composer = await screen.findByLabelText(
+      'Answer this stage, or request field-level changes',
+    );
+    await user.clear(composer);
+    await user.type(composer, 'Preserve this credential retry.');
+    await user.click(screen.getByRole('button', { name: 'Send and propose' }));
+
+    expect(await screen.findByText(/API key expired/i)).toBeInTheDocument();
+    expect(composer).toHaveValue('Preserve this credential retry.');
+    await user.click(screen.getByRole('button', { name: 'Open AI configuration' }));
+    expect(navigate).toHaveBeenCalledWith('ai');
   });
 
   it('shows provider-backed progress instead of guessing only from elapsed time', async () => {

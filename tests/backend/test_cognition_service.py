@@ -34,6 +34,7 @@ from backend.app.cognition import (
     PersistentCredentialUnavailableError,
     SessionConfigStore,
 )
+from backend.app.cognition.prompts import UNTRUSTED_DATA_END, UNTRUSTED_DATA_START
 from backend.app.database import Database
 from backend.app.guided_workflow.models import (
     GuidedStage,
@@ -372,12 +373,61 @@ def test_strict_structured_workflows_force_thinking_off_but_report_preference() 
         False,
         False,
     ]
+    guidedPayload = json.loads(
+        harness.requests[2]
+        .userContent.split(f"{UNTRUSTED_DATA_START}\n", maxsplit=1)[1]
+        .split(f"\n{UNTRUSTED_DATA_END}", maxsplit=1)[0]
+    )
+    assert guidedPayload["current_stage"] == "EVENT_GOAL"
+    assert datetime.fromisoformat(guidedPayload["serverTimeUtc"]).tzinfo is not None
     assert connection.thinking_preference_enabled is True
     assert connection.thinking_enabled is False
     assert extraction.thinking_preference_enabled is True
     assert extraction.thinking_enabled is False
     assert belief.thinking_preference_enabled is True
     assert belief.thinking_enabled is False
+
+
+def test_guided_future_event_is_warned_but_not_rejected() -> None:
+    futureProposal = GuidedWorkflowProposal(
+        stage=GuidedStage.EVENT_GOAL,
+        assistantMessage="Review this future scenario before applying the candidate.",
+        clarificationRequired=False,
+        proposedEventMetadata={
+            "title": "Future index review",
+            "summary": "A planned future event used only as a synthetic scenario.",
+            "instrument": "TEST",
+            "asOf": "2099-01-01T00:00:00Z",
+            "asOfPrecision": "DAY",
+            "researchQuestion": "How might liquidity change under one bounded intervention?",
+        },
+        readyForHumanReview=True,
+    )
+    service, _harness = configuredService([FakeOutcome(futureProposal)])
+    workflow = GuidedWorkflowView(
+        id="guided-future-warning-001",
+        stage=GuidedStage.EVENT_GOAL,
+        status=GuidedWorkflowStatus.ACTIVE,
+        version=1,
+        language="en",
+        draft=GuidedWorkflowDraft(),
+        messages=(),
+        createdAt=KNOWN_AT,
+        updatedAt=KNOWN_AT,
+    )
+
+    proposal = asyncio.run(
+        service.proposeGuidedWorkflow(
+            sessionId=SESSION_ID,
+            workflow=workflow,
+            latestUserMessage="Study this planned 2099 event as a scenario.",
+            language="en",
+        )
+    )
+
+    assert proposal.readyForHumanReview is True
+    assert "FUTURE_EVENT_REQUIRES_HUMAN_CONFIRMATION" in proposal.blockedReasons
+    assert "planned future-event scenario" in proposal.assistantMessage
 
 
 def test_service_propagates_non_zhipu_provider_to_request_and_result() -> None:

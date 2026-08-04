@@ -214,6 +214,7 @@ class ModelRequest:
     samplingConfig: SamplingConfig
     apiKey: str = field(repr=False)
     allowedActionValues: frozenset[str] = frozenset()
+    credentialSessionId: str | None = field(default=None, repr=False, compare=False)
     # 只有交互式解释链路启用供应商流式传输；回调只接收计数和阶段，绝不接收
     # 未验证正文或供应商隐藏思维链。
     streamResponse: bool = False

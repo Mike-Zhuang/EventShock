@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import statistics
+from collections.abc import Callable
 from typing import Any
 
 from backend.app.validation.statistics import analyzePairedExperiment
@@ -83,7 +84,10 @@ AGENT_PNL_KEYS = (
 
 
 def aggregatePairedResults(
-    baselineRuns: list[dict[str, Any]], interventionRuns: list[dict[str, Any]]
+    baselineRuns: list[dict[str, Any]],
+    interventionRuns: list[dict[str, Any]],
+    *,
+    representativeRunLoader: Callable[[int], tuple[dict[str, Any], dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     if len(baselineRuns) != len(interventionRuns):
         raise ValueError("baseline and intervention run counts differ")
@@ -116,6 +120,14 @@ def aggregatePairedResults(
         metricKey: _summarizeMetric(metricKey, baselineRuns, interventionRuns, pairedRuns)
         for metricKey in METRIC_KEYS
     }
+    selectedIndex = _representativeRunIndex(
+        baselineRuns,
+        interventionRuns,
+        metricSummaries,
+    )
+    representativeRuns = (
+        representativeRunLoader(selectedIndex) if representativeRunLoader is not None else None
+    )
     return {
         "pairedRuns": pairedRuns,
         "metricSummaries": metricSummaries,
@@ -126,11 +138,19 @@ def aggregatePairedResults(
             section: _aggregateRunSection(section, baselineRuns, interventionRuns)
             for section in RUN_SUMMARY_SECTIONS
         },
-        "traces": _selectRepresentativeTraces(baselineRuns, interventionRuns, metricSummaries),
+        "traces": _selectRepresentativeTraces(
+            baselineRuns,
+            interventionRuns,
+            metricSummaries,
+            selectedIndex=selectedIndex,
+            representativeRuns=representativeRuns,
+        ),
         "orderExecutionSummary": _selectRepresentativeOrderSummaries(
             baselineRuns,
             interventionRuns,
             metricSummaries,
+            selectedIndex=selectedIndex,
+            representativeRuns=representativeRuns,
         ),
     }
 
@@ -493,21 +513,33 @@ def _selectRepresentativeTraces(
     baselineRuns: list[dict[str, Any]],
     interventionRuns: list[dict[str, Any]],
     metricSummaries: dict[str, Any],
+    *,
+    selectedIndex: int | None = None,
+    representativeRuns: tuple[dict[str, Any], dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    selectedIndex = _representativeRunIndex(
-        baselineRuns,
-        interventionRuns,
-        metricSummaries,
+    if selectedIndex is None:
+        selectedIndex = _representativeRunIndex(
+            baselineRuns,
+            interventionRuns,
+            metricSummaries,
+        )
+    selectedBaseline, selectedIntervention = representativeRuns or (
+        baselineRuns[selectedIndex],
+        interventionRuns[selectedIndex],
     )
+    if selectedBaseline.get("seed") != baselineRuns[selectedIndex].get(
+        "seed"
+    ) or selectedIntervention.get("seed") != interventionRuns[selectedIndex].get("seed"):
+        raise ValueError("representative run loader returned the wrong matched seed")
     baselineBySequence = {
         int(trace["globalSequence"]): trace
-        for trace in baselineRuns[selectedIndex]["traces"]
+        for trace in selectedBaseline.get("traces", [])
         if isinstance(trace.get("globalSequence"), int)
     }
     selectedTraces: list[dict[str, Any]] = []
     for scenarioName, run in (
-        ("baseline", baselineRuns[selectedIndex]),
-        ("intervention", interventionRuns[selectedIndex]),
+        ("baseline", selectedBaseline),
+        ("intervention", selectedIntervention),
     ):
         initialTraces = run["traces"][:40]
         importantTraces = [trace for trace in run["traces"] if trace.get("important")]
@@ -545,20 +577,32 @@ def _selectRepresentativeOrderSummaries(
     baselineRuns: list[dict[str, Any]],
     interventionRuns: list[dict[str, Any]],
     metricSummaries: dict[str, Any],
+    *,
+    selectedIndex: int | None = None,
+    representativeRuns: tuple[dict[str, Any], dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    selectedIndex = _representativeRunIndex(
-        baselineRuns,
-        interventionRuns,
-        metricSummaries,
+    if selectedIndex is None:
+        selectedIndex = _representativeRunIndex(
+            baselineRuns,
+            interventionRuns,
+            metricSummaries,
+        )
+    selectedBaseline, selectedIntervention = representativeRuns or (
+        baselineRuns[selectedIndex],
+        interventionRuns[selectedIndex],
     )
+    if selectedBaseline.get("seed") != baselineRuns[selectedIndex].get(
+        "seed"
+    ) or selectedIntervention.get("seed") != interventionRuns[selectedIndex].get("seed"):
+        raise ValueError("representative run loader returned the wrong matched seed")
     baselineBySequence = {
         int(item["submissionSequence"]): item
-        for item in baselineRuns[selectedIndex].get("orderExecutionSummary", [])
+        for item in selectedBaseline.get("orderExecutionSummary", [])
     }
     summaries: list[dict[str, Any]] = []
     for scenarioName, run in (
-        ("baseline", baselineRuns[selectedIndex]),
-        ("intervention", interventionRuns[selectedIndex]),
+        ("baseline", selectedBaseline),
+        ("intervention", selectedIntervention),
     ):
         for item in run.get("orderExecutionSummary", []):
             submissionSequence = int(item["submissionSequence"])

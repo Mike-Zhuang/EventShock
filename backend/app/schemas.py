@@ -421,6 +421,20 @@ class AdminLlmCredentialRequest(LlmConfigRequest):
     currentPassword: str = Field(min_length=1, max_length=128, repr=False)
 
 
+class AdminLlmCredentialPatchRequest(StrictModel):
+    """只更新管理员模型选项；供应商和已加密 API Key 保持不变。"""
+
+    currentPassword: str = Field(min_length=1, max_length=128, repr=False)
+    model: str = Field(
+        min_length=3,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$",
+    )
+    thinkingEnabled: bool = False
+    maxTokens: int = Field(default=2_048, ge=256, le=APPLICATION_MAX_OUTPUT_TOKENS)
+    advancedParameters: AdvancedModelParameters = Field(default_factory=AdvancedModelParameters)
+
+
 class AdminLlmCredentialDeleteRequest(StrictModel):
     currentPassword: str = Field(min_length=1, max_length=128, repr=False)
 

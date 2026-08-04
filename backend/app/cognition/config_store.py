@@ -29,6 +29,7 @@ class CredentialNotConfiguredError(LookupError):
 
 class SessionProviderConfigView(StrictFrozenModel):
     configured: bool
+    credential_status: Literal["ACTIVE", "EXPIRED", "NOT_CONFIGURED"] = "NOT_CONFIGURED"
     provider: ProviderId | None = None
     model: str | None = None
     thinking_enabled: bool | None = None
@@ -36,6 +37,7 @@ class SessionProviderConfigView(StrictFrozenModel):
     advanced_parameters: AdvancedModelParameters | None = None
     credential_hint: str | None = None
     expires_at: datetime | None = None
+    absolute_expires_at: datetime | None = None
     credential_source: Literal["SESSION", "ADMIN_SERVER_ENCRYPTED"] | None = None
 
 
@@ -56,7 +58,9 @@ class _SessionCredential:
     thinkingEnabled: bool
     maxTokens: int
     advancedParameters: AdvancedModelParameters
+    createdAt: float
     expiresAt: float
+    absoluteExpiresAt: float
     apiKey: str = field(repr=False)
 
 
@@ -66,18 +70,23 @@ class SessionConfigStore:
     def __init__(
         self,
         *,
-        ttlSeconds: int = 1_800,
+        ttlSeconds: int = 7_200,
+        absoluteMaxSeconds: int = 43_200,
         clock: Callable[[], float] = time.time,
         persistentRuntimeResolver: Callable[[str], RuntimeProviderConfig | None] | None = None,
         persistentViewResolver: Callable[[str], SessionProviderConfigView | None] | None = None,
     ) -> None:
         if not 30 <= ttlSeconds <= 86_400:
             raise ValueError("ttlSeconds must be between 30 and 86400")
+        if not ttlSeconds <= absoluteMaxSeconds <= 86_400:
+            raise ValueError("absoluteMaxSeconds must be between ttlSeconds and 86400")
         self._ttlSeconds = ttlSeconds
+        self._absoluteMaxSeconds = absoluteMaxSeconds
         self._clock = clock
         self._persistentRuntimeResolver = persistentRuntimeResolver
         self._persistentViewResolver = persistentViewResolver
         self._items: dict[str, _SessionCredential] = {}
+        self._expiredSessionIds: dict[str, float] = {}
         self._lock = threading.RLock()
 
     def setConfig(
@@ -101,19 +110,23 @@ class SessionConfigStore:
             advancedParameters=advancedParameters,
         )
 
-        expiresAt = self._clock() + self._ttlSeconds
+        now = self._clock()
+        expiresAt = now + self._ttlSeconds
         credential = _SessionCredential(
             provider=provider,
             model=model,
             thinkingEnabled=thinkingEnabled,
             maxTokens=maxTokens,
             advancedParameters=resolvedAdvancedParameters,
+            createdAt=now,
             expiresAt=expiresAt,
+            absoluteExpiresAt=now + self._absoluteMaxSeconds,
             apiKey=apiKey,
         )
         with self._lock:
-            self._purgeExpiredLocked(self._clock())
+            self._purgeExpiredLocked(now)
             self._items[sessionId] = credential
+            self._expiredSessionIds.pop(sessionId, None)
         return self._toView(credential)
 
     def getRuntimeConfig(self, sessionId: str) -> RuntimeProviderConfig:
@@ -139,6 +152,9 @@ class SessionConfigStore:
             persistentRuntime = self._persistentRuntimeResolver(sessionId)
             if persistentRuntime is not None:
                 return persistentRuntime
+        status = self.credentialStatus(sessionId)
+        if status == "EXPIRED":
+            raise CredentialNotConfiguredError("model credential expired")
         raise CredentialNotConfiguredError("model credential is not configured")
 
     def getView(self, sessionId: str) -> SessionProviderConfigView:
@@ -147,18 +163,72 @@ class SessionConfigStore:
             self._purgeExpiredLocked(self._clock())
             credential = self._activeCredential(sessionId)
             view = self._toView(credential) if credential is not None else None
+            expired = sessionId in self._expiredSessionIds
         if view is not None:
             return view
         if self._persistentViewResolver is not None:
             persistentView = self._persistentViewResolver(sessionId)
             if persistentView is not None:
                 return persistentView
-        return SessionProviderConfigView(configured=False)
+        return SessionProviderConfigView(
+            configured=False,
+            credential_status="EXPIRED" if expired else "NOT_CONFIGURED",
+        )
+
+    def credentialStatus(
+        self,
+        sessionId: str,
+    ) -> Literal["ACTIVE", "EXPIRED", "NOT_CONFIGURED"]:
+        self._validateSessionId(sessionId)
+        with self._lock:
+            self._purgeExpiredLocked(self._clock())
+            if sessionId in self._items:
+                return "ACTIVE"
+            if sessionId in self._expiredSessionIds:
+                return "EXPIRED"
+        if self._persistentViewResolver is not None:
+            persistentView = self._persistentViewResolver(sessionId)
+            if persistentView is not None and persistentView.configured:
+                return "ACTIVE"
+        return "NOT_CONFIGURED"
+
+    def markProviderCallSucceeded(self, sessionId: str) -> bool:
+        """仅真实供应商调用成功后滑动续期，读取配置与缓存命中均不续期。"""
+
+        self._validateSessionId(sessionId)
+        now = self._clock()
+        with self._lock:
+            self._purgeExpiredLocked(now)
+            credential = self._items.get(sessionId)
+            if credential is None:
+                return False
+            renewedExpiresAt = min(
+                now + self._ttlSeconds,
+                credential.absoluteExpiresAt,
+            )
+            if renewedExpiresAt <= now:
+                del self._items[sessionId]
+                self._expiredSessionIds[sessionId] = now
+                return False
+            self._items[sessionId] = _SessionCredential(
+                provider=credential.provider,
+                model=credential.model,
+                thinkingEnabled=credential.thinkingEnabled,
+                maxTokens=credential.maxTokens,
+                advancedParameters=credential.advancedParameters,
+                createdAt=credential.createdAt,
+                expiresAt=renewedExpiresAt,
+                absoluteExpiresAt=credential.absoluteExpiresAt,
+                apiKey=credential.apiKey,
+            )
+            return True
 
     def clear(self, sessionId: str) -> bool:
         self._validateSessionId(sessionId)
         with self._lock:
-            return self._items.pop(sessionId, None) is not None
+            removed = self._items.pop(sessionId, None) is not None
+            self._expiredSessionIds.pop(sessionId, None)
+            return removed
 
     def purgeExpired(self) -> int:
         now = self._clock()
@@ -175,6 +245,12 @@ class SessionConfigStore:
         ]
         for sessionId in expiredSessionIds:
             del self._items[sessionId]
+            self._expiredSessionIds[sessionId] = now
+        self._expiredSessionIds = {
+            sessionId: expiredAt
+            for sessionId, expiredAt in self._expiredSessionIds.items()
+            if now - expiredAt <= 86_400
+        }
         return len(expiredSessionIds)
 
     def _activeCredential(self, sessionId: str) -> _SessionCredential | None:
@@ -193,6 +269,7 @@ class SessionConfigStore:
     def _toView(credential: _SessionCredential) -> SessionProviderConfigView:
         return SessionProviderConfigView(
             configured=True,
+            credential_status="ACTIVE",
             provider=credential.provider,
             model=credential.model,
             thinking_enabled=credential.thinkingEnabled,
@@ -200,6 +277,7 @@ class SessionConfigStore:
             advanced_parameters=credential.advancedParameters,
             credential_hint=f"••••{credential.apiKey[-4:]}",
             expires_at=datetime.fromtimestamp(credential.expiresAt, tz=UTC),
+            absolute_expires_at=datetime.fromtimestamp(credential.absoluteExpiresAt, tz=UTC),
             credential_source="SESSION",
         )
 

@@ -69,6 +69,25 @@ const STAGE_LABELS: Record<GuidedStage, { en: string; zh: string }> = {
   COMPLETED: { en: 'Completed', zh: '已完成' },
 };
 
+const EVENT_GOAL_FIELD_LABELS = {
+  title: { en: 'Event title', zh: '事件标题' },
+  summary: { en: 'Short summary', zh: '事件摘要' },
+  instrument: { en: 'Instrument', zh: '证券代码' },
+  asOf: { en: 'As-of date', zh: '时点日期' },
+  researchQuestion: { en: 'Research question', zh: '研究问题' },
+} as const;
+
+type EventGoalField = keyof typeof EVENT_GOAL_FIELD_LABELS;
+type EventGoalBatchDraft = Record<EventGoalField, string>;
+
+const EMPTY_EVENT_GOAL_BATCH: EventGoalBatchDraft = {
+  title: '',
+  summary: '',
+  instrument: '',
+  asOf: '',
+  researchQuestion: '',
+};
+
 const RESPONSIBILITY_FLOW = [
   {
     key: 'goal',
@@ -321,6 +340,35 @@ function guidedAdvanceErrorTarget(error: unknown): string {
   return 'guided-advance-heading';
 }
 
+function guidedTurnErrorMessage(error: unknown, isZh: boolean): string {
+  if (!(error instanceof ApiError)) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  if (error.code === 'LLM_CREDENTIAL_EXPIRED') {
+    return isZh
+      ? '临时 API Key 已过期。你的消息已恢复到输入框；请重新配置并测试 Key 后再次发送。'
+      : 'The temporary API key expired. Your message was restored to the composer; configure and test the key, then send it again.';
+  }
+  if (error.code === 'LLM_CREDENTIAL_NOT_CONFIGURED') {
+    return isZh
+      ? '当前没有可用的 API Key。你的消息尚未被消费并已恢复；请先完成 AI 配置。'
+      : 'No API key is configured. Your message was not consumed and has been restored; complete AI configuration first.';
+  }
+  return error.message;
+}
+
+function guidedBlockedReasonLabel(reason: string, isZh: boolean): string {
+  if (reason === 'FUTURE_EVENT_REQUIRES_HUMAN_CONFIRMATION') {
+    return isZh
+      ? '这是计划中的未来事件情景。应用前请人工确认日期与时点边界；该提醒不会阻止继续。'
+      : 'This is a planned future-event scenario. Confirm the date and point-in-time boundary before applying; this warning does not block progress.';
+  }
+  if (reason === 'LLM_CREDENTIAL_NOT_CONFIGURED') {
+    return isZh ? '需要先配置并测试 API Key。' : 'Configure and test an API key first.';
+  }
+  return reason.replaceAll('_', ' ').toLocaleLowerCase();
+}
+
 function ProposalDetails({
   proposal,
   isZh,
@@ -337,7 +385,17 @@ function ProposalDetails({
           <div><dt>{isZh ? '标题' : 'Title'}</dt><dd>{isZh ? metadata.titleZh ?? metadata.title : metadata.title}</dd></div>
           <div><dt>{isZh ? '研究问题' : 'Research question'}</dt><dd>{metadata.researchQuestion}</dd></div>
           <div><dt>{isZh ? '证券代码' : 'Instrument'}</dt><dd><SyntheticInstrumentLabel instrument={metadata.instrument} compact /></dd></div>
-          <div><dt>{isZh ? '时点边界' : 'Point-in-time cutoff'}</dt><dd>{safeDate(metadata.asOf, isZh ? 'zh-CN' : 'en')}</dd></div>
+          <div>
+            <dt>{isZh ? '时点边界' : 'Point-in-time cutoff'}</dt>
+            <dd>
+              {safeDate(metadata.asOf, isZh ? 'zh-CN' : 'en')}
+              {metadata.asOfPrecision === 'DAY' ? (
+                <small className="guided-proposal__precision">
+                  {isZh ? '仅到日期；未虚构具体时分' : 'Day precision; no time was inferred'}
+                </small>
+              ) : null}
+            </dd>
+          </div>
           <div className="guided-proposal__wide"><dt>{isZh ? '摘要' : 'Summary'}</dt><dd>{isZh ? metadata.summaryZh ?? metadata.summary : metadata.summary}</dd></div>
         </dl>
       ) : null}
@@ -363,7 +421,7 @@ function ProposalDetails({
       {proposal.blockedReasons.length > 0 ? (
         <div className="guided-proposal__blocked">
           <strong>{isZh ? '尚未满足' : 'Still required'}</strong>
-          <ul>{proposal.blockedReasons.map((reason) => <li key={reason}>{reason.replaceAll('_', ' ')}</li>)}</ul>
+          <ul>{proposal.blockedReasons.map((reason) => <li key={reason}>{guidedBlockedReasonLabel(reason, isZh)}</li>)}</ul>
         </div>
       ) : null}
     </div>
@@ -377,9 +435,13 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
   const [workflows, setWorkflows] = useState<GuidedWorkflow[]>([]);
   const [workflow, setWorkflow] = useState<GuidedWorkflow>();
   const [message, setMessage] = useState('');
+  const [eventGoalBatch, setEventGoalBatch] = useState<EventGoalBatchDraft>(
+    EMPTY_EVENT_GOAL_BATCH,
+  );
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
   const [busyAction, setBusyAction] = useState<string>();
   const [error, setError] = useState<string>();
+  const [credentialActionRequired, setCredentialActionRequired] = useState(false);
   const [advanceError, setAdvanceError] = useState<GuidedAdvanceBlocker>();
   const [localTurn, setLocalTurn] = useState<LocalGuidedTurn>();
   const [turnElapsedSeconds, setTurnElapsedSeconds] = useState(0);
@@ -387,6 +449,25 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
   const [operationError, setOperationError] = useState<string>();
   const [recoveryIntent, setRecoveryIntent] = useState<GuidedRecoveryIntent>();
   const [archiveRequested, setArchiveRequested] = useState(false);
+
+  const fillComposerFromEventGoalBatch = () => {
+    const labels = EVENT_GOAL_FIELD_LABELS;
+    setMessage((isZh
+      ? [
+          `${labels.title.zh}：${eventGoalBatch.title}`,
+          `${labels.summary.zh}：${eventGoalBatch.summary}`,
+          `${labels.instrument.zh}：${eventGoalBatch.instrument.toUpperCase()}`,
+          `${labels.asOf.zh}：${eventGoalBatch.asOf}`,
+          `${labels.researchQuestion.zh}：${eventGoalBatch.researchQuestion}`,
+        ]
+      : [
+          `${labels.title.en}: ${eventGoalBatch.title}`,
+          `${labels.summary.en}: ${eventGoalBatch.summary}`,
+          `${labels.instrument.en}: ${eventGoalBatch.instrument.toUpperCase()}`,
+          `${labels.asOf.en}: ${eventGoalBatch.asOf}`,
+          `${labels.researchQuestion.en}: ${eventGoalBatch.researchQuestion}`,
+        ]).join('\n'));
+  };
 
   const load = async () => {
     setState('loading');
@@ -557,6 +638,7 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
     if (clearComposer) setMessage('');
     setBusyAction('turn');
     setError(undefined);
+    setCredentialActionRequired(false);
     setAdvanceError(undefined);
     try {
       const next = await api.sendGuidedTurn(workflow.id, {
@@ -573,7 +655,14 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
     } catch (operationError) {
       setMessage(content);
       setLocalTurn({ ...optimisticTurn, status: 'failed' });
-      setError(operationError instanceof Error ? operationError.message : String(operationError));
+      setCredentialActionRequired(
+        operationError instanceof ApiError
+        && (
+          operationError.code === 'LLM_CREDENTIAL_EXPIRED'
+          || operationError.code === 'LLM_CREDENTIAL_NOT_CONFIGURED'
+        ),
+      );
+      setError(guidedTurnErrorMessage(operationError, isZh));
     } finally {
       setBusyAction(undefined);
     }
@@ -678,6 +767,14 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
 
   const currentStageIndex = workflow ? STAGES.indexOf(workflow.stage) : 0;
   const pendingProposal = workflow?.pendingProposal;
+  const eventGoalBatchCompleted = Object.values(eventGoalBatch)
+    .filter((value) => value.trim()).length;
+  const eventGoalProposalCompleted = pendingProposal
+    ? Math.max(0, 5 - (pendingProposal.missingFields?.length ?? 0))
+    : 0;
+  const eventGoalCompleted = workflow?.draft.eventMetadata
+    ? 5
+    : Math.max(eventGoalBatchCompleted, eventGoalProposalCompleted);
   const currentTurnOperation = localTurn
     ? turnOperations.find((operation) => operation.clientRequestId === localTurn.id)
     : undefined;
@@ -817,13 +914,20 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
       </section>
 
       {error && !advanceError ? (
-        <InlineNotification
-          kind="error"
-          lowContrast
-          hideCloseButton
-          title={isZh ? '操作没有完成' : 'Action was not completed'}
-          subtitle={error}
-        />
+        <div className="guided-inline-error">
+          <InlineNotification
+            kind="error"
+            lowContrast
+            hideCloseButton
+            title={isZh ? '操作没有完成' : 'Action was not completed'}
+            subtitle={error}
+          />
+          {credentialActionRequired ? (
+            <Button kind="tertiary" onClick={() => navigate('ai')}>
+              {isZh ? '前往 AI 配置' : 'Open AI configuration'}
+            </Button>
+          ) : null}
+        </div>
       ) : null}
 
       {workflows.length === 0 || !workflow ? (
@@ -926,6 +1030,74 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
                 ? '“应用候选”只把结构化建议放入引导草稿，不会创建、冻结或提交 Event Pack、情景或实验。'
                 : 'Apply candidate only copies a structured proposal into this guided draft. It does not create, freeze, or submit an Event Pack, scenario, or experiment.'}
             />
+
+            {workflow.stage === 'EVENT_GOAL' ? (
+              <section className="guided-event-goal-helper" aria-labelledby="guided-event-goal-helper-heading">
+                <header>
+                  <div>
+                    <span>{isZh ? '本阶段字段进度' : 'Field progress for this stage'}</span>
+                    <h3 id="guided-event-goal-helper-heading">
+                      {isZh
+                        ? `已填 ${eventGoalCompleted}/5`
+                        : `${eventGoalCompleted}/5 complete`}
+                    </h3>
+                  </div>
+                  <Tag type={workflow.draft.eventMetadata ? 'green' : 'cool-gray'}>
+                    {workflow.draft.eventMetadata
+                      ? isZh ? '完整草稿' : 'Complete draft'
+                      : isZh ? '待补全' : 'Incomplete'}
+                  </Tag>
+                </header>
+                <p>
+                  {isZh
+                    ? '推荐示例：我要研究 2024-01-05 阿拉斯加航空 1282 航班门塞脱落事件对波音（BA）的影响，重点比较做市能力下降是否放大流动性压力。'
+                    : 'Example: Study how the 2024-01-05 Alaska Airlines Flight 1282 door-plug event affected Boeing (BA), focusing on whether reduced market-making capacity amplified liquidity stress.'}
+                </p>
+                {!workflow.draft.eventMetadata ? (
+                  <details>
+                    <summary>{isZh ? '一次填写本阶段全部字段' : 'Complete every field in one batch'}</summary>
+                    <div className="guided-event-goal-helper__fields">
+                      {(Object.keys(EVENT_GOAL_FIELD_LABELS) as EventGoalField[]).map((field) => (
+                        <label key={field}>
+                          <span>{isZh ? EVENT_GOAL_FIELD_LABELS[field].zh : EVENT_GOAL_FIELD_LABELS[field].en}</span>
+                          {field === 'summary' || field === 'researchQuestion' ? (
+                            <textarea
+                              rows={3}
+                              value={eventGoalBatch[field]}
+                              onChange={(event) => setEventGoalBatch((current) => ({
+                                ...current,
+                                [field]: event.target.value,
+                              }))}
+                            />
+                          ) : (
+                            <input
+                              type={field === 'asOf' ? 'date' : 'text'}
+                              value={eventGoalBatch[field]}
+                              onChange={(event) => setEventGoalBatch((current) => ({
+                                ...current,
+                                [field]: event.target.value,
+                              }))}
+                            />
+                          )}
+                        </label>
+                      ))}
+                    </div>
+                    <div className="guided-event-goal-helper__actions">
+                      <Button
+                        size="sm"
+                        disabled={Object.values(eventGoalBatch).some((value) => !value.trim())}
+                        onClick={fillComposerFromEventGoalBatch}
+                      >
+                        {isZh ? '放入对话并一次提交' : 'Put all fields in the composer'}
+                      </Button>
+                      <Button kind="ghost" size="sm" onClick={() => navigate('factory')}>
+                        {isZh ? '切换到专家手动入口' : 'Use expert manual entry'}
+                      </Button>
+                    </div>
+                  </details>
+                ) : null}
+              </section>
+            ) : null}
 
             <div className="guided-conversation" aria-live="polite">
               {workflow.messages.map((item) => (

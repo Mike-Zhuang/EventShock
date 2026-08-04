@@ -636,6 +636,60 @@ class GuidedWorkflowRepository:
             replayed=False,
         )
 
+    def replayTurnIfKnown(
+        self,
+        *,
+        workflowId: str,
+        ownerUserId: str,
+        clientRequestId: str,
+        requestHash: str,
+    ) -> GuidedWorkflowView | None:
+        """只读检查幂等键；未知新请求不会写数据库。"""
+
+        with self.database.connection() as connection:
+            operation = connection.execute(
+                """
+                SELECT * FROM guided_workflow_turn_operations
+                WHERE workflow_id=? AND owner_user_id=? AND client_request_id=?
+                """,
+                (workflowId, ownerUserId, clientRequestId),
+            ).fetchone()
+            if operation is not None:
+                if operation["request_hash"] != requestHash:
+                    raise GuidedWorkflowConflictError(
+                        "clientRequestId is already bound to a different guided turn"
+                    )
+                if operation["status"] == "SUCCEEDED":
+                    return self._operationResponse(
+                        connection,
+                        workflowId,
+                        ownerUserId,
+                        operation["response_json"],
+                    )
+                raise GuidedWorkflowConflictError(
+                    "the original guided turn outcome is pending or unknown; "
+                    "automatic provider retry is disabled"
+                )
+            legacy = connection.execute(
+                """
+                SELECT request_hash FROM guided_workflow_requests
+                WHERE workflow_id=? AND owner_user_id=? AND client_request_id=?
+                """,
+                (workflowId, ownerUserId, clientRequestId),
+            ).fetchone()
+            if legacy is None:
+                return None
+            if legacy["request_hash"] != requestHash:
+                raise GuidedWorkflowConflictError(
+                    "clientRequestId is already bound to a different guided turn"
+                )
+            return self._operationResponse(
+                connection,
+                workflowId,
+                ownerUserId,
+                None,
+            )
+
     def cacheValidatedProposal(
         self,
         *,

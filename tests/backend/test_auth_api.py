@@ -315,10 +315,28 @@ def test_configured_admin_can_persist_replace_and_delete_encrypted_api_key(
         assert saved.json()["storageScope"] == "ADMIN_SERVER_ENCRYPTED"
         assert persistentApiKey not in saved.text
 
+        updatedSettings = client.patch(
+            "/api/v1/admin/llm-credential",
+            headers=mutationHeaders,
+            json={
+                "currentPassword": ADMIN_PASSWORD,
+                "model": "glm-5.2",
+                "thinkingEnabled": False,
+                "maxTokens": 4_096,
+                "advancedParameters": {"temperature": 0.2},
+            },
+        )
+        assert updatedSettings.status_code == 200, updatedSettings.json()
+        assert updatedSettings.json()["provider"] == "zhipu"
+        assert updatedSettings.json()["model"] == "glm-5.2"
+        assert updatedSettings.json()["credentialHint"] == "••••7391"
+        assert persistentApiKey not in updatedSettings.text
+
         activeConfig = client.get("/api/v1/llm/config")
         assert activeConfig.status_code == 200
         assert activeConfig.json()["configured"] is True
         assert activeConfig.json()["credential_source"] == "ADMIN_SERVER_ENCRYPTED"
+        assert activeConfig.json()["model"] == "glm-5.2"
         assert persistentApiKey not in activeConfig.text
 
         database = Database(tmp_path / "eventshock.db")

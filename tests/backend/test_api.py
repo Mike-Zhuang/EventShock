@@ -7,6 +7,7 @@ import time
 import zipfile
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.cognition import (
@@ -1034,7 +1035,75 @@ def test_preregistered_ci_stopping_rule_can_end_after_minimum_pairs(tmp_path: Pa
     assert results["manifest"]["requestedMaximumPairs"] == 10
 
 
-def test_retryable_experiment_resumes_verified_matched_pair_checkpoint(tmp_path: Path) -> None:
+@pytest.mark.parametrize("seedCount", [25, 50])
+def test_full_size_rule_run_uses_normalized_checkpoint_storage(
+    tmp_path: Path,
+    seedCount: int,
+) -> None:
+    """复现用户报告的 56 Agent × 120 步规模，并覆盖 25/50 对终态。"""
+    with TestClient(createApp(tmp_path)) as client:
+        approveAndFreeze(client, SESSION_A)
+        payload = {
+            **experimentPayload(),
+            "seedCount": seedCount,
+            "populationSize": 56,
+            "steps": 120,
+            "stoppingRule": {
+                "minimumPairs": 10,
+                "maximumPairs": seedCount,
+                "targetCiHalfWidth": None,
+            },
+        }
+        created = client.post(
+            "/api/v1/experiments",
+            headers={
+                "X-Session-ID": SESSION_A,
+                "Idempotency-Key": f"checkpoint-capacity-{seedCount}-pairs",
+            },
+            json=payload,
+        )
+        assert created.status_code == 201
+        experimentId = created.json()["id"]
+        started = client.post(
+            f"/api/v1/experiments/{experimentId}/start",
+            headers={"X-Session-ID": SESSION_A},
+        )
+        assert started.status_code == 200
+        deadline = time.monotonic() + 180
+        statusPayload = started.json()
+        while (
+            statusPayload["status"] not in {"COMPLETED", "FAILED_FINAL"}
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.05)
+            statusPayload = client.get(
+                f"/api/v1/experiments/{experimentId}",
+                headers={"X-Session-ID": SESSION_A},
+            ).json()
+        results = client.get(
+            f"/api/v1/experiments/{experimentId}/results",
+            headers={"X-Session-ID": SESSION_A},
+        )
+        persisted = client.app.state.database.getExperiment(experimentId, SESSION_A)
+        with client.app.state.database.connection() as connection:
+            checkpointRows = connection.execute(
+                "SELECT COUNT(*) FROM experiment_checkpoint_pairs WHERE experiment_id=?",
+                (experimentId,),
+            ).fetchone()[0]
+
+    assert statusPayload["status"] == "COMPLETED"
+    assert results.status_code == 200
+    assert len(results.json()["pairedRuns"]) == seedCount
+    assert persisted is not None
+    assert persisted["checkpoint"] is None
+    assert checkpointRows == 0
+
+
+@pytest.mark.parametrize("checkpointFormat", ["LEGACY_EMBEDDED", "NORMALIZED_V1"])
+def test_retryable_experiment_resumes_verified_matched_pair_checkpoint(
+    tmp_path: Path,
+    checkpointFormat: str,
+) -> None:
     with TestClient(createApp(tmp_path)) as client:
         approveAndFreeze(client, SESSION_A)
         created = client.post(
@@ -1082,15 +1151,35 @@ def test_retryable_experiment_resumes_verified_matched_pair_checkpoint(tmp_path:
         seeds = [
             requestData["seedRoot"] + index * 1_009 for index in range(requestData["seedCount"])
         ]
-        checkpoint = service._checkpointPayload(
-            requestHash=_hashJson(requestData),
-            eventPackHash=_hashJson(eventPack),
-            seedListHash=_hashJson(seeds),
-            baselineRuns=[baselineRun],
-            interventionRuns=[interventionRun],
-            cognitionRun=cognitionRun,
-            stoppingDecision=stoppingDecision,
-        )
+        if checkpointFormat == "NORMALIZED_V1":
+            database.saveExperimentCheckpointPair(
+                experimentId=experimentId,
+                ownerUserId=SESSION_A,
+                pairIndex=0,
+                seed=seed,
+                baselineRun=baselineRun,
+                interventionRun=interventionRun,
+                populationSize=requestData["populationSize"],
+                steps=requestData["steps"],
+            )
+            checkpoint = service._checkpointPayload(
+                requestHash=_hashJson(requestData),
+                eventPackHash=_hashJson(eventPack),
+                seedListHash=_hashJson(seeds),
+                completedPairs=1,
+                cognitionRun=cognitionRun,
+                stoppingDecision=stoppingDecision,
+            )
+        else:
+            checkpoint = service._checkpointPayload(
+                requestHash=_hashJson(requestData),
+                eventPackHash=_hashJson(eventPack),
+                seedListHash=_hashJson(seeds),
+                baselineRuns=[baselineRun],
+                interventionRuns=[interventionRun],
+                cognitionRun=cognitionRun,
+                stoppingDecision=stoppingDecision,
+            )
         database.updateExperiment(
             experimentId,
             SESSION_A,
@@ -1137,6 +1226,11 @@ def test_retryable_experiment_resumes_verified_matched_pair_checkpoint(tmp_path:
         "Resumed from a verified checkpoint" in entry["message"]
         for entry in statusPayload["runtime"]["logs"]
     )
+    if checkpointFormat == "LEGACY_EMBEDDED":
+        assert any(
+            entry.get("code") == "CHECKPOINT_STORAGE_MIGRATED"
+            for entry in statusPayload["runtime"]["logs"]
+        )
     assert results.status_code == 200
     assert len(results.json()["pairedRuns"]) == 10
     assert any(item["action"] == "RUN_RESUMED_FROM_CHECKPOINT" for item in audit)

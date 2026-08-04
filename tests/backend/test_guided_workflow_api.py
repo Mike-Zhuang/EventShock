@@ -355,6 +355,7 @@ class FakeGuidedCognition:
 
 def test_guided_workflow_api_persists_owner_scoped_turns(tmp_path: Path) -> None:
     with TestClient(createApp(dataDir=tmp_path)) as client:
+        client.app.state.cognitionService = FakeGuidedCognition()
         created = client.post(
             "/api/v1/guided-workflows",
             headers=_headers(),
@@ -378,7 +379,7 @@ def test_guided_workflow_api_persists_owner_scoped_turns(tmp_path: Path) -> None
         assert turn.status_code == 200
         updated = turn.json()
         assert updated["version"] == 2
-        assert updated["pendingProposal"]["blockedReasons"] == ["LLM_CREDENTIAL_NOT_CONFIGURED"]
+        assert updated["pendingProposal"]["readyForHumanReview"] is True
         assert [message["role"] for message in updated["messages"][-2:]] == [
             "user",
             "assistant",
@@ -403,6 +404,41 @@ def test_guided_workflow_api_persists_owner_scoped_turns(tmp_path: Path) -> None
             headers=_headers("guided-owner-0002"),
         )
         assert otherOwner.status_code == 404
+
+
+def test_guided_turn_without_credential_preserves_unconsumed_message(
+    tmp_path: Path,
+) -> None:
+    with TestClient(createApp(dataDir=tmp_path)) as client:
+        workflow = client.post(
+            "/api/v1/guided-workflows",
+            headers=_headers(),
+            json={"language": "zh-CN"},
+        ).json()
+        response = client.post(
+            f"/api/v1/guided-workflows/{workflow['id']}/turn",
+            headers=_headers(),
+            json={
+                "message": "我想研究一个公开事件对市场流动性的影响。",
+                "language": "zh-CN",
+                "expectedVersion": 1,
+                "clientRequestId": "guided-request-no-credential-0001",
+            },
+        )
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "LLM_CREDENTIAL_NOT_CONFIGURED"
+
+        stored = client.get(
+            f"/api/v1/guided-workflows/{workflow['id']}",
+            headers=_headers(),
+        ).json()
+        operations = client.get(
+            f"/api/v1/guided-workflows/{workflow['id']}/operations",
+            headers=_headers(),
+        ).json()
+        assert stored["version"] == 1
+        assert len(stored["messages"]) == 1
+        assert operations["items"] == []
 
 
 def test_guided_workflow_api_rejects_unsafe_message_before_persistence(

@@ -104,6 +104,40 @@ def test_admin_credential_is_encrypted_and_survives_vault_restart(tmp_path: Path
     assert apiKey.encode("utf-8") not in databaseBytes
 
 
+def test_admin_can_update_model_settings_without_resubmitting_api_key(tmp_path: Path) -> None:
+    database, vault, userId = createVault(tmp_path, encryptionKey=Fernet.generate_key())
+    apiKey = "persistent-provider-key-keep-4826"
+    saveCredential(vault, userId=userId, apiKey=apiKey)
+    before = vault.getView(userId)
+
+    updated = vault.updateConfiguration(
+        userId=userId,
+        model="glm-5.2",
+        thinkingEnabled=False,
+        maxTokens=4_096,
+        advancedParameters=AdvancedModelParameters(temperature=0.2),
+    )
+    runtime = vault.resolveRuntimeReference(
+        adminCredentialReference(
+            userId=userId,
+            authSessionId="auth-session-update-12345678",
+        )
+    )
+
+    assert updated.model == "glm-5.2"
+    assert updated.maxTokens == 4_096
+    assert updated.credentialHint == "••••4826"
+    assert updated.persistedAt == before.persistedAt
+    assert runtime is not None
+    assert runtime.apiKey == apiKey
+    assert runtime.advancedParameters.temperature == 0.2
+    databaseBytes = database.databasePath.read_bytes()
+    walPath = Path(f"{database.databasePath}-wal")
+    if walPath.exists():
+        databaseBytes += walPath.read_bytes()
+    assert apiKey.encode("utf-8") not in databaseBytes
+
+
 def test_session_config_precedes_then_falls_back_to_admin_vault(tmp_path: Path) -> None:
     database, vault, userId = createVault(tmp_path, encryptionKey=Fernet.generate_key())
     saveCredential(vault, userId=userId, apiKey="persistent-provider-key-1111")
