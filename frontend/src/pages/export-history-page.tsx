@@ -11,6 +11,7 @@ import type { CaseSummary, Experiment } from '../api/types';
 import type { Navigate } from '../app';
 import { EmptyState, LoadingPanel, PageHeader, StatusBadge } from '../components/common';
 import { ExperimentHistoryDisclosure, experimentHistoryLabel } from '../components/experiment-history';
+import { SyntheticInstrumentLabel } from '../components/synthetic-instrument-label';
 import { useI18n } from '../i18n';
 import { getPageGuide } from '../page-guidance';
 import { useWorkflow } from '../state/workflow-context';
@@ -483,6 +484,10 @@ export function ExportHistoryPage({ navigate }: { navigate: Navigate }) {
                           {localizedEventTitle(experiment, casesByEventPackId, language)}
                         </strong>
                         <span>{localizedResearchQuestion(experiment, language)}</span>
+                        <SyntheticInstrumentLabel
+                          instrument={experiment.scenario?.market?.instrumentId}
+                          compact
+                        />
                         <small>
                           <code>{experiment.id}</code>
                           {' · '}

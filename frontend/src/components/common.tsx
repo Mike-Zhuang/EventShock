@@ -338,7 +338,8 @@ export function StatusBadge({ status, type }: { status: string; type?: 'gray' | 
         : ['RUNNING', 'QUEUED', 'AGGREGATING', 'CANCEL_REQUESTED', 'AI_PROPOSED'].includes(upper) ? 'blue'
           : 'gray'
   );
-  return <Tag type={tagType} size="sm">{translateStatus(status, t)}</Tag>;
+  const label = translateStatus(status, t);
+  return <Tag type={tagType} size="sm" title={label} aria-label={label}>{label}</Tag>;
 }
 
 export function ApiConnectionBanner() {

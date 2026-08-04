@@ -106,6 +106,13 @@ const ROUTE_TARGET_VIEWS: Record<RouteTargetId, Extract<ViewId, 'results' | 'tra
   'result-manifest-heading': 'results',
 };
 
+export function focusMainContent(): void {
+  const mainContent = document.getElementById('main-content');
+  if (!(mainContent instanceof HTMLElement)) return;
+  mainContent.focus({ preventScroll: true });
+  mainContent.scrollIntoView({ behavior: 'auto', block: 'start' });
+}
+
 interface NavigationItem {
   id: ViewId;
   label: string;
@@ -532,7 +539,16 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
 
   return (
     <Theme theme={isDark ? 'g100' : 'g10'} className="app-theme">
-      <a className="skip-link" href="#main-content">{t('app.skip')}</a>
+      <a
+        className="skip-link"
+        href="#main-content"
+        onClick={(event) => {
+          event.preventDefault();
+          focusMainContent();
+        }}
+      >
+        {t('app.skip')}
+      </a>
       <div className="app-shell">
         <header className="topbar">
           <div className="topbar__brand">

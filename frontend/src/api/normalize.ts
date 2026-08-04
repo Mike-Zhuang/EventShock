@@ -1183,6 +1183,9 @@ function normalizeScenario(value: unknown): ScenarioDraft | undefined {
     eventPackId,
     question: asOptionalString(read(value, 'question')),
     questionZh: asOptionalString(read(value, 'questionZh', 'question_zh')),
+    questionInterventionParameter: asParameter(
+      read(value, 'questionInterventionParameter', 'question_intervention_parameter'),
+    ),
     intervention,
     seedCount: seedCount as 10 | 25 | 50,
     seedRoot: asNumber(read(value, 'seedRoot', 'seed_root')),
@@ -1393,6 +1396,7 @@ export function normalizeCases(value: unknown): CaseSummary[] {
         description: asOptionalString(read(item, 'description', 'summary')),
         descriptionZh: asOptionalString(read(item, 'summaryZh', 'descriptionZh', 'summary_zh')),
         eventPackId: asOptionalString(read(item, 'eventPackId', 'event_pack_id')),
+        instrument: asOptionalString(read(item, 'instrument')),
         status: asOptionalString(read(item, 'status')),
         isSynthetic: asBoolean(read(item, 'synthetic', 'isSynthetic', 'is_synthetic')),
         syntheticLabel: asOptionalString(read(item, 'syntheticLabel')),
@@ -2389,6 +2393,35 @@ export function normalizeResultInterpretationAssistantMessage(
       evidenceId: requireResultInterpretationString(item, 'evidenceId', 'evidence_id'),
     };
   });
+  const rawSemanticValidationStatus = read(
+    value,
+    'semanticValidationStatus',
+    'semantic_validation_status',
+  );
+  const semanticValidationStatuses = [
+    'PASSED',
+    'REPAIRED',
+    'DETERMINISTIC_FALLBACK',
+    'NOT_RECORDED',
+  ] as const;
+  const semanticValidationStatus = typeof rawSemanticValidationStatus === 'string'
+    && semanticValidationStatuses.includes(
+      rawSemanticValidationStatus as (typeof semanticValidationStatuses)[number],
+    )
+    ? rawSemanticValidationStatus as (typeof semanticValidationStatuses)[number]
+    : undefined;
+  if (rawSemanticValidationStatus !== undefined && semanticValidationStatus === undefined) {
+    throw new TypeError('Result interpretation message has an invalid semanticValidationStatus.');
+  }
+  const rawDeterministicFallbackUsed = read(
+    value,
+    'deterministicFallbackUsed',
+    'deterministic_fallback_used',
+  );
+  if (rawDeterministicFallbackUsed !== undefined
+    && typeof rawDeterministicFallbackUsed !== 'boolean') {
+    throw new TypeError('Result interpretation message has an invalid deterministicFallbackUsed.');
+  }
   return {
     id: requireResultInterpretationString(value, 'id'),
     role: 'assistant',
@@ -2422,6 +2455,8 @@ export function normalizeResultInterpretationAssistantMessage(
     cacheHit: requireResultInterpretationBoolean(value, 'cacheHit', 'cache_hit'),
     repairUsed: requireResultInterpretationBoolean(value, 'repairUsed', 'repair_used'),
     plannerUsed: requireResultInterpretationBoolean(value, 'plannerUsed', 'planner_used'),
+    semanticValidationStatus,
+    deterministicFallbackUsed: rawDeterministicFallbackUsed as boolean | undefined,
     promptVersion: requireResultInterpretationString(value, 'promptVersion', 'prompt_version'),
     latencyMs: requireResultInterpretationNumber(value, 'latencyMs', 'latency_ms'),
     createdAt: requireResultInterpretationDate(value, 'createdAt', 'created_at'),

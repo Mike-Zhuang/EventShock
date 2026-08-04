@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from './api/client';
 import type { UserPreferencesInput } from './api/types';
-import { App, buildAppHash, parseAppRoute } from './app';
+import { App, buildAppHash, focusMainContent, parseAppRoute } from './app';
 
 vi.mock('./api/client', () => ({
   AUTH_SESSION_EXPIRED_EVENT: 'eventshock:auth-session-expired',
@@ -165,6 +165,21 @@ describe('移动主导航', () => {
       experimentId: 'ignored',
       target: 'metrics-heading',
     })).toBe('#/cases');
+  });
+
+  it('跳到主要内容时保留单页应用路由并恢复键盘焦点', () => {
+    window.history.replaceState(null, '', '#/scenario');
+    const main = document.createElement('main');
+    main.id = 'main-content';
+    main.tabIndex = -1;
+    document.body.append(main);
+
+    focusMainContent();
+
+    expect(document.activeElement).toBe(main);
+    expect(main.scrollIntoView).toHaveBeenCalledWith({ behavior: 'auto', block: 'start' });
+    expect(window.location.hash).toBe('#/scenario');
+    main.remove();
   });
 
   it('恢复登录会话时只在空路由进入用户保存的默认工作区', async () => {

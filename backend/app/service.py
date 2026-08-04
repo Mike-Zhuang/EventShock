@@ -302,6 +302,17 @@ class EventPackService:
         if canonical is None:
             raise ApiError("EVENT_PACK_NOT_FOUND", 404, "The Event Pack does not exist.")
         eventPack = copy.deepcopy(canonical)
+        if eventPackId in self.canonicalPacks:
+            defaultExperiment = eventPack.get("defaultExperiment")
+            if isinstance(defaultExperiment, dict):
+                intervention = defaultExperiment.get("intervention")
+                if isinstance(intervention, dict):
+                    # 内置案例的问题与干预由同一份受版本控制的清单发布，可直接
+                    # 标记为已对齐；旧的用户草稿仍保持未确认并要求人工复核。
+                    defaultExperiment.setdefault(
+                        "questionInterventionParameter",
+                        intervention.get("parameter"),
+                    )
         draft = self.database.getEventPackDraft(sessionId, eventPackId) if sessionId else None
         if draft:
             eventPack["claims"] = draft["claims"]
@@ -373,6 +384,7 @@ class EventPackService:
                     "How does lower market-making capacity change the simulated risk distribution?"
                 ),
                 "questionZh": "较低的做市能力会如何改变模拟风险分布？",
+                "questionInterventionParameter": "marketMakerCapacity",
                 "intervention": {
                     "parameter": "marketMakerCapacity",
                     "baselineValue": 1.0,
@@ -933,6 +945,45 @@ class EventPackService:
                 "SINGLE_REGISTERED_INTERVENTION",
                 "PASS",
                 "Exactly one registered intervention differs from the baseline.",
+            )
+
+        questionParameter = requestData.questionInterventionParameter
+        interventionParameter = requestData.intervention.parameter
+        if questionParameter is None:
+            warnings.append(
+                {
+                    "code": "QUESTION_INTERVENTION_REVIEW_REQUIRED",
+                    "message": (
+                        "The research question has no recorded human confirmation for the "
+                        "selected intervention. Review it before using this draft in the UI."
+                    ),
+                }
+            )
+            addCheck(
+                "QUESTION_INTERVENTION_ALIGNMENT",
+                "WARN",
+                "The research question and selected intervention require explicit review.",
+            )
+        elif questionParameter != interventionParameter:
+            errors.append(
+                {
+                    "code": "QUESTION_INTERVENTION_MISMATCH",
+                    "message": (
+                        "The research question was confirmed for a different intervention. "
+                        "Regenerate it or explicitly confirm the current wording."
+                    ),
+                }
+            )
+            addCheck(
+                "QUESTION_INTERVENTION_ALIGNMENT",
+                "FAIL",
+                "The research question was confirmed for a different intervention.",
+            )
+        else:
+            addCheck(
+                "QUESTION_INTERVENTION_ALIGNMENT",
+                "PASS",
+                "The research question was explicitly confirmed for the selected intervention.",
             )
 
         unknownOutcomes = sorted(

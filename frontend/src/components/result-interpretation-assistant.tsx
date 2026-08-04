@@ -36,6 +36,11 @@ import type {
 import { LoadingPanel, Notice } from './common';
 import { useI18n } from '../i18n';
 import { sanitizeResultEvidencePlainText } from './result-evidence';
+import {
+  humanizeTechnicalText,
+  TechnicalCodeDisplay,
+  technicalCodeLabel,
+} from './technical-code';
 import { ResultInterpretationContent } from './result-interpretation-content';
 
 const MAX_QUESTION_CHARACTERS = 2_000;
@@ -1016,8 +1021,8 @@ export function ResultInterpretationAssistant({
                     <strong>{t('results.assistantSuggestions')}</strong>
                     <div>
                       {message.followUpSuggestions.map((suggestion, suggestionIndex) => {
-                        const visibleSuggestion = sanitizeResultEvidencePlainText(
-                          suggestion,
+                        const visibleSuggestion = humanizeTechnicalText(
+                          sanitizeResultEvidencePlainText(suggestion, language),
                           language,
                         );
                         const category = followUpSuggestionCategory(visibleSuggestion);
@@ -1166,17 +1171,24 @@ export function ResultInterpretationAssistant({
             title={t('results.assistantErrorTitle')}
             subtitle={requestError.message}
           />
-          {requestError.code || requestError.traceId ? (
-            <p className="result-assistant__error-meta">
-              {requestError.code ? <code>{requestError.code}</code> : null}
-              {requestError.traceId ? <span>{isZh ? '追踪号' : 'Trace'}: <code>{requestError.traceId}</code></span> : null}
-            </p>
+          {requestError.code || requestError.failureStage ? (
+            <TechnicalCodeDisplay
+              codes={[requestError.code, requestError.failureStage]}
+              language={language}
+            />
+          ) : null}
+          {requestError.traceId ? (
+            <details className="result-assistant__error-meta">
+              <summary>{isZh ? '支持诊断信息' : 'Support diagnostic'}</summary>
+              <span>{isZh ? '追踪号' : 'Trace'}: <code>{requestError.traceId}</code></span>
+            </details>
           ) : null}
           <dl className="definition-list definition-list--compact">
             <div>
               <dt>{isZh ? '失败阶段' : 'Failure stage'}</dt>
-              <dd>{requestError.failureStage?.replaceAll('_', ' ')
-                ?? (isZh ? '未记录' : 'Not recorded')}</dd>
+              <dd>{requestError.failureStage
+                ? technicalCodeLabel(requestError.failureStage, language)
+                : isZh ? '未记录' : 'Not recorded'}</dd>
             </div>
             <div>
               <dt>{isZh ? '修复尝试' : 'Repair attempt'}</dt>

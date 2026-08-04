@@ -34,6 +34,12 @@ import {
 } from '../components/common';
 import { ExperimentHistoryDisclosure, experimentHistoryLabel } from '../components/experiment-history';
 import { ResultInterpretationAssistant } from '../components/result-interpretation-assistant';
+import { SyntheticInstrumentLabel } from '../components/synthetic-instrument-label';
+import {
+  humanizeTechnicalText,
+  TechnicalCodeDisplay,
+  technicalCodeLabel,
+} from '../components/technical-code';
 import { SimulatedChart } from '../components/simulated-chart';
 import { translateParameter, translateStatus, useI18n } from '../i18n';
 import { getPageGuide } from '../page-guidance';
@@ -57,6 +63,28 @@ const METRIC_CATALOG = [
   { id: 'orderImbalance', labelKey: 'metric.orderImbalance' as const },
   { id: 'cascadeScore', labelKey: 'metric.cascadeScore' as const },
 ];
+
+export function exactZeroRegisteredOutcomes(
+  metrics: MetricResult[],
+  pairedSeries: Record<string, Array<{ delta: number }>>,
+  outcomeIds: string[],
+): string[] {
+  const uniqueIds = [...new Set(outcomeIds.filter(Boolean))];
+  if (uniqueIds.length === 0) return [];
+  const metricsById = new Map(metrics.map((metric) => [metric.id, metric]));
+  const exactZeroIds = uniqueIds.filter((outcomeId) => {
+    const metric = metricsById.get(outcomeId);
+    const pairedPoints = pairedSeries[outcomeId] ?? [];
+    const intervalLow = metric?.bootstrapCiLow ?? metric?.ciLow;
+    const intervalHigh = metric?.bootstrapCiHigh ?? metric?.ciHigh;
+    return metric?.delta === 0
+      && intervalLow === 0
+      && intervalHigh === 0
+      && pairedPoints.length > 0
+      && pairedPoints.every((point) => point.delta === 0);
+  });
+  return exactZeroIds.length === uniqueIds.length ? exactZeroIds : [];
+}
 
 const EXTENDED_METRIC_LABELS: Record<string, { en: string; zh: string }> = {
   returnQuantile05Pct: { en: '5% return quantile', zh: '收益率 5% 分位数' },
@@ -408,6 +436,17 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
     ?? results?.analysisDiagnostics?.preregisteredPrimaryOutcome
     ?? results?.primaryMetricId;
   const primaryMetricUnit = results?.metrics.find((metric) => metric.id === primaryMetricId)?.unit;
+  const registeredOutcomeIds = useMemo(() => [
+    primaryMetricId,
+    ...(activeExperiment?.scenario?.secondaryOutcomes ?? []),
+  ].filter((outcomeId): outcomeId is string => Boolean(outcomeId)), [
+    activeExperiment?.scenario?.secondaryOutcomes,
+    primaryMetricId,
+  ]);
+  const exactZeroOutcomeIds = useMemo(() => results
+    ? exactZeroRegisteredOutcomes(results.metrics, results.pairedSeries, registeredOutcomeIds)
+    : [], [registeredOutcomeIds, results]);
+  const hasInterventionDifferenceTrace = results?.traces.some((node) => node.isInterventionDifference) ?? false;
   const strongestFindings = useMemo(() => {
     const metricsById = new Map(metrics.map((metric) => [metric.id, metric]));
     return (results?.strongestMetricIds ?? []).flatMap((metricId) => {
@@ -713,6 +752,27 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
         </div>
       </section>
       <Notice>{t('results.disclaimer')}</Notice>
+      {exactZeroOutcomeIds.length > 0 ? (
+        <section className="result-zero-diagnostic" aria-labelledby="result-zero-diagnostic-heading">
+          <InlineNotification
+            kind="warning"
+            lowContrast
+            hideCloseButton
+            title={isZh ? '所有已注册结果均为精确零差异，需要先做机制诊断' : 'Every registered outcome has an exact zero difference; diagnose mechanism activation first'}
+            subtitle={isZh
+              ? `这不是“现实中没有影响”的证据。已检测到 ${exactZeroOutcomeIds.length} 项结果在全部配对种子、配对中位数和区间上均为零；可能原因包括干预未激活、订单意图未改变、指标不敏感或数值量化。${hasInterventionDifferenceTrace ? '追踪中存在干预差异节点，请检查差异在哪一步消失。' : '追踪中尚未记录干预差异节点，优先核对参数是否真正进入运行机制。'}`
+              : `This is not evidence of no real-world effect. ${exactZeroOutcomeIds.length} outcome(s) are zero for every paired seed, the paired median, and the interval. Possible causes include an inactive intervention, unchanged order intent, insensitive outcomes, or numerical quantization. ${hasInterventionDifferenceTrace ? 'The trace contains intervention-difference nodes; inspect where the difference disappears.' : 'No intervention-difference trace was recorded; first verify that the parameter reached an active runtime mechanism.'}`}
+          />
+          <div className="result-zero-diagnostic__actions">
+            <Button kind="tertiary" size="sm" onClick={() => navigate('trace', { experimentId: results.experimentId, target: 'trace-timeline-heading' })}>
+              {isZh ? '检查机制链路' : 'Inspect mechanism trace'}
+            </Button>
+            <Button kind="ghost" size="sm" onClick={() => navigate('governance')}>
+              {isZh ? '查看验证边界' : 'Review validation boundary'}
+            </Button>
+          </div>
+        </section>
+      ) : null}
       <Modal
         open={invalidationOpen}
         danger
@@ -776,6 +836,10 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
             {overviewQuestion && results.narrativeReport ? (
               <div><dt>{language === 'zh-CN' ? '研究问题' : 'Research question'}</dt><dd>{overviewQuestion}</dd></div>
             ) : null}
+            <div>
+              <dt>{language === 'zh-CN' ? '合成标的' : 'Synthetic instrument'}</dt>
+              <dd><SyntheticInstrumentLabel instrument={activeExperiment.scenario?.market?.instrumentId} /></dd>
+            </div>
             <div>
               <dt>{language === 'zh-CN' ? '单一干预' : 'Single intervention'}</dt>
               <dd>{overviewIntervention
@@ -1136,8 +1200,14 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
                     ? language === 'zh-CN' ? '混合模式包含部分规则回退' : 'Hybrid mode includes partial rule fallback'
                     : language === 'zh-CN' ? '混合模式已显式降级' : 'Hybrid mode used an explicit fallback'}
                   subtitle={results.cognition.fallbackReasons.length > 0
-                    ? results.cognition.fallbackReasons.join(', ')
-                    : results.cognition.failureCode ?? (language === 'zh-CN' ? '未返回具体原因' : 'No specific reason returned')}
+                    ? results.cognition.fallbackReasons.map((code) => technicalCodeLabel(code, language)).join(language === 'zh-CN' ? '；' : '; ')
+                    : technicalCodeLabel(results.cognition.failureCode, language)}
+                />
+              ) : null}
+              {results.cognition.failureCode || results.cognition.fallbackReasons.length > 0 ? (
+                <TechnicalCodeDisplay
+                  codes={[results.cognition.failureCode, ...results.cognition.fallbackReasons]}
+                  language={language}
                 />
               ) : null}
               {results.cognition.costBudget ? (
@@ -1170,8 +1240,8 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
                         <div><dt>{language === 'zh-CN' ? '生效步 / 间隔' : 'Active step / interval'}</dt><dd>{decision.activeFromStep ?? t('common.unavailable')} / {decision.decisionIntervalSteps ?? t('common.unavailable')}</dd></div>
                         <div><dt>{language === 'zh-CN' ? '证据 / 社交 / 记忆条数' : 'Evidence / social / memory counts'}</dt><dd>{decision.evidenceCount ?? 0} / {decision.socialPostCount ?? 0} / {decision.memoryCount ?? 0}</dd></div>
                         <div><dt>{language === 'zh-CN' ? '修复 / 规则回退' : 'Repair / rule fallback'}</dt><dd>{decision.repairUsed ? language === 'zh-CN' ? '是' : 'Yes' : language === 'zh-CN' ? '否' : 'No'} / {decision.fallbackUsed ? language === 'zh-CN' ? '是' : 'Yes' : language === 'zh-CN' ? '否' : 'No'}</dd></div>
-                        <div><dt>{language === 'zh-CN' ? '失败原因' : 'Failure reason'}</dt><dd>{decision.failureReason ?? t('common.unavailable')}</dd></div>
-                        <div><dt>{language === 'zh-CN' ? '失败代码' : 'Failure codes'}</dt><dd>{decision.failureCodes.length > 0 ? decision.failureCodes.join(', ') : t('common.unavailable')}</dd></div>
+                        <div><dt>{language === 'zh-CN' ? '失败原因' : 'Failure reason'}</dt><dd>{decision.failureReason ? humanizeTechnicalText(decision.failureReason, language) : t('common.unavailable')}</dd></div>
+                        <div><dt>{language === 'zh-CN' ? '失败代码' : 'Failure codes'}</dt><dd><TechnicalCodeDisplay codes={decision.failureCodes} language={language} /></dd></div>
                         <div><dt>{language === 'zh-CN' ? '传输尝试次数' : 'Transport attempts'}</dt><dd>{decision.transportAttempts ?? t('common.unavailable')}</dd></div>
                         <div><dt>{language === 'zh-CN' ? '输入 / 输出 token' : 'Input / output tokens'}</dt><dd>{(decision.promptTokens ?? 0).toLocaleString(language)} / {(decision.completionTokens ?? 0).toLocaleString(language)}</dd></div>
                         <div><dt>{language === 'zh-CN' ? '本次费用上界' : 'Call cost upper bound'}</dt><dd>${(decision.costUpperBoundUsd ?? 0).toFixed(6)} USD</dd></div>

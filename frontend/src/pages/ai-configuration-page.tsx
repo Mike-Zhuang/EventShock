@@ -29,6 +29,7 @@ import type {
   PromptRegistryItem,
 } from '../api/types';
 import { ErrorPanel, ExplainedLabel, LoadingPanel, Notice, PageHeader, ParameterHelp, StatusBadge } from '../components/common';
+import { TechnicalCodeDisplay, technicalCodeLabel } from '../components/technical-code';
 import { useI18n } from '../i18n';
 import { getPageGuide } from '../page-guidance';
 import { getParameterHelp } from '../parameter-help';
@@ -504,9 +505,12 @@ export function AiConfigurationPage() {
           subtitle={`${isZh
             ? testResult.ok
               ? `已验证 ${testResult.provider} / ${testResult.model} 的结构化响应。`
-              : `已生效配置未通过连接或结构化输出校验${testResult.failureCode ? `（${testResult.failureCode}）` : ''}。`
+              : `已生效配置未通过连接或结构化输出校验${testResult.failureCode ? `：${technicalCodeLabel(testResult.failureCode, language)}` : ''}。`
             : testResult.message}${testResult.latencyMs ? ` (${Math.round(testResult.latencyMs)} ms)` : ''}`}
         />
+      ) : null}
+      {testResult && !testResult.ok && testResult.failureCode ? (
+        <TechnicalCodeDisplay codes={[testResult.failureCode]} language={language} />
       ) : null}
       {hasUnsavedDraft ? (
         <InlineNotification

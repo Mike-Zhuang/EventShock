@@ -21,6 +21,7 @@ import type {
   ValidationLadderView,
 } from '../api/types';
 import { EmptyState, LoadingPanel, Notice, PageHeader, StatusBadge } from '../components/common';
+import { TechnicalCodeDisplay } from '../components/technical-code';
 import { GITHUB_REPOSITORY_URL } from '../external-links';
 import { useI18n } from '../i18n';
 import { getPageGuide } from '../page-guidance';
@@ -216,7 +217,12 @@ export function GovernancePage() {
             <div className="component-inventory-grid">
               {data.releaseGate.useCaseAxes.map((axis) => (
                 <article key={axis.axisId}>
-                  <Tag type={statusTagType(axis.status)} size="sm">
+                  <Tag
+                    type={statusTagType(axis.status)}
+                    size="sm"
+                    className={axis.status === 'PROHIBITED' ? 'governance-status--prohibited' : undefined}
+                    title={statusLabel(axis.status, isZh)}
+                  >
                     {statusLabel(axis.status, isZh)}
                   </Tag>
                   <h3>{isZh ? ({
@@ -462,7 +468,10 @@ export function GovernancePage() {
                     <tbody>
                       {Object.entries(data.evalSummary.telemetry.failureCategoryCounts).map(
                         ([category, count]) => (
-                          <tr key={category}><td><code>{category}</code></td><td>{count}</td></tr>
+                          <tr key={category}>
+                            <td><TechnicalCodeDisplay codes={[category]} language={language} /></td>
+                            <td>{count}</td>
+                          </tr>
                         ),
                       )}
                     </tbody>

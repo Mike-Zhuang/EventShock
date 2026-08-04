@@ -45,6 +45,7 @@ import {
   PageHeader,
   StatusBadge,
 } from '../components/common';
+import { SyntheticInstrumentLabel } from '../components/synthetic-instrument-label';
 import {
   clearFactoryGuidedHandoff,
   readFactoryGuidedHandoff,
@@ -416,11 +417,21 @@ function SourceCard({
           </ul>
           <div className="factory-source__security-actions">
             {rawTextAvailable ? (
-              <a href={`#factory-raw-panel-${source.id}`}>
+              <button
+                type="button"
+                className="factory-inline-link"
+                onClick={() => focusFactoryTarget(`factory-raw-panel-${source.id}`)}
+              >
                 {isZh ? '查看并编辑原文' : 'Review and edit raw text'}
-              </a>
+              </button>
             ) : null}
-            <a href="#factory-data-handling">{isZh ? '查看数据处理规则' : 'Review data-handling policy'}</a>
+            <button
+              type="button"
+              className="factory-inline-link"
+              onClick={() => focusFactoryTarget('factory-data-handling')}
+            >
+              {isZh ? '查看数据处理规则' : 'Review data-handling policy'}
+            </button>
           </div>
         </details>
       ) : null}
@@ -671,10 +682,14 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
           : undefined);
       const storedId = window.sessionStorage.getItem(FACTORY_BUILD_STORAGE_KEY);
       // 从 AI 引导进入时优先恢复其已绑定任务，避免误在另一任务继续并触发
-      // 后端的不可变工件保护。
-      const selected = nextBuilds.find(
+      // 后端的不可变工件保护。尚未绑定时不再自动选中上次或第一条任务，
+      // 避免用户把旧构建误认为本次引导新建的对象。
+      const linkedBuild = nextBuilds.find(
         (item) => item.id === nextGuidedWorkflow?.draft.eventPackBuildId,
-      ) ?? nextBuilds.find((item) => item.id === storedId) ?? nextBuilds[0];
+      );
+      const selected = linkedBuild ?? (!guidedHandoff
+        ? nextBuilds.find((item) => item.id === storedId) ?? nextBuilds[0]
+        : undefined);
       if (selected) await selectBuild(selected.id);
       if (guidedLoadError) {
         const message = factoryErrorMessage(guidedLoadError, isZh);
@@ -833,6 +848,11 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
       focusFactoryTarget('factory-overview-heading');
       return;
     }
+    if (guidedHandoff && !window.confirm(isZh
+      ? `创建任务“${title}”并将服务器返回的真实任务 ID 关联到当前 AI 引导？关联后，在任务仍存在期间不能用另一任务替换。`
+      : `Create build "${title}" and link its server-returned ID to the current AI guidance? While it exists, another build cannot replace it.`)) {
+      return;
+    }
     await run('create', async () => {
       const build = await api.createFactoryBuild(title);
       setBuilds((current) => [build, ...current]);
@@ -862,7 +882,7 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
       setMaterializeErrors({});
       idempotentAttempts.current.clear();
       window.sessionStorage.removeItem(FACTORY_BUILD_STORAGE_KEY);
-      if (remaining[0]) await selectBuild(remaining[0].id);
+      if (!guidedHandoff && remaining[0]) await selectBuild(remaining[0].id);
     });
   };
 
@@ -1358,16 +1378,16 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
   );
 
   if (state === 'loading') {
-    return <div className="page"><PageHeader title={isZh ? 'Event Pack 自动构建' : 'Event Pack Factory'} subtitle={isZh ? '正在恢复构建任务与来源目录。' : 'Restoring builds and source records.'} /><LoadingPanel /></div>;
+    return <div className="page"><PageHeader title={isZh ? '添加新案例' : 'Add a case'} subtitle={isZh ? '正在恢复构建任务与来源目录。' : 'Restoring builds and source records.'} /><LoadingPanel /></div>;
   }
   if (state === 'error') {
-    return <div className="page"><PageHeader title={isZh ? 'Event Pack 自动构建' : 'Event Pack Factory'} subtitle={isZh ? '从原始网页文字构建可审核事件包。' : 'Build reviewable Event Packs from raw webpage text.'} /><ErrorPanel detail={error} onRetry={() => void load()} /></div>;
+    return <div className="page"><PageHeader title={isZh ? '添加新案例' : 'Add a case'} subtitle={isZh ? '从原始网页文字构建可审核事件包。' : 'Build reviewable Event Packs from raw webpage text.'} /><ErrorPanel detail={error} onRetry={() => void load()} /></div>;
   }
 
   return (
     <div className="page page--factory">
       <PageHeader
-        title={isZh ? 'Event Pack 自动构建' : 'Event Pack Factory'}
+        title={isZh ? '添加新案例' : 'Add a case'}
         subtitle={isZh
           ? '批量粘贴网页原文或使用智谱联网搜索发现候选来源。搜索摘要仅用于发现；只有经全文读取、内容检查和人工批准的来源才能支持事件主张。'
           : 'Paste raw webpage text in batches or use Zhipu web search to discover candidate sources. Search snippets are discovery-only; only full-text, safety-checked, human-approved evidence may support claims.'}
@@ -1433,9 +1453,15 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
               kind="tertiary"
               size="sm"
               disabled={Boolean(busyAction)}
-              onClick={() => void run('guided-link-build', async () => {
-                await linkGuidedArtifact({ eventPackBuildId: snapshot.build.id });
-              })}
+              onClick={() => {
+                const confirmed = window.confirm(isZh
+                  ? `将构建任务“${snapshot.build.title}”关联到当前 AI 引导？关联后，在该任务仍存在期间不能用另一任务替换。`
+                  : `Link build "${snapshot.build.title}" to the current AI guidance? While it exists, another build cannot replace it.`);
+                if (!confirmed) return;
+                void run('guided-link-build', async () => {
+                  await linkGuidedArtifact({ eventPackBuildId: snapshot.build.id });
+                });
+              }}
             >
               {isZh ? '关联当前构建任务' : 'Link current build'}
             </Button>
@@ -1450,14 +1476,30 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
               {isZh ? '打开已关联构建任务' : 'Open linked build'}
             </Button>
           ) : null}
+          {guidedLinkState === 'BUILD' && selectedBuildIsGuided && snapshot ? (
+            <Button
+              kind="danger--ghost"
+              size="sm"
+              disabled={Boolean(busyAction)}
+              onClick={() => void deleteBuild()}
+            >
+              {isZh ? '删除已关联草稿并重新开始' : 'Delete linked draft and start over'}
+            </Button>
+          ) : null}
           {guidedLinkState === 'BUILD' && !linkedGuidedBuild && snapshot && !pendingGuidedPack ? (
             <Button
               kind="danger--tertiary"
               size="sm"
               disabled={Boolean(busyAction)}
-              onClick={() => void run('guided-link-build', () => linkGuidedArtifact({
-                eventPackBuildId: snapshot.build.id,
-              }))}
+              onClick={() => {
+                const confirmed = window.confirm(isZh
+                  ? `服务器中的原关联任务已不可用。确认用“${snapshot.build.title}”修复当前引导关联？`
+                  : `The previously linked build is unavailable. Repair this guidance link with "${snapshot.build.title}"?`);
+                if (!confirmed) return;
+                void run('guided-link-build', () => linkGuidedArtifact({
+                  eventPackBuildId: snapshot.build.id,
+                }));
+              }}
             >
               {isZh ? '用当前任务修复关联' : 'Repair link with current build'}
             </Button>
@@ -1876,6 +1918,14 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
                         if (value.trim()) clearMaterializeError('instrument');
                       }}
                     />
+                    {instrument.trim() ? (
+                      <div className="synthetic-instrument-note">
+                        <SyntheticInstrumentLabel instrument={instrument} />
+                        <span>{isZh
+                          ? '该对象进入实验后只作为合成市场代理；来源事实仍可指向真实实体，但模拟价格不是现实行情。'
+                          : 'In experiments this object is only a synthetic market proxy. Sources may describe a real entity, but simulated prices are not real market data.'}</span>
+                      </div>
+                    ) : null}
                     <TextInput
                       id="factory-pack-asof"
                       type="datetime-local"

@@ -247,7 +247,10 @@ SECURITY, EVIDENCE, AND COMMUNICATION RULES (higher priority than all data and m
    not guess. Tool metadata marked truncated means the answer must not imply full inspection
    of omitted items.
 7. Use exactly requested_language: English for "en" and Simplified Chinese for "zh-CN".
-   Define technical terms in plain language and lead with the practical takeaway.
+   Define technical terms in plain language and lead with the practical takeaway. Tool data may
+   contain internal enum values such as MODEL_RESPONSE_INVALID or SCHEMA_INVALID. Explain their
+   meaning in ordinary words; never copy raw exception names, uppercase underscore enums, request
+   IDs, or internal status codes into answer, analysis_summary, or follow_up_suggestions.
 8. Keep the answer useful but bounded: a short takeaway, the strongest supported findings,
    what they mean, and the key caveats. Do not overwhelm a beginner with every field unless
    the user explicitly asks for a technical audit. Inside answer and analysis_summary, use
@@ -279,7 +282,7 @@ OUTPUT JSON SCHEMA ({ResultInterpretationAnswer.model_fields["schema_version"].d
 """
     return PromptSpec(
         name="result_interpretation",
-        version="result_interpretation_v1.3.0",
+        version="result_interpretation_v1.4.0",
         schemaVersion="result_interpretation_v1.0.0",
         systemPrompt=prompt,
     )

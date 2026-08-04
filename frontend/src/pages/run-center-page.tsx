@@ -5,6 +5,7 @@ import type { CognitionProgress, ExperimentLogEntry } from '../api/types';
 import type { Navigate } from '../app';
 import { EmptyState, ErrorPanel, ExplainedLabel, LoadingPanel, Notice, PageHeader, StatusBadge } from '../components/common';
 import { ExperimentHistoryDisclosure, experimentHistoryLabel } from '../components/experiment-history';
+import { TechnicalCodeDisplay, technicalCodeLabel } from '../components/technical-code';
 import { translateLogLevel, useI18n } from '../i18n';
 import { getPageGuide } from '../page-guidance';
 import { getParameterHelp } from '../parameter-help';
@@ -247,11 +248,16 @@ export function RunCenterPage({ navigate }: { navigate: Navigate }) {
                   </div>
                   <ProgressBar
                     label={language === 'zh-CN' ? '已验证模型调用' : 'Validated model calls'}
-                    helperText={cognitionProgress.failureCode}
+                    helperText={cognitionProgress.failureCode
+                      ? technicalCodeLabel(cognitionProgress.failureCode, language)
+                      : undefined}
                     value={cognitionProgress.completedCalls ?? 0}
                     max={Math.max(cognitionProgress.plannedCalls ?? 0, 1)}
                     status={cognitionProgress.status === 'COMPLETED' ? 'finished' : cognitionProgress.status === 'FAILED_CLOSED' ? 'error' : 'active'}
                   />
+                  {cognitionProgress.failureCode ? (
+                    <TechnicalCodeDisplay codes={[cognitionProgress.failureCode]} language={language} />
+                  ) : null}
                   <dl>
                     <div><dt>{language === 'zh-CN' ? '计划调用' : 'Planned'}</dt><dd>{cognitionProgress.plannedCalls ?? 0}</dd></div>
                     <div><dt>{language === 'zh-CN' ? '已尝试' : 'Attempted'}</dt><dd>{cognitionProgress.attemptedCalls ?? 0}</dd></div>
@@ -297,7 +303,10 @@ export function RunCenterPage({ navigate }: { navigate: Navigate }) {
                       <ul>
                         {Object.entries(cognitionProgress.failureCategoryCounts ?? {}).map(
                           ([category, count]) => (
-                            <li key={category}><code>{category}</code>: {count}</li>
+                            <li key={category}>
+                              <TechnicalCodeDisplay codes={[category]} language={language} />
+                              <span>{language === 'zh-CN' ? '次数' : 'Count'}: {count}</span>
+                            </li>
                           ),
                         )}
                       </ul>

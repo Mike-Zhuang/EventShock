@@ -1,6 +1,7 @@
 import { Button, Tag } from '@carbon/react';
 import { ArrowRight, CalendarBlank, Flask, ShieldCheck, UsersThree, WarningCircle } from '@phosphor-icons/react';
 import { EmptyState, ErrorPanel, LoadingPanel, PageHeader, StatusBadge } from '../components/common';
+import { SyntheticInstrumentLabel } from '../components/synthetic-instrument-label';
 import { useI18n } from '../i18n';
 import { getPageGuide } from '../page-guidance';
 import { useWorkflow } from '../state/workflow-context';
@@ -121,6 +122,7 @@ export function CaseLibraryPage({ navigate }: { navigate: (view: ViewId) => void
                   </div>
                   <h2>{language === 'zh-CN' ? caseItem.nameZh ?? caseItem.name : caseItem.name}</h2>
                   <p>{language === 'zh-CN' ? caseItem.descriptionZh ?? caseItem.description ?? t('common.noData') : caseItem.description ?? t('common.noData')}</p>
+                  {caseItem.instrument ? <SyntheticInstrumentLabel instrument={caseItem.instrument} compact /> : null}
                 </div>
               </div>
               <div className="case-row__meta">

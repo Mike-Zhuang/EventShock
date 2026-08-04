@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, ApiError } from '../api/client';
@@ -207,7 +207,7 @@ describe('Event Pack Factory page', () => {
       </I18nProvider>,
     );
 
-    expect(await screen.findByRole('heading', { name: 'Event Pack Factory' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Add a case' })).toBeInTheDocument();
     expect(screen.getByText(/Full raw text is staged on the server for seven days/)).toBeInTheDocument();
     expect(screen.getByText('Discovery only, not evidence')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Read full page into evidence' })).toBeInTheDocument();
@@ -297,7 +297,7 @@ describe('Event Pack Factory page', () => {
       </I18nProvider>,
     );
 
-    await screen.findByRole('heading', { name: 'Event Pack Factory' });
+    await screen.findByRole('heading', { name: 'Add a case' });
 
     const createButton = screen.getByRole('button', { name: 'Create build' });
     expect(createButton).toBeEnabled();
@@ -504,8 +504,38 @@ describe('Event Pack Factory page', () => {
     expect(api.linkGuidedWorkflowArtifacts).not.toHaveBeenCalled();
   });
 
+  it('does not select an unrelated saved build for an unlinked guided handoff', async () => {
+    const sourceReviewWorkflow: GuidedWorkflow = {
+      ...guidedWorkflow,
+      stage: 'SOURCE_REVIEW',
+      version: 5,
+      pendingProposal: undefined,
+      pendingProposalId: undefined,
+      draft: {
+        eventMetadata: guidedWorkflow.pendingProposal!.proposedEventMetadata,
+        sourceMethod: 'COMBINED',
+        searchQueries: ['official index inclusion notice'],
+      },
+    };
+    writeFactoryGuidedHandoff(sourceReviewWorkflow);
+    vi.mocked(api.getGuidedWorkflow).mockResolvedValue(sourceReviewWorkflow);
+    window.sessionStorage.setItem('eventshock:last-factory-build-id', snapshot.build.id);
+
+    render(
+      <I18nProvider>
+        <EventPackFactoryPage navigate={vi.fn()} />
+      </I18nProvider>,
+    );
+
+    expect(await screen.findByDisplayValue('Index Inclusion Event')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Create a build first' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: snapshot.build.title })).not.toBeInTheDocument();
+    expect(api.getFactoryBuild).not.toHaveBeenCalled();
+  });
+
   it('prefills reviewed guided metadata and links only the server-returned build ID', async () => {
     const user = userEvent.setup();
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
     const sourceReviewWorkflow: GuidedWorkflow = {
       ...guidedWorkflow,
       stage: 'SOURCE_REVIEW',
@@ -718,7 +748,7 @@ describe('guided workflow page', () => {
 
     expect(await screen.findByText('Model request sent; waiting for the provider'))
       .toBeInTheDocument();
-    expect(screen.getByText(/Server stage: PROVIDER_DISPATCHED/)).toBeInTheDocument();
+    expect(screen.getByText(/Server stage: Model request sent to the provider/)).toBeInTheDocument();
 
     resolveTurn(guidedWorkflow);
   });
@@ -740,6 +770,15 @@ describe('guided workflow page', () => {
       </I18nProvider>,
     );
 
+    const rawRequestIds = await screen.findAllByText(unknownGuidedOperation.clientRequestId);
+    rawRequestIds.forEach((item) => expect(item).not.toBeVisible());
+    const operationHistory = screen.getByText(/Model call and recovery history/).closest('details');
+    if (!operationHistory) throw new Error('模型调用历史未渲染。');
+    await user.click(within(operationHistory).getByText(/Model call and recovery history/));
+    const historyTechnical = within(operationHistory).getByText('Technical details');
+    await user.click(historyTechnical);
+    expect(within(operationHistory).getByText(unknownGuidedOperation.clientRequestId)).toBeVisible();
+
     await user.click(await screen.findByRole('button', {
       name: 'Use cached result; no model call',
     }));
@@ -758,6 +797,18 @@ describe('guided workflow page', () => {
       }),
     ));
     expect(api.sendGuidedTurn).not.toHaveBeenCalled();
+  });
+
+  it('labels saved conversation language when the interface language changes', async () => {
+    window.localStorage.setItem('eventshock-language', 'zh-CN');
+
+    render(
+      <I18nProvider>
+        <GuidedWorkflowPage navigate={vi.fn()} />
+      </I18nProvider>,
+    );
+
+    expect(await screen.findAllByText('此对话以英文生成')).not.toHaveLength(0);
   });
 
   it('abandons an unknown result and reuses exactly the server-authorized retry ID', async () => {

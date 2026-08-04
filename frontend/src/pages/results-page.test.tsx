@@ -5,7 +5,7 @@ import type { Navigate } from '../app';
 import { normalizeResults } from '../api/normalize';
 import { I18nProvider } from '../i18n';
 import { useWorkflow } from '../state/workflow-context';
-import { ResultsPage } from './results-page';
+import { exactZeroRegisteredOutcomes, ResultsPage } from './results-page';
 
 vi.mock('../components/result-interpretation-assistant', () => ({
   ResultInterpretationAssistant: ({
@@ -141,6 +141,38 @@ describe('ResultsPage 结果证据导航', () => {
       disconnect() {}
     });
     vi.mocked(useWorkflow).mockReturnValue(workflowValue());
+  });
+
+  it('只有所有注册指标和每个配对差异都严格为零时才触发零差异诊断', () => {
+    const exactZeroMetrics = [
+      { id: 'maxSpreadBps', label: 'MAX_SPREAD_BPS', delta: 0, ciLow: 0, ciHigh: 0 },
+      { id: 'maxDrawdownPct', label: 'MAX_DRAWDOWN_PCT', delta: 0, bootstrapCiLow: 0, bootstrapCiHigh: 0 },
+    ];
+    const exactZeroPairs = {
+      maxSpreadBps: [{ delta: 0 }, { delta: 0 }],
+      maxDrawdownPct: [{ delta: 0 }, { delta: 0 }],
+    };
+
+    expect(exactZeroRegisteredOutcomes(
+      exactZeroMetrics,
+      exactZeroPairs,
+      ['maxSpreadBps', 'maxDrawdownPct'],
+    )).toEqual(['maxSpreadBps', 'maxDrawdownPct']);
+    expect(exactZeroRegisteredOutcomes(
+      exactZeroMetrics,
+      { ...exactZeroPairs, maxSpreadBps: [{ delta: 0 }, { delta: 0.01 }] },
+      ['maxSpreadBps', 'maxDrawdownPct'],
+    )).toEqual([]);
+    expect(exactZeroRegisteredOutcomes(
+      exactZeroMetrics,
+      { ...exactZeroPairs, maxDrawdownPct: [] },
+      ['maxSpreadBps', 'maxDrawdownPct'],
+    )).toEqual([]);
+    expect(exactZeroRegisteredOutcomes(
+      exactZeroMetrics.slice(0, 1),
+      exactZeroPairs,
+      ['maxSpreadBps', 'maxDrawdownPct'],
+    )).toEqual([]);
   });
 
   it('没有叙事报告时仍显示稳定概览、认知决策与版本来源锚点', () => {

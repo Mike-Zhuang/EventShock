@@ -3429,6 +3429,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                         error.uncertainBillableAttempts,
                     ),
                     "repairUsed": error.repairUsed,
+                    "promptLeakDiagnostics": error.safeDiagnostics or None,
                 },
                 traceId=getattr(request.state, "traceId", None),
             )

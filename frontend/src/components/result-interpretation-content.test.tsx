@@ -48,6 +48,77 @@ afterEach(() => {
 });
 
 describe('ResultInterpretationContent 技术审计', () => {
+  it('明确区分确定性回退文本与通过校验的模型解释', () => {
+    const { rerender } = render(
+      <I18nProvider>
+        <ResultInterpretationContent
+          experimentId="exp-audit"
+          message={{
+            ...MESSAGE,
+            semanticValidationStatus: 'DETERMINISTIC_FALLBACK',
+            deterministicFallbackUsed: true,
+          }}
+          navigate={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+
+    expect(screen.getByText('Server deterministic fallback text')).toBeInTheDocument();
+    expect(screen.getByText(/it is not model output/i)).toBeInTheDocument();
+
+    rerender(
+      <I18nProvider>
+        <ResultInterpretationContent
+          experimentId="exp-audit"
+          message={{
+            ...MESSAGE,
+            semanticValidationStatus: 'REPAIRED',
+            deterministicFallbackUsed: false,
+          }}
+          navigate={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+    expect(screen.getByText('Repaired and validated model interpretation')).toBeInTheDocument();
+    expect(screen.queryByText('Server deterministic fallback text')).not.toBeInTheDocument();
+  });
+
+  it('正文只显示技术状态的人类解释，原始枚举保留在折叠审计层', async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <I18nProvider>
+        <ResultInterpretationContent
+          experimentId="exp-audit"
+          message={{
+            ...MESSAGE,
+            answer: 'A MODEL_RESPONSE_INVALID condition used rules [result:overview].',
+          }}
+          navigate={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+
+    expect(container.querySelector('.result-assistant__answer'))
+      .toHaveTextContent('The model response could not be validated');
+    expect(container.querySelector('.result-assistant__answer'))
+      .not.toHaveTextContent('MODEL_RESPONSE_INVALID');
+    const rawCode = screen.getByText('MODEL_RESPONSE_INVALID');
+    expect(rawCode).not.toBeVisible();
+
+    await user.click(screen.getByText('Evidence used'));
+    const auditDetails = container.querySelector<HTMLDetailsElement>(
+      '.result-assistant__technical-evidence',
+    );
+    if (!auditDetails) throw new Error('解释审计技术详情未渲染。');
+    await user.click(auditDetails.querySelector('summary')!);
+    const codeDetails = auditDetails.querySelector<HTMLDetailsElement>(
+      '.technical-code-display__details',
+    );
+    if (!codeDetails) throw new Error('技术枚举折叠层未渲染。');
+    await user.click(codeDetails.querySelector('summary')!);
+    expect(rawCode).toBeVisible();
+  });
+
   it('默认折叠、合并未引用读取，并下载完整审计 JSON', async () => {
     const user = userEvent.setup();
     const createObjectURL = vi.fn(() => 'blob:result-audit');

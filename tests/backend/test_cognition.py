@@ -299,7 +299,8 @@ def test_result_interpretation_prompt_requests_safe_gfm_and_prose_citations() ->
     prompt = RESULT_INTERPRETATION_PROMPT.systemPrompt
     normalizedPrompt = " ".join(prompt.split())
 
-    assert RESULT_INTERPRETATION_PROMPT.version == "result_interpretation_v1.3.0"
+    assert RESULT_INTERPRETATION_PROMPT.version == "result_interpretation_v1.4.0"
+    assert "never copy raw exception names" in RESULT_INTERPRETATION_PROMPT.systemPrompt
     assert RESULT_INTERPRETATION_PROMPT.schemaVersion == "result_interpretation_v1.0.0"
     assert "GitHub Flavored Markdown" in prompt
     assert "Never emit raw HTML or an image" in prompt
