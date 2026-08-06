@@ -21,6 +21,7 @@ import { IMPACT_CHANNEL_DEFINITIONS, impactChannelDisplay } from '../impact-chan
 import { useWorkflow } from '../state/workflow-context';
 import type { EventClaim } from '../api/types';
 import { EventPackUploadModal } from '../components/event-pack-upload-modal';
+import { TechnicalCodeDisplay, technicalCodeLabel } from '../components/technical-code';
 
 function extractionModeLabel(mode: string | undefined, language: 'en' | 'zh-CN'): string {
   if (!mode) return language === 'zh-CN' ? '预先整理的事件包' : 'Pre-curated Event Pack';
@@ -92,6 +93,31 @@ function safetyGuidanceLabel(code: string | undefined, language: 'en' | 'zh-CN')
     : language === 'zh-CN'
       ? '复核数据策略并编辑或删除'
       : 'Review the data policy, then edit or remove';
+}
+
+function contentSafetyDecisionLabel(
+  decision: string,
+  language: 'en' | 'zh-CN',
+): string {
+  const labels: Record<string, { en: string; 'zh-CN': string }> = {
+    ALLOW: { en: 'No blocking finding', 'zh-CN': '未发现阻塞项' },
+    REVIEW: { en: 'Human review required', 'zh-CN': '需要人工复核' },
+    BLOCK: { en: 'Blocked for safety', 'zh-CN': '已因安全原因阻止' },
+  };
+  return labels[decision]?.[language] ?? technicalCodeLabel(decision, language);
+}
+
+function contentSafetySeverityLabel(
+  severity: string,
+  language: 'en' | 'zh-CN',
+): string {
+  const labels: Record<string, { en: string; 'zh-CN': string }> = {
+    CRITICAL: { en: 'Critical', 'zh-CN': '严重' },
+    HIGH: { en: 'High', 'zh-CN': '高' },
+    MEDIUM: { en: 'Medium', 'zh-CN': '中' },
+    LOW: { en: 'Low', 'zh-CN': '低' },
+  };
+  return labels[severity]?.[language] ?? technicalCodeLabel(severity, language);
 }
 
 export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }) {
@@ -336,8 +362,8 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
           lowContrast
           hideCloseButton
           title={language === 'zh-CN'
-            ? `上传内容安全检查：${eventPack.contentSecurity.decision}`
-            : `Upload content safety: ${eventPack.contentSecurity.decision}`}
+            ? `上传内容安全检查：${contentSafetyDecisionLabel(eventPack.contentSecurity.decision, language)}`
+            : `Upload content safety: ${contentSafetyDecisionLabel(eventPack.contentSecurity.decision, language)}`}
           subtitle={language === 'zh-CN'
             ? `已扫描 ${eventPack.contentSecurity.sourceCount} 个来源，记录 ${eventPack.contentSecurity.findingCount} 个安全分类；${eventPack.contentSecurity.rawContentRetained === false ? '后端明确报告未保留原始上传正文。' : eventPack.contentSecurity.rawContentRetained === true ? '后端报告保留了原始正文，请停止并复核数据策略。' : '后端未报告原始正文保留状态。'}${eventPack.contentSecurity.acknowledged ? '需复核内容已经人工确认并在处理前脱敏。' : ''}`
             : `${eventPack.contentSecurity.sourceCount} source(s) scanned with ${eventPack.contentSecurity.findingCount} safety classification(s). ${eventPack.contentSecurity.rawContentRetained === false ? 'The backend explicitly reports that raw uploaded text was not retained.' : eventPack.contentSecurity.rawContentRetained === true ? 'The backend reports raw-text retention; stop and review the data policy.' : 'Raw-text retention status was not reported by the backend.'}${eventPack.contentSecurity.acknowledged ? ' Reviewable content was acknowledged and redacted before processing.' : ''}`}
@@ -402,7 +428,7 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
         {eventPack.contentSecurity ? (
           <div>
             <span>{language === 'zh-CN' ? '内容安全' : 'Content safety'}</span>
-            <strong>{eventPack.contentSecurity.decision} · {eventPack.contentSecurity.findingCount}</strong>
+            <strong>{contentSafetyDecisionLabel(eventPack.contentSecurity.decision, language)} · {eventPack.contentSecurity.findingCount}</strong>
           </div>
         ) : null}
       </section>
@@ -436,9 +462,9 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
               <article key={`${finding.sourceId ?? 'metadata'}-${finding.field}-${finding.offset}-${index}`}>
                 <div>
                   <Tag type={finding.severity === 'CRITICAL' || finding.severity === 'HIGH' ? 'red' : 'warm-gray'} size="sm">
-                    {finding.severity}
+                    {contentSafetySeverityLabel(finding.severity, language)}
                   </Tag>
-                  <strong>{finding.riskCategory ?? finding.code}</strong>
+                  <strong>{technicalCodeLabel(finding.riskCategory ?? finding.code, language)}</strong>
                 </div>
                 <p>
                   {language === 'zh-CN' ? '位置' : 'Location'}: {finding.sourceId ?? 'event-pack-metadata'} · {finding.field} · {finding.offset}
@@ -627,10 +653,13 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
                       </details>
                     )}
                     {claim.status === 'AI_PROPOSED' && claimBulkExclusionReasons(claim, contentReviewSourceIds).length > 0 ? (
-                      <p className="claim-bulk-exclusion">
+                      <div className="claim-bulk-exclusion">
                         {language === 'zh-CN' ? '仅支持逐条审核：' : 'Individual review only: '}
-                        {claimBulkExclusionReasons(claim, contentReviewSourceIds).join(' · ')}
-                      </p>
+                        <TechnicalCodeDisplay
+                          codes={claimBulkExclusionReasons(claim, contentReviewSourceIds)}
+                          language={language}
+                        />
+                      </div>
                     ) : null}
                     <div className="claim-item__evidence" aria-label={language === 'zh-CN' ? '来源关联' : 'Source links'}>
                       {(claim.sourceIds?.length ? claim.sourceIds : claim.sourceId ? [claim.sourceId] : []).map((sourceId) => (

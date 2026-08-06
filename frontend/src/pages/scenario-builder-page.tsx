@@ -46,6 +46,7 @@ import { getParameterHelp } from '../parameter-help';
 import {
   getScenarioReadiness,
   type ScenarioReadinessBlocker,
+  type ScenarioReadinessResult,
 } from '../scenario-readiness';
 import {
   scenarioContentDigest,
@@ -257,6 +258,64 @@ export function SecondaryOutcomeOption({
       <input type="checkbox" value={id} checked={checked} onChange={onChange} />
       <strong className="native-check-row__label">{label}</strong>
     </label>
+  );
+}
+
+export function ScenarioReadinessPanel({
+  readiness,
+  isZh,
+  onSelectCase,
+  onReviewEvidence,
+  onFocusTarget,
+}: {
+  readiness: ScenarioReadinessResult;
+  isZh: boolean;
+  onSelectCase: () => void;
+  onReviewEvidence: () => void;
+  onFocusTarget: (targetId: string) => void;
+}) {
+  return (
+    <section
+      className={`scenario-readiness scenario-readiness--prominent ${readiness.ready ? 'scenario-readiness--ready' : ''}`}
+      aria-labelledby="scenario-readiness-heading"
+      aria-live="polite"
+    >
+      <div className="scenario-readiness__heading">
+        <h2 id="scenario-readiness-heading">
+          {readiness.ready
+            ? isZh ? '可以进行运行前验证' : 'Ready for preflight validation'
+            : isZh ? `还需处理 ${readiness.blockers.length} 项` : `${readiness.blockers.length} item(s) need attention`}
+        </h2>
+        <p>{isZh
+          ? '这里会一次列出所有阻塞项；验证当前草稿不要求先保存场景，但 Event Pack 必须完成审核与冻结。后端仍会执行最终验证。'
+          : 'All current blockers are listed here. The current draft does not need to be saved first, but its Event Pack must be reviewed and frozen. The backend still performs final validation.'}</p>
+      </div>
+      {readiness.blockers.length > 0 ? (
+        <ol className="scenario-readiness__list">
+          {readiness.blockers.map((blocker) => {
+            const copy = scenarioReadinessCopy(blocker, isZh);
+            return (
+              <li key={blocker.code}>
+                <span>{copy.title}</span>
+                {blocker.action === 'SELECT_CASE' ? (
+                  <Button kind="ghost" size="sm" onClick={onSelectCase}>
+                    {copy.action}
+                  </Button>
+                ) : blocker.action === 'REVIEW_EVIDENCE' ? (
+                  <Button kind="ghost" size="sm" onClick={onReviewEvidence}>
+                    {copy.action}
+                  </Button>
+                ) : blocker.targetId ? (
+                  <Button kind="ghost" size="sm" onClick={() => onFocusTarget(blocker.targetId!)}>
+                    {copy.action}
+                  </Button>
+                ) : <small>{copy.action}</small>}
+              </li>
+            );
+          })}
+        </ol>
+      ) : null}
+    </section>
   );
 }
 
@@ -842,6 +901,14 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
         ))}
       </nav>
 
+      <ScenarioReadinessPanel
+        readiness={scenarioReadiness}
+        isZh={isZh}
+        onSelectCase={() => navigate('cases')}
+        onReviewEvidence={() => navigate('pack')}
+        onFocusTarget={(targetId) => focusScenarioStep(targetId)}
+      />
+
       <div className="scenario-layout">
         <div className="scenario-form">
           <section id="scenario-step-event" className="form-section scenario-step-section" tabIndex={-1}>
@@ -1191,6 +1258,25 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
             <h2 id="scenario-diff-heading">{t('scenario.diffTitle')}</h2>
             <p>{t('scenario.diffHelp')}</p>
           </div>
+          <div
+            className={`scenario-diff__readiness-summary ${scenarioReadiness.ready ? 'is-ready' : ''}`}
+            role="status"
+          >
+            <strong>{scenarioReadiness.ready
+              ? isZh ? '当前草稿已就绪' : 'Current draft is ready'
+              : isZh ? `仍有 ${scenarioReadiness.blockers.length} 项待处理` : `${scenarioReadiness.blockers.length} item(s) remain`}</strong>
+            <span>{scenarioReadiness.ready
+              ? isZh ? '可进入运行前复核。' : 'You can continue to preflight.'
+              : isZh ? '完整原因和修复入口显示在页面上方。' : 'Full reasons and corrective actions are shown above.'}</span>
+            <Button
+              className="scenario-diff__submit"
+              renderIcon={ArrowRight}
+              disabled={!scenarioReadiness.ready}
+              onClick={() => void validate()}
+            >
+              {validationState === 'loading' ? t('common.loading') : t('scenario.validateDraft')}
+            </Button>
+          </div>
           <div className="diff-field">
             <span className="diff-field__name">{t(selectedOption.labelKey)}</span>
             <div className="diff-field__values">
@@ -1207,56 +1293,7 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
             <div><dt>{isZh ? '智能体模式' : 'Agent mode'}</dt><dd>{llmPolicy.mode}</dd></div>
             <div><dt>{isZh ? '预计 LLM 调用上限' : 'Estimated LLM call cap'}</dt><dd>{llmPolicy.mode === 'HYBRID_LLM' ? Math.min(llmPolicy.callBudget, llmPolicy.representativeAgentCount * Math.ceil(scenario.steps / llmPolicy.decisionIntervalSteps)) : 0}</dd></div>
           </dl>
-          <section
-            className={`scenario-readiness ${scenarioReadiness.ready ? 'scenario-readiness--ready' : ''}`}
-            aria-labelledby="scenario-readiness-heading"
-            aria-live="polite"
-          >
-            <div className="scenario-readiness__heading">
-              <h3 id="scenario-readiness-heading">
-                {scenarioReadiness.ready
-                  ? isZh ? '可以进行运行前验证' : 'Ready for preflight validation'
-                  : isZh ? `还需处理 ${scenarioReadiness.blockers.length} 项` : `${scenarioReadiness.blockers.length} item(s) need attention`}
-              </h3>
-              <p>{isZh
-                ? '这里会一次列出所有阻塞项；验证当前草稿不要求先保存场景，但 Event Pack 必须完成审核与冻结。后端仍会执行最终验证。'
-                : 'All current blockers are listed here. The current draft does not need to be saved first, but its Event Pack must be reviewed and frozen. The backend still performs final validation.'}</p>
-            </div>
-            {scenarioReadiness.blockers.length > 0 ? (
-              <ol className="scenario-readiness__list">
-                {scenarioReadiness.blockers.map((blocker) => {
-                  const copy = scenarioReadinessCopy(blocker, isZh);
-                  return (
-                    <li key={blocker.code}>
-                      <span>{copy.title}</span>
-                      {blocker.action === 'SELECT_CASE' ? (
-                        <Button kind="ghost" size="sm" onClick={() => navigate('cases')}>
-                          {copy.action}
-                        </Button>
-                      ) : blocker.action === 'REVIEW_EVIDENCE' ? (
-                        <Button kind="ghost" size="sm" onClick={() => navigate('pack')}>
-                          {copy.action}
-                        </Button>
-                      ) : blocker.targetId ? (
-                        <Button kind="ghost" size="sm" onClick={() => focusScenarioStep(blocker.targetId!)}>
-                          {copy.action}
-                        </Button>
-                      ) : <small>{copy.action}</small>}
-                    </li>
-                  );
-                })}
-              </ol>
-            ) : null}
-          </section>
           <Notice>{t('results.disclaimer')}</Notice>
-          <Button
-            className="scenario-diff__submit"
-            renderIcon={ArrowRight}
-            disabled={!scenarioReadiness.ready}
-            onClick={() => void validate()}
-          >
-            {validationState === 'loading' ? t('common.loading') : t('scenario.validateDraft')}
-          </Button>
         </aside>
       </div>
     </div>

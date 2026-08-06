@@ -93,6 +93,17 @@ describe('Event Pack 批量审核警告', () => {
         ...EVENT_PACK,
         editableExtraction: true,
         extractionMode: 'RULE_FALLBACK_NO_LLM_CONFIG',
+        contentSecurity: {
+          schemaVersion: '1',
+          decision: 'REVIEW',
+          acknowledged: true,
+          sourceCount: 1,
+          findingCount: 0,
+          findingsTruncated: false,
+          rawContentRetained: false,
+          findings: [],
+          sources: [],
+        },
         claims: [
           {
             ...EVENT_PACK.claims[0],
@@ -123,5 +134,13 @@ describe('Event Pack 批量审核警告', () => {
     expect(screen.getAllByText('Belief update').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Information latency').length).toBeGreaterThan(0);
     expect(screen.getAllByText(/How delayed availability may change/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/not eligible for evidence extraction/).length)
+      .toBeGreaterThan(0);
+    expect(screen.getByText('Upload content safety: Human review required'))
+      .toBeInTheDocument();
+    expect(screen.queryByText('Upload content safety: REVIEW')).not.toBeInTheDocument();
+    screen.getAllByText('EXTRACTION_NOT_ELIGIBLE').forEach((code) => {
+      expect(code).not.toBeVisible();
+    });
   });
 });

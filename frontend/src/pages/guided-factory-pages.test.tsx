@@ -789,6 +789,59 @@ describe('guided workflow page', () => {
     );
   });
 
+  it('synchronizes a failed provider call to UNKNOWN and exposes the real recovery action', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(crypto, 'randomUUID').mockReturnValue(
+      '22222222-2222-4222-8222-222222222222',
+    );
+    const clientRequestId = 'guided-22222222-2222-4222-8222-222222222222';
+    const failedOperation: GuidedTurnOperation = {
+      ...unknownGuidedOperation,
+      clientRequestId,
+      errorCode: 'MODEL_TRANSPORT_ERROR',
+      httpResponseReceived: false,
+      usageReceived: false,
+      parseCompleted: false,
+      failureStage: 'PROVIDER_RESPONSE_FAILED',
+      cachedProposalAvailable: false,
+      recoveryOptions: ['ABANDON_AND_AUTHORIZE_RETRY'],
+    };
+    vi.mocked(api.sendGuidedTurn).mockRejectedValueOnce(new ApiError(
+      'The model response did not pass the required result schema.',
+      502,
+      undefined,
+      'SCHEMA_INVALID',
+    ));
+
+    render(
+      <I18nProvider>
+        <GuidedWorkflowPage navigate={vi.fn()} />
+      </I18nProvider>,
+    );
+
+    const composer = await screen.findByLabelText(
+      'Answer this stage, or request field-level changes',
+    );
+    await waitFor(() => expect(api.getGuidedTurnOperations).toHaveBeenCalled());
+    vi.mocked(api.getGuidedTurnOperations).mockResolvedValue([failedOperation]);
+    await user.clear(composer);
+    await user.type(composer, 'Keep this provider-failure input.');
+    await user.click(screen.getByRole('button', { name: 'Send and propose' }));
+
+    expect(await screen.findByText(/No usable model-provider response was received/))
+      .toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Review recovery options' }))
+      .toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Abandon and authorize one retry' }))
+      .toBeInTheDocument();
+    expect(composer).toHaveValue('Keep this provider-failure input.');
+
+    const historySummary = screen.getByText(/Model call and recovery history/);
+    await user.click(historySummary);
+    expect(screen.getByText(/Call 1 · Outcome requires a decision/)).toBeVisible();
+    expect(screen.queryByText(/Call 1 · Request in progress/)).not.toBeInTheDocument();
+  });
+
   it('preserves an expired-credential turn and links directly to AI configuration', async () => {
     const user = userEvent.setup();
     const navigate = vi.fn();

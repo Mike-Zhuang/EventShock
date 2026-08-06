@@ -1981,6 +1981,12 @@ code {
   background: var(--surface-subtle);
 }
 
+.scenario-readiness--prominent {
+  margin: 0 0 22px;
+  border-left: 4px solid var(--warning);
+  background: var(--surface);
+}
+
 .scenario-readiness--ready {
   border-color: var(--positive);
 }
@@ -1989,11 +1995,13 @@ code {
   padding: 14px 16px;
 }
 
+.scenario-readiness__heading h2,
 .scenario-readiness__heading h3,
 .scenario-readiness__heading p {
   margin: 0;
 }
 
+.scenario-readiness__heading h2,
 .scenario-readiness__heading h3 {
   font-size: 15px;
 }
@@ -2038,6 +2046,34 @@ code {
   width: 100%;
   max-width: none;
   margin-top: 18px;
+}
+
+.scenario-diff__readiness-summary {
+  display: grid;
+  gap: 5px;
+  margin-top: 18px;
+  padding: 14px;
+  border: 1px solid var(--warning);
+  background: color-mix(in srgb, var(--warning) 8%, var(--surface));
+}
+
+.scenario-diff__readiness-summary.is-ready {
+  border-color: var(--positive);
+  background: color-mix(in srgb, var(--positive) 8%, var(--surface));
+}
+
+.scenario-diff__readiness-summary strong {
+  font-size: 13px;
+}
+
+.scenario-diff__readiness-summary span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.scenario-diff__readiness-summary .scenario-diff__submit {
+  margin-top: 8px;
 }
 
 .definition-list {

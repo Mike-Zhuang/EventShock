@@ -18,6 +18,7 @@ import {
   GuidedScenarioReplacementError,
   linkSavedScenarioToGuidedWorkflow,
   MechanismDisabledRecovery,
+  ScenarioReadinessPanel,
   scenarioReadinessCopy,
   scenarioQuestionNeedsReview,
   scenariosHaveSameContent,
@@ -65,6 +66,44 @@ describe('次要结果指标布局', () => {
 });
 
 describe('情景验证修复与草稿版本语义', () => {
+  it('在宽版主内容区一次展示全部阻塞项和修复入口', async () => {
+    const user = userEvent.setup();
+    const onReviewEvidence = vi.fn();
+    const onFocusTarget = vi.fn();
+    const { container } = render(
+      <ScenarioReadinessPanel
+        readiness={{
+          ready: false,
+          warnings: [],
+          blockers: [
+            { code: 'EVENT_PACK_NOT_FROZEN', action: 'REVIEW_EVIDENCE' },
+            {
+              code: 'QUESTION_REVIEW_REQUIRED',
+              action: 'FOCUS_FIELD',
+              targetId: 'scenario-step-event',
+            },
+          ],
+        }}
+        isZh={false}
+        onSelectCase={vi.fn()}
+        onReviewEvidence={onReviewEvidence}
+        onFocusTarget={onFocusTarget}
+      />,
+    );
+
+    expect(container.querySelector('.scenario-readiness--prominent')).not.toBeNull();
+    expect(screen.getByRole('heading', { name: '2 item(s) need attention' }))
+      .toBeInTheDocument();
+    expect(screen.getByText('The Event Pack has not been reviewed and frozen.'))
+      .toBeInTheDocument();
+    expect(screen.getByText(/research question is not confirmed/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Continue evidence review' }));
+    await user.click(screen.getByRole('button', { name: 'Review the research question' }));
+    expect(onReviewEvidence).toHaveBeenCalledOnce();
+    expect(onFocusTarget).toHaveBeenCalledWith('scenario-step-event');
+  });
+
   it('为阻塞项提供完整的中英文用户文案', () => {
     const blocker = {
       code: 'EVENT_PACK_NOT_FROZEN' as const,
