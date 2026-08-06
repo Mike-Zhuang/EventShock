@@ -244,9 +244,7 @@ class ExperimentRequest(StrictModel):
     questionInterventionParameter: InterventionParameter | None = None
     # 记录问题与干预对齐是由系统生成，还是由用户保留原措辞后明确确认。
     # 后者不是自动语义证明，必须继续在预检与导出中可见。
-    questionReviewMethod: Literal[
-        "GENERATED_ALIGNED", "USER_CONFIRMED_UNCHANGED"
-    ] | None = None
+    questionReviewMethod: Literal["GENERATED_ALIGNED", "USER_CONFIRMED_UNCHANGED"] | None = None
     intervention: InterventionConfig
     seedCount: Literal[10, 25, 50] = 10
     populationSize: int = Field(default=56, ge=14, le=250)

@@ -1022,8 +1022,7 @@ class EventPackService:
                 )
             else:
                 alignmentMessage = (
-                    "The research question was explicitly confirmed for the selected "
-                    "intervention."
+                    "The research question was explicitly confirmed for the selected intervention."
                 )
             addCheck(
                 "QUESTION_INTERVENTION_ALIGNMENT",

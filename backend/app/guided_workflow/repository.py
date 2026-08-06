@@ -1397,11 +1397,7 @@ class GuidedWorkflowRepository:
         if current.pendingProposalId != proposalId or current.pendingProposal is None:
             raise GuidedWorkflowConflictError("the pending proposal is no longer current")
         proposal = current.pendingProposal
-        if (
-            not proposal.readyForHumanReview
-            or proposal.missingFields
-            or proposal.unresolvedFields
-        ):
+        if not proposal.readyForHumanReview or proposal.missingFields or proposal.unresolvedFields:
             # 前端会禁用“应用”按钮，但后端仍必须独立执行同一权限边界，避免直接
             # 调用 API 将 unknown/TBD 等未解决内容推进到正式草稿。
             raise GuidedWorkflowConflictError(
