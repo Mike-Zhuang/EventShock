@@ -735,6 +735,7 @@ def test_guided_unknown_provider_call_requires_abandon_and_exact_authorized_retr
         assert beforeRecovery[0]["usageReceived"] is False
         assert beforeRecovery[0]["parseCompleted"] is False
         assert beforeRecovery[0]["failureStage"] == "PROVIDER_RESPONSE_FAILED"
+        assert beforeRecovery[0]["errorCode"] == "MODEL_TIMEOUT"
         assert beforeRecovery[0]["cachedProposalAvailable"] is False
         assert beforeRecovery[0]["recoveryOptions"] == ["ABANDON_AND_AUTHORIZE_RETRY"]
 

@@ -38,4 +38,13 @@ describe('技术状态的人类可读展示', () => {
     expect(technicalCodeLabel('NEW_PROVIDER_STATE', 'zh-CN'))
       .toBe('未收录的技术状态：new provider state');
   });
+
+  it('区分供应商连接失败、格式失败和证据审核阻塞原因', () => {
+    expect(technicalCodeLabel('MODEL_TRANSPORT_ERROR', 'zh-CN'))
+      .toBe('模型供应商连接暂时失败');
+    expect(technicalCodeLabel('PROVIDER_RESPONSE_FAILED', 'en'))
+      .toBe('No usable provider response was received');
+    expect(technicalCodeLabel('EXTRACTION_NOT_ELIGIBLE', 'zh-CN'))
+      .toBe('该来源暂不符合证据抽取条件');
+  });
 });

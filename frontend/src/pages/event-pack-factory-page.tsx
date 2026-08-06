@@ -46,6 +46,7 @@ import {
   StatusBadge,
 } from '../components/common';
 import { SyntheticInstrumentLabel } from '../components/synthetic-instrument-label';
+import { technicalCodeLabel } from '../components/technical-code';
 import {
   clearFactoryGuidedHandoff,
   readFactoryGuidedHandoff,
@@ -396,7 +397,7 @@ function SourceCard({
         <div><dt>{isZh ? '内容哈希' : 'Content hash'}</dt><dd><code title={source.contentHash}>{source.contentHash.slice(0, 16)}</code></dd></div>
         <div><dt>{isZh ? '来源审查' : 'Source review'}</dt><dd>{source.officialHost
           ? `${isZh ? '官方域名' : 'Official host'} · ${source.officialHost}`
-          : source.sourceReviewLabel}</dd></div>
+          : technicalCodeLabel(source.sourceReviewLabel, isZh ? 'zh-CN' : 'en')}</dd></div>
       </dl>
       {source.securityFindings.length > 0 ? (
         <details className="factory-source__security">
@@ -409,9 +410,9 @@ function SourceCard({
           <ul>
             {source.securityFindings.map((finding, index) => (
               <li key={`${finding.field}-${finding.offset}-${finding.code}-${index}`}>
-                <strong>{finding.riskCategory ?? finding.code}</strong>
-                <span>{finding.severity} · {finding.field} · {finding.offset}</span>
-                <span>{finding.recommendedAction}</span>
+                <strong>{technicalCodeLabel(finding.riskCategory ?? finding.code, isZh ? 'zh-CN' : 'en')}</strong>
+                <span>{technicalCodeLabel(finding.severity, isZh ? 'zh-CN' : 'en')} · {finding.field} · {finding.offset}</span>
+                <span>{technicalCodeLabel(finding.recommendedAction, isZh ? 'zh-CN' : 'en')}</span>
               </li>
             ))}
           </ul>

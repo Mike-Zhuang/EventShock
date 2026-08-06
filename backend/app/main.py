@@ -1309,12 +1309,19 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             except Exception as error:
                 # 模型是否已计费可能无法确定，因此保留 UNKNOWN operation，
                 # 后续相同或替换 clientRequestId 都不得自动再次调用供应商。
+                # ModelGatewayError 自带稳定 FailureCode；保存异常类名会把超时、
+                # 连接失败和结构校验失败混为一谈，前端也就无法给出准确的恢复说明。
+                errorCode = (
+                    error.code.value
+                    if isinstance(error, ModelGatewayError)
+                    else type(error).__name__
+                )
                 service.markTurnUnknown(
                     workflowId=workflowId,
                     ownerUserId=ownerUserId,
                     request=payload,
                     claim=claim,
-                    errorCode=type(error).__name__,
+                    errorCode=errorCode,
                 )
                 raise
         except LookupError as error:

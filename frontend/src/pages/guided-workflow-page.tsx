@@ -161,12 +161,25 @@ interface LocalGuidedTurn {
   startedAtMs: number;
   stage: GuidedStage;
   status: 'sending' | 'failed' | 'delivered';
+  failure?: GuidedTurnFailure;
 }
 
 interface GuidedRecoveryIntent {
   operation: GuidedTurnOperation;
   action: GuidedTurnRecoveryAction;
 }
+
+interface GuidedTurnFailure {
+  message: string;
+  code?: string;
+  failureStage?: string;
+}
+
+const TERMINAL_GUIDED_OPERATION_STATUSES = new Set<GuidedTurnOperation['status']>([
+  'SUCCEEDED',
+  'UNKNOWN',
+  'ABANDONED_BY_USER',
+]);
 
 function guidedOperationStatus(
   status: GuidedTurnOperation['status'],
@@ -340,21 +353,55 @@ function guidedAdvanceErrorTarget(error: unknown): string {
   return 'guided-advance-heading';
 }
 
-function guidedTurnErrorMessage(error: unknown, isZh: boolean): string {
-  if (!(error instanceof ApiError)) {
-    return error instanceof Error ? error.message : String(error);
+function guidedTurnFailure(error: unknown): GuidedTurnFailure {
+  if (error instanceof ApiError) {
+    return {
+      message: error.message,
+      code: error.code,
+      failureStage: error.failureStage,
+    };
   }
-  if (error.code === 'LLM_CREDENTIAL_EXPIRED') {
+  return { message: error instanceof Error ? error.message : String(error) };
+}
+
+function guidedTurnErrorMessage(
+  failure: GuidedTurnFailure,
+  isZh: boolean,
+  operation?: GuidedTurnOperation,
+): string {
+  const errorCode = operation?.errorCode ?? failure.code;
+  const failureStage = operation?.failureStage ?? failure.failureStage;
+  if (errorCode === 'LLM_CREDENTIAL_EXPIRED') {
     return isZh
       ? '临时 API Key 已过期。你的消息已恢复到输入框；请重新配置并测试 Key 后再次发送。'
       : 'The temporary API key expired. Your message was restored to the composer; configure and test the key, then send it again.';
   }
-  if (error.code === 'LLM_CREDENTIAL_NOT_CONFIGURED') {
+  if (errorCode === 'LLM_CREDENTIAL_NOT_CONFIGURED') {
     return isZh
       ? '当前没有可用的 API Key。你的消息尚未被消费并已恢复；请先完成 AI 配置。'
       : 'No API key is configured. Your message was not consumed and has been restored; complete AI configuration first.';
   }
-  return error.message;
+  if (
+    operation?.httpResponseReceived === false
+    || failureStage === 'PROVIDER_RESPONSE_FAILED'
+    || ['MODEL_TIMEOUT', 'MODEL_TRANSPORT_ERROR', 'MODEL_OVERLOADED', 'MODEL_RATE_LIMITED']
+      .includes(errorCode ?? '')
+  ) {
+    return isZh
+      ? '未收到可用的模型供应商响应；这通常是连接、超时、限流或供应商负载问题，并不表示你的输入有误。消息已恢复。为避免重复计费，请在下方恢复区先放弃本次未知结果，再明确授权一次新调用。'
+      : 'No usable model-provider response was received. This usually indicates a connection, timeout, rate-limit, or provider-load problem—not invalid input. Your message was restored. To avoid duplicate charges, use the recovery section below to abandon the unknown result before authorizing one new call.';
+  }
+  if (errorCode === 'SCHEMA_INVALID') {
+    return isZh
+      ? '供应商已经返回内容，但结构化结果未通过安全格式校验。消息已恢复；请在下方恢复区决定是否放弃本次结果并授权重试。'
+      : 'The provider returned content, but the structured result failed safe format validation. Your message was restored; use the recovery section below to decide whether to abandon it and authorize a retry.';
+  }
+  if (errorCode === 'MODEL_RESPONSE_INVALID') {
+    return isZh
+      ? '供应商已经返回内容，但该回复无法安全转换为候选。消息已恢复；请在下方恢复区决定是否放弃本次结果并授权重试。'
+      : 'The provider returned content, but it could not be safely converted into a candidate. Your message was restored; use the recovery section below to decide whether to abandon it and authorize a retry.';
+  }
+  return failure.message;
 }
 
 function guidedBlockedReasonLabel(reason: string, isZh: boolean): string {
@@ -366,7 +413,7 @@ function guidedBlockedReasonLabel(reason: string, isZh: boolean): string {
   if (reason === 'LLM_CREDENTIAL_NOT_CONFIGURED') {
     return isZh ? '需要先配置并测试 API Key。' : 'Configure and test an API key first.';
   }
-  return reason.replaceAll('_', ' ').toLocaleLowerCase();
+  return technicalCodeLabel(reason, isZh ? 'zh-CN' : 'en');
 }
 
 function ProposalDetails({
@@ -466,6 +513,7 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
   const [localTurn, setLocalTurn] = useState<LocalGuidedTurn>();
   const [turnElapsedSeconds, setTurnElapsedSeconds] = useState(0);
   const [turnOperations, setTurnOperations] = useState<GuidedTurnOperation[]>([]);
+  const [operationSyncClientRequestId, setOperationSyncClientRequestId] = useState<string>();
   const [operationError, setOperationError] = useState<string>();
   const [recoveryIntent, setRecoveryIntent] = useState<GuidedRecoveryIntent>();
   const [archiveRequested, setArchiveRequested] = useState(false);
@@ -575,6 +623,42 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
   }, [localTurn?.id, localTurn?.status, workflow?.id]);
 
   useEffect(() => {
+    if (!workflow || !operationSyncClientRequestId) return undefined;
+    let active = true;
+    let attempts = 0;
+    const refreshTerminalOperation = async () => {
+      attempts += 1;
+      try {
+        const next = await api.getGuidedTurnOperations(workflow.id);
+        if (!active) return;
+        setTurnOperations(next);
+        setOperationError(undefined);
+        const operation = next.find(
+          (item) => item.clientRequestId === operationSyncClientRequestId,
+        );
+        if (operation && TERMINAL_GUIDED_OPERATION_STATUSES.has(operation.status)) {
+          if (localTurn?.failure) {
+            setError(guidedTurnErrorMessage(localTurn.failure, isZh, operation));
+          }
+          setOperationSyncClientRequestId(undefined);
+        } else if (attempts >= 15) {
+          setOperationSyncClientRequestId(undefined);
+        }
+      } catch (loadError) {
+        if (!active) return;
+        setOperationError(loadError instanceof Error ? loadError.message : String(loadError));
+        if (attempts >= 15) setOperationSyncClientRequestId(undefined);
+      }
+    };
+    void refreshTerminalOperation();
+    const timer = window.setInterval(() => void refreshTerminalOperation(), 1_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [isZh, localTurn?.failure, operationSyncClientRequestId, workflow?.id]);
+
+  useEffect(() => {
     if (!localTurn || !workflow) return;
     const persisted = workflow.messages.some(
       (item) => item.role === 'user' && item.content === localTurn.content,
@@ -673,8 +757,20 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
       );
       setLocalTurn(persisted ? undefined : { ...optimisticTurn, status: 'delivered' });
     } catch (operationError) {
+      const failure = guidedTurnFailure(operationError);
+      let recordedOperation: GuidedTurnOperation | undefined;
+      try {
+        const nextOperations = await api.getGuidedTurnOperations(workflow.id);
+        setTurnOperations(nextOperations);
+        setOperationError(undefined);
+        recordedOperation = nextOperations.find(
+          (item) => item.clientRequestId === clientRequestId,
+        );
+      } catch (loadError) {
+        setOperationError(loadError instanceof Error ? loadError.message : String(loadError));
+      }
       setMessage(content);
-      setLocalTurn({ ...optimisticTurn, status: 'failed' });
+      setLocalTurn({ ...optimisticTurn, status: 'failed', failure });
       setCredentialActionRequired(
         operationError instanceof ApiError
         && (
@@ -682,7 +778,17 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
           || operationError.code === 'LLM_CREDENTIAL_NOT_CONFIGURED'
         ),
       );
-      setError(guidedTurnErrorMessage(operationError, isZh));
+      setError(guidedTurnErrorMessage(failure, isZh, recordedOperation));
+      if (
+        operationError instanceof ApiError
+        && operationError.status >= 500
+        && (!recordedOperation
+          || !TERMINAL_GUIDED_OPERATION_STATUSES.has(recordedOperation.status))
+      ) {
+        // 反向代理可能先返回 5xx，而后端稍后才把 UNKNOWN 终态写入数据库。
+        // 独立轮询操作记录，不能因为本地消息已标记失败就停止同步。
+        setOperationSyncClientRequestId(clientRequestId);
+      }
     } finally {
       setBusyAction(undefined);
     }
@@ -798,6 +904,10 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
   const currentTurnOperation = localTurn
     ? turnOperations.find((operation) => operation.clientRequestId === localTurn.id)
     : undefined;
+  const recoverableTurnOperation = turnOperations.find((operation) => (
+    operation.status === 'UNKNOWN'
+    && (!localTurn || operation.clientRequestId === localTurn.id)
+  )) ?? turnOperations.find((operation) => operation.status === 'UNKNOWN');
   const needsExternalReview = workflow && [
     'SOURCE_REVIEW',
     'CLAIM_REVIEW',
@@ -945,6 +1055,14 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
           {credentialActionRequired ? (
             <Button kind="tertiary" onClick={() => navigate('ai')}>
               {isZh ? '前往 AI 配置' : 'Open AI configuration'}
+            </Button>
+          ) : null}
+          {recoverableTurnOperation ? (
+            <Button
+              kind="tertiary"
+              onClick={() => focusGuidedTarget('guided-recovery-heading')}
+            >
+              {isZh ? '查看恢复选项' : 'Review recovery options'}
             </Button>
           ) : null}
         </div>
@@ -1190,7 +1308,11 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
             ) : null}
 
             {turnOperations.some((item) => item.status === 'UNKNOWN') ? (
-              <section className="guided-operation-recovery" aria-labelledby="guided-recovery-heading">
+              <section
+                className="guided-operation-recovery"
+                aria-labelledby="guided-recovery-heading"
+                tabIndex={-1}
+              >
                 <header>
                   <Warning size={22} weight="fill" aria-hidden="true" />
                   <div>
