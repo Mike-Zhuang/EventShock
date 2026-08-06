@@ -6,6 +6,7 @@ import json
 import time
 import zipfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -76,6 +77,39 @@ def test_health_and_synthetic_case(tmp_path: Path) -> None:
     assert metrics["runtime"]["privacyBoundary"] == "NO_PATH_BODY_SESSION_OR_CREDENTIAL_LABELS"
     assert metrics["experiments"]["workerConcurrency"] == 1
     assert metrics["sloTargets"]["status"] == "TARGETS_NOT_PRODUCTION_EVIDENCE"
+
+
+def test_case_list_exposes_session_scoped_event_pack_review_state(tmp_path: Path) -> None:
+    with TestClient(createApp(tmp_path)) as client:
+        initialA = client.get("/api/v1/cases", headers={"X-Session-ID": SESSION_A})
+        initialB = client.get("/api/v1/cases", headers={"X-Session-ID": SESSION_B})
+
+        def findPack(response: Any) -> dict[str, Any]:
+            payload = response.json()
+            return next(item for item in payload["items"] if item["eventPackId"] == PACK_ID)
+
+        assert findPack(initialA)["eventPackReviewState"] == "NOT_STARTED"
+        assert findPack(initialB)["eventPackReviewState"] == "NOT_STARTED"
+
+        reviewed = client.post(
+            f"/api/v1/event-packs/{PACK_ID}/claims/claim-limited-depth/review",
+            headers={"X-Session-ID": SESSION_A},
+            json={"status": "HUMAN_APPROVED"},
+        )
+        assert reviewed.status_code == 200
+        inProgressA = client.get("/api/v1/cases", headers={"X-Session-ID": SESSION_A})
+        unchangedB = client.get("/api/v1/cases", headers={"X-Session-ID": SESSION_B})
+        assert findPack(inProgressA)["eventPackReviewState"] == "IN_PROGRESS"
+        assert findPack(unchangedB)["eventPackReviewState"] == "NOT_STARTED"
+
+        frozen = client.post(
+            f"/api/v1/event-packs/{PACK_ID}/freeze",
+            headers={"X-Session-ID": SESSION_A},
+        )
+        assert frozen.status_code == 200
+        finalA = client.get("/api/v1/cases", headers={"X-Session-ID": SESSION_A})
+        assert findPack(finalA)["eventPackReviewState"] == "FROZEN"
+        assert findPack(finalA)["status"] == "FROZEN"
 
 
 def test_unknown_api_route_is_structured_404(tmp_path: Path) -> None:
@@ -267,6 +301,15 @@ def test_scenario_validation_records_question_intervention_alignment(tmp_path: P
                 "questionInterventionParameter": "marketMakerCapacity",
             },
         )
+        humanConfirmed = client.post(
+            "/api/v1/scenarios/validate",
+            headers={"X-Session-ID": SESSION_A},
+            json={
+                **basePayload,
+                "questionInterventionParameter": "marketMakerCapacity",
+                "questionReviewMethod": "USER_CONFIRMED_UNCHANGED",
+            },
+        )
         mismatched = client.post(
             "/api/v1/scenarios/validate",
             headers={"X-Session-ID": SESSION_A},
@@ -300,6 +343,17 @@ def test_scenario_validation_records_question_intervention_alignment(tmp_path: P
     assert aligned.status_code == 200
     assert alignedCheck["status"] == "PASS"
     assert aligned.json()["valid"] is True
+    assert humanConfirmed.json()["valid"] is True
+    assert any(
+        warning["code"] == "QUESTION_WORDING_HUMAN_CONFIRMED"
+        for warning in humanConfirmed.json()["warnings"]
+    )
+    humanCheck = next(
+        item
+        for item in humanConfirmed.json()["checks"]
+        if item["code"] == "QUESTION_INTERVENTION_ALIGNMENT"
+    )
+    assert "human judgment" in humanCheck["message"]
     assert mismatched.status_code == 200
     assert mismatchedCheck["status"] == "FAIL"
     assert mismatched.json()["valid"] is False
@@ -637,6 +691,7 @@ def test_experiment_lifecycle_is_idempotent_and_exports_zip(tmp_path: Path) -> N
         modelVersions = json.loads(archive.read("model_and_prompt_versions.json"))
         orderExecutionSummary = json.loads(archive.read("order_execution_summary.json"))
         reproduceReadme = archive.read("README_REPRODUCE.md").decode()
+        validationReport = archive.read("validation_report.md").decode()
     assert {
         "manifest.json",
         "scenario_baseline.json",
@@ -689,6 +744,8 @@ def test_experiment_lifecycle_is_idempotent_and_exports_zip(tmp_path: Path) -> N
     }.issubset(orderExecutionSummary["items"][0])
     assert "NOT_APPLICABLE" in reproduceReadme
     assert "no external cognition requested" in reproduceReadme
+    assert "soft warning rather than a guarantee" in reproduceReadme
+    assert "Research-question review method: `NOT_RECORDED`" in validationReport
     expectedEventPackHash = hashlib.sha256(
         json.dumps(
             exportedEventPack,

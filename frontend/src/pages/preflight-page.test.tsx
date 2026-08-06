@@ -157,6 +157,53 @@ describe('PreflightPage 面向用户的枚举与停止规则', () => {
       .toBeInTheDocument();
   });
 
+  it('hides raw validation enums behind human-readable labels', () => {
+    const current = vi.mocked(useWorkflow)();
+    const validation = current.validation!;
+    vi.mocked(useWorkflow).mockReturnValue({
+      ...current,
+      validation: {
+        ...validation,
+        checks: [
+          ...validation.checks,
+          {
+            id: 'LICENSE_REVIEW_REQUIRED_FOR_REDISTRIBUTION',
+            label: 'LICENSE_REVIEW_REQUIRED_FOR_REDISTRIBUTION',
+            passed: true,
+            severity: 'warning',
+            detail: 'Source availability is not redistribution permission.',
+          },
+        ],
+      },
+    } as ReturnType<typeof useWorkflow>);
+
+    render(<I18nProvider><PreflightPage navigate={vi.fn()} /></I18nProvider>);
+
+    expect(screen.getByText('Redistribution permission requires human review'))
+      .toBeInTheDocument();
+    expect(screen.queryByText('LICENSE_REVIEW_REQUIRED_FOR_REDISTRIBUTION'))
+      .not.toBeInTheDocument();
+  });
+
+  it('keeps explicit human-retained question wording visible at the launch gate', () => {
+    const current = vi.mocked(useWorkflow)();
+    vi.mocked(useWorkflow).mockReturnValue({
+      ...current,
+      scenario: {
+        ...current.scenario,
+        questionReviewMethod: 'USER_CONFIRMED_UNCHANGED',
+      },
+    } as ReturnType<typeof useWorkflow>);
+
+    render(<I18nProvider><PreflightPage navigate={vi.fn()} /></I18nProvider>);
+
+    expect(screen.getByText('Research-question wording was retained')).toBeInTheDocument();
+    expect(screen.getByText('User retained and explicitly confirmed the wording'))
+      .toBeInTheDocument();
+    expect(screen.getByText(/human judgment rather than proven semantic equivalence/))
+      .toBeInTheDocument();
+  });
+
   it('requires an explicit RULE_ONLY switch and starts with the effective scenario', async () => {
     const navigate = vi.fn();
     createAndStartExperiment.mockResolvedValue({ id: 'exp-rule-only' });

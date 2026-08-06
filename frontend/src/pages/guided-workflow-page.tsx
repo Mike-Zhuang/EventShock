@@ -378,6 +378,13 @@ function ProposalDetails({
 }) {
   const metadata = proposal.proposedEventMetadata;
   const intervention = proposal.proposedIntervention;
+  const fieldLabel = (field: string) => ({
+    title: isZh ? '事件标题' : 'Event title',
+    summary: isZh ? '事件摘要' : 'Event summary',
+    instrument: isZh ? '合成证券代码' : 'Synthetic instrument code',
+    asOf: isZh ? '时点截止日期' : 'Point-in-time cutoff',
+    researchQuestion: isZh ? '研究问题' : 'Research question',
+  }[field] ?? (isZh ? '待补字段' : 'Unresolved field'));
   return (
     <div className="guided-proposal__details">
       {metadata ? (
@@ -422,6 +429,19 @@ function ProposalDetails({
         <div className="guided-proposal__blocked">
           <strong>{isZh ? '尚未满足' : 'Still required'}</strong>
           <ul>{proposal.blockedReasons.map((reason) => <li key={reason}>{guidedBlockedReasonLabel(reason, isZh)}</li>)}</ul>
+        </div>
+      ) : null}
+      {(proposal.unresolvedFields?.length ?? 0) > 0 ? (
+        <div className="guided-proposal__unresolved" role="alert">
+          <strong>{isZh ? '需要你补充的信息' : 'Information you still need to provide'}</strong>
+          <p>{isZh
+            ? '这些内容不会以“未知”或“TBD”等占位词写入正式事件元数据；全部解决后才能应用候选。'
+            : 'Placeholder text such as “unknown” or “TBD” will not enter formal event metadata. Resolve every item before applying the proposal.'}</p>
+          <ul>
+            {proposal.unresolvedFields?.map((item) => (
+              <li key={item.field}><strong>{fieldLabel(item.field)}</strong><span>{item.reason}</span></li>
+            ))}
+          </ul>
         </div>
       ) : null}
     </div>
@@ -1050,8 +1070,8 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
                 </header>
                 <p>
                   {isZh
-                    ? '推荐示例：我要研究 2024-01-05 阿拉斯加航空 1282 航班门塞脱落事件对波音（BA）的影响，重点比较做市能力下降是否放大流动性压力。'
-                    : 'Example: Study how the 2024-01-05 Alaska Airlines Flight 1282 door-plug event affected Boeing (BA), focusing on whether reduced market-making capacity amplified liquidity stress.'}
+                    ? '推荐示例：我要研究 2024-01-05 阿拉斯加航空 1282 航班门塞脱落事件，使用 BA（合成市场代理）比较做市能力下降是否放大模拟流动性压力。'
+                    : 'Example: Study the 2024-01-05 Alaska Airlines Flight 1282 door-plug event using BA (a synthetic market proxy), focusing on whether reduced market-making capacity amplified simulated liquidity stress.'}
                 </p>
                 {!workflow.draft.eventMetadata ? (
                   <details>

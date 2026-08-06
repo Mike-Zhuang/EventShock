@@ -242,6 +242,11 @@ class ExperimentRequest(StrictModel):
     # 研究问题不会在切换干预时被静默改写。该字段记录用户最后一次明确确认
     # 问题语义所对应的干预参数，供前后端在进入预检前识别陈旧叙述。
     questionInterventionParameter: InterventionParameter | None = None
+    # 记录问题与干预对齐是由系统生成，还是由用户保留原措辞后明确确认。
+    # 后者不是自动语义证明，必须继续在预检与导出中可见。
+    questionReviewMethod: Literal[
+        "GENERATED_ALIGNED", "USER_CONFIRMED_UNCHANGED"
+    ] | None = None
     intervention: InterventionConfig
     seedCount: Literal[10, 25, 50] = 10
     populationSize: int = Field(default=56, ge=14, le=250)

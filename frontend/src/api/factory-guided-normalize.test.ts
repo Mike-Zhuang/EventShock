@@ -193,6 +193,33 @@ describe('guided-workflow normalizer', () => {
     });
   });
 
+  it('keeps unresolved fields separate when a proposal is not ready', () => {
+    const normalized = normalizeGuidedWorkflow({
+      ...workflow,
+      pendingProposal: {
+        ...workflow.pendingProposal,
+        proposedEventMetadata: null,
+        readyForHumanReview: false,
+        clarificationRequired: true,
+        missing_fields: ['instrument'],
+        unresolved_fields: [{
+          field: 'instrument',
+          reason: 'The user has not identified the synthetic instrument.',
+        }],
+      },
+    });
+
+    expect(normalized.pendingProposal).toMatchObject({
+      readyForHumanReview: false,
+      proposedEventMetadata: undefined,
+      missingFields: ['instrument'],
+      unresolvedFields: [{
+        field: 'instrument',
+        reason: 'The user has not identified the synthetic instrument.',
+      }],
+    });
+  });
+
   it('rejects unsupported stages, schema versions, and intervention parameters', () => {
     expect(() => normalizeGuidedWorkflow({ ...workflow, stage: 'FREE_PLAY_CHAT' }))
       .toThrow(/stage/);

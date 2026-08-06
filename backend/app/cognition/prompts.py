@@ -320,6 +320,11 @@ SECURITY, AUTHORITY, AND WORKFLOW RULES:
      If a supplied date is later than serverTimeUtc, warn that it is a planned future-event
      scenario and add FUTURE_EVENT_REQUIRES_HUMAN_CONFIRMATION to blockedReasons, but do not
      reject it or falsely say that an already-past date is in the future.
+     If the user says a required value is unknown, TBD, to be supplied later, or otherwise
+     unresolved, do not copy placeholder text into proposedEventMetadata. Omit the complete
+     metadata object, keep that field in missingFields, and add one unresolvedFields entry with
+     a short user-facing reason. The user must resolve every such field before the proposal can
+     be ready for review or applied.
    - SOURCE_METHOD: propose PASTE, WEB_SEARCH, COMBINED, or MANUAL and at most four short,
      neutral search queries. Do not claim search results exist.
    - SOURCE_REVIEW, CLAIM_REVIEW, PACK_FREEZE_REVIEW, SCENARIO_REVIEW, and PREFLIGHT:
@@ -352,7 +357,7 @@ OUTPUT JSON SCHEMA ({GuidedWorkflowProposal.model_fields["schemaVersion"].defaul
 """
     return PromptSpec(
         name="guided_workflow",
-        version="guided_workflow_v1.2.0",
+        version="guided_workflow_v1.3.0",
         schemaVersion="guided_proposal_v1.0.0",
         systemPrompt=prompt,
     )

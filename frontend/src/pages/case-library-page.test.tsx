@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { normalizeCases } from '../api/normalize';
 import { I18nProvider } from '../i18n';
@@ -16,8 +17,12 @@ describe('CaseLibraryPage 验证边界', () => {
       cases: normalizeCases([
         {
           id: 'historical-case',
+          eventPackId: 'historical-pack',
           title: 'Historical mechanism case',
-          summary: 'A historical event used for mechanism comparison.',
+          summary: 'BA is used for a historical mechanism comparison.',
+          instrument: 'BA',
+          status: 'FROZEN',
+          eventPackReviewState: 'FROZEN',
           caseRole: 'HISTORICAL_VALIDATION_CASE',
           validationStatus: {
             level: 'L5_CASE_AVAILABLE',
@@ -27,8 +32,11 @@ describe('CaseLibraryPage 验证边界', () => {
         },
         {
           id: 'pending-case',
+          eventPackId: 'pending-pack',
           title: 'Pending study case',
           summary: 'A runnable case awaiting human evidence.',
+          status: 'DRAFT',
+          eventPackReviewState: 'IN_PROGRESS',
           validationStatus: {
             empiricalCalibration: 'PENDING_HUMAN_STUDY',
           },
@@ -55,5 +63,27 @@ describe('CaseLibraryPage 验证边界', () => {
     expect(screen.queryByText('L5_CASE_AVAILABLE')).not.toBeInTheDocument();
     expect(screen.queryByText('PENDING_HUMAN_STUDY')).not.toBeInTheDocument();
     expect(document.querySelector('[title="L5_CASE_AVAILABLE"]')).toBeNull();
+  });
+
+  it('按当前用户的证据状态进入审核或情景，并在描述中的代码旁持续标注合成代理', async () => {
+    const user = userEvent.setup();
+    const navigate = vi.fn();
+    const current = vi.mocked(useWorkflow)();
+    const selectCase = vi.fn()
+      .mockResolvedValueOnce({ status: 'DRAFT', frozenAt: undefined })
+      .mockResolvedValueOnce({ status: 'FROZEN', frozenAt: '2026-08-05T00:00:00Z' });
+    vi.mocked(useWorkflow).mockReturnValue({
+      ...current,
+      selectCase,
+    } as ReturnType<typeof useWorkflow>);
+
+    render(<I18nProvider><CaseLibraryPage navigate={navigate} /></I18nProvider>);
+
+    expect(screen.getByText('synthetic market proxy')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Continue evidence review' }));
+    expect(navigate).toHaveBeenLastCalledWith('pack');
+
+    await user.click(screen.getByRole('button', { name: 'Build scenario' }));
+    expect(navigate).toHaveBeenLastCalledWith('scenario');
   });
 });

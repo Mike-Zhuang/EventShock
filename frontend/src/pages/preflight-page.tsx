@@ -12,6 +12,7 @@ import {
   useWorkflow,
 } from '../state/workflow-context';
 import { safeDate } from '../utils/format';
+import { humanizeTechnicalText, technicalCodeLabel } from '../components/technical-code';
 
 function cognitionModeLabel(mode: string | undefined, isZh: boolean): string {
   if (!mode || mode === 'RULE_ONLY') {
@@ -20,7 +21,7 @@ function cognitionModeLabel(mode: string | undefined, isZh: boolean): string {
   if (mode === 'HYBRID_LLM') {
     return isZh ? '受限结构化模型辅助' : 'Bounded structured-model assistance';
   }
-  return isZh ? `其他认知模式（${mode}）` : `Other cognition mode (${mode})`;
+  return isZh ? '其他认知模式（原始值仅在技术详情中显示）' : 'Other cognition mode (raw value appears only in technical details)';
 }
 
 function pricingStatusLabel(status: string | undefined, isZh: boolean): string {
@@ -45,8 +46,8 @@ function pricingStatusLabel(status: string | undefined, isZh: boolean): string {
   const normalized = status ?? 'UNAVAILABLE';
   const label = labels[normalized];
   return label ? isZh ? label.zh : label.en : isZh
-    ? `其他价格状态（${normalized}）`
-    : `Other pricing status (${normalized})`;
+    ? '其他价格状态（原始值仅在技术详情中显示）'
+    : 'Other pricing status (raw value appears only in technical details)';
 }
 
 function interpretationBoundaryLabel(boundary: string | undefined, isZh: boolean): string {
@@ -55,7 +56,7 @@ function interpretationBoundaryLabel(boundary: string | undefined, isZh: boolean
       ? '机制演示与情景比较，不是现实预测'
       : 'Mechanism demonstration and scenario comparison, not a real-world forecast';
   }
-  return isZh ? `其他解释边界（${boundary}）` : `Other interpretation boundary (${boundary})`;
+  return isZh ? '其他解释边界（原始值仅在技术详情中显示）' : 'Other interpretation boundary (raw value appears only in technical details)';
 }
 
 function degradationReasonLabel(code: string, isZh: boolean): string {
@@ -87,7 +88,7 @@ function degradationReasonLabel(code: string, isZh: boolean): string {
   };
   const label = labels[code];
   if (label) return isZh ? label.zh : label.en;
-  return isZh ? `模型降级原因：${code}` : `Model degradation reason: ${code}`;
+  return technicalCodeLabel(code, isZh ? 'zh-CN' : 'en');
 }
 
 function preflightCheckLabel(code: string, fallback: string, isZh: boolean): string {
@@ -131,7 +132,10 @@ function preflightCheckLabel(code: string, fallback: string, isZh: boolean): str
   };
   const label = labels[code];
   if (label) return isZh ? label.zh : label.en;
-  return isZh ? `其他检查（${code}）` : fallback || `Other check (${code})`;
+  const language = isZh ? 'zh-CN' : 'en';
+  const humanFallback = humanizeTechnicalText(fallback, language);
+  if (humanFallback && humanFallback !== code) return humanFallback;
+  return technicalCodeLabel(code, language);
 }
 
 function stoppingRuleDescription(
@@ -308,6 +312,17 @@ export function PreflightPage({ navigate }: { navigate: (view: ViewId) => void }
             : `The simulation itself remains runnable, but it will not degrade silently. Explicitly confirm that this run changes the scenario to RULE_ONLY.${validation.degradationReasons.map((code) => ` ${degradationReasonLabel(code, false)}`).join('')}`}
         />
       ) : null}
+      {scenario.questionReviewMethod === 'USER_CONFIRMED_UNCHANGED' ? (
+        <InlineNotification
+          kind="warning"
+          lowContrast
+          hideCloseButton
+          title={isZh ? '研究问题沿用原措辞' : 'Research-question wording was retained'}
+          subtitle={isZh
+            ? '你在切换干预后明确保留了原研究问题。该记录会随场景和导出保留，但只代表人工判断，不代表系统已证明语义完全对齐。'
+            : 'You explicitly retained the existing research question after changing the intervention. This record remains with the scenario and export, but represents human judgment rather than proven semantic equivalence.'}
+        />
+      ) : null}
       {startError || experimentsError ? (
         <InlineNotification kind="error" lowContrast hideCloseButton title={t('common.errorTitle')} subtitle={t('common.errorFallback')} />
       ) : null}
@@ -320,6 +335,12 @@ export function PreflightPage({ navigate }: { navigate: (view: ViewId) => void }
           <dl className="definition-list">
             <div><dt>{t('scenario.eventPack')}</dt><dd>{language === 'zh-CN' ? eventPack?.nameZh ?? eventPack?.name ?? scenario.eventPackId : eventPack?.name ?? scenario.eventPackId}</dd></div>
             <div><dt>{t('scenario.researchQuestion')}</dt><dd>{language === 'zh-CN' ? scenario.questionZh ?? scenario.question : scenario.question}</dd></div>
+            <div>
+              <dt>{isZh ? '研究问题复核方式' : 'Research-question review method'}</dt>
+              <dd>{scenario.questionReviewMethod === 'USER_CONFIRMED_UNCHANGED'
+                ? isZh ? '用户保留原措辞并明确确认' : 'User retained and explicitly confirmed the wording'
+                : isZh ? '按当前干预生成并对齐' : 'Generated and aligned to the current intervention'}</dd>
+            </div>
             <div><dt>{t('pack.pointInTime')}</dt><dd>{eventPack?.pointInTime ? safeDate(eventPack.pointInTime, language) : t('common.unavailable')}</dd></div>
             <div><dt>{t('scenario.interventionLabel')}</dt><dd>{translateParameter(scenario.intervention.parameter, t)}</dd></div>
             <div><dt>{t('common.baseline')}</dt><dd>{scenario.intervention.baselineValue}</dd></div>
@@ -377,7 +398,10 @@ export function PreflightPage({ navigate }: { navigate: (view: ViewId) => void }
                   translateValidation(check.id, check.label, t),
                   isZh,
                 )}
-                detail={translateValidation(check.id, check.detail, t)}
+                detail={humanizeTechnicalText(
+                  translateValidation(check.id, check.detail, t),
+                  language,
+                )}
                 severity={check.severity}
               />
             ))}
@@ -391,7 +415,9 @@ export function PreflightPage({ navigate }: { navigate: (view: ViewId) => void }
             <p>{language === 'zh-CN' ? '这些限制在启动决策点展示，并随导出包保存。' : 'These limitations are shown at the launch decision point and retained in the export bundle.'}</p>
           </div>
           <ul>
-            {(language === 'zh-CN' ? eventPack?.limitationsZh : eventPack?.limitations)?.map((limitation) => <li key={limitation}>{limitation}</li>)}
+            {(language === 'zh-CN' ? eventPack?.limitationsZh : eventPack?.limitations)?.map((limitation) => (
+              <li key={limitation}>{humanizeTechnicalText(limitation, language)}</li>
+            ))}
             <li>{language === 'zh-CN' ? '所有基准与干预路径均由模型机制生成，不能当作任何真实证券、资产或研究对象的价格预测。' : 'All baseline and intervention paths are generated by model mechanisms and are not price forecasts for any real security, asset, or research subject.'}</li>
             <li>{language === 'zh-CN' ? `${scenario.seedCount} 对匹配随机种子的区间宽度和有效样本数必须与结果一起报告；小样本仅适合快速演示。` : `Interval width and valid sample count must accompany results from ${scenario.seedCount} matched seeds; small samples are suitable only for a fast demo.`}</li>
           </ul>

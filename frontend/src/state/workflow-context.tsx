@@ -69,6 +69,7 @@ export function scenarioContentDigest(scenario: ScenarioDraft): string {
 const DEFAULT_SCENARIO: ScenarioDraft = {
   eventPackId: '',
   questionInterventionParameter: 'marketMakerCapacity',
+  questionReviewMethod: 'GENERATED_ALIGNED',
   intervention: {
     parameter: 'marketMakerCapacity',
     baselineValue: 1,
@@ -161,7 +162,7 @@ interface WorkflowContextValue {
   resultsError?: string;
   refreshAll: () => Promise<void>;
   refreshCases: () => Promise<void>;
-  selectCase: (caseItem: CaseSummary) => Promise<void>;
+  selectCase: (caseItem: CaseSummary) => Promise<EventPack>;
   createEventPack: (input: EventPackCreateInput) => Promise<EventPack>;
   reextractEventPack: (
     sources: EventSourceUpload[],
@@ -344,8 +345,9 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     setResultsError(undefined);
     if (!caseItem.eventPackId) {
       setEventPackState('error');
-      setEventPackError('The selected case does not include an Event Pack identifier.');
-      return;
+      const error = new Error('The selected case does not include an Event Pack identifier.');
+      setEventPackError(error.message);
+      throw error;
     }
     setEventPackState('loading');
     setEventPackError(undefined);
@@ -356,9 +358,11 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         ? withScenarioDefaults(nextPack.defaultExperiment)
         : { ...current, eventPackId: nextPack.id });
       setEventPackState('success');
+      return nextPack;
     } catch (error) {
       setEventPackState('error');
       setEventPackError(errorMessage(error));
+      throw error;
     }
   }, [clearScenarioValidation]);
 
@@ -444,13 +448,14 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       setEventPack(nextPack);
       clearScenarioValidation();
       setEventPackState('success');
+      await refreshCases();
       return nextPack;
     } catch (extractError) {
       setEventPackState('error');
       setEventPackError(errorMessage(extractError));
       throw extractError;
     }
-  }, [clearScenarioValidation, eventPack]);
+  }, [clearScenarioValidation, eventPack, refreshCases]);
 
   const freezeEventPack = useCallback(async () => {
     if (!eventPack) return;
@@ -461,12 +466,13 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       setEventPack(nextPack);
       clearScenarioValidation();
       setEventPackState('success');
+      await refreshCases();
     } catch (error) {
       setEventPackState('error');
       setEventPackError(errorMessage(error));
       throw error;
     }
-  }, [clearScenarioValidation, eventPack]);
+  }, [clearScenarioValidation, eventPack, refreshCases]);
 
   const setScenario = useCallback((nextScenario: ScenarioDraft) => {
     setScenarioState(nextScenario);

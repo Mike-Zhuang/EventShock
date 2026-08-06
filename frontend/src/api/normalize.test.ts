@@ -560,6 +560,7 @@ describe('API normalizers', () => {
       summary: 'Research fixture',
       summaryZh: '研究测试数据',
       synthetic: true,
+      eventPackReviewState: 'IN_PROGRESS',
       validationStatus: {
         level: 'L5_CASE_AVAILABLE',
         empiricalCalibration: 'PENDING_HUMAN_STUDY',
@@ -571,6 +572,7 @@ describe('API normalizers', () => {
       name: 'Synthetic Case',
       nameZh: '合成案例',
       isSynthetic: true,
+      eventPackReviewState: 'IN_PROGRESS',
       validationStatus: {
         level: 'L5_CASE_AVAILABLE',
         empiricalCalibration: 'PENDING_HUMAN_STUDY',

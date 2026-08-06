@@ -188,6 +188,7 @@ export interface CaseSummary {
   eventPackId?: string;
   instrument?: string;
   status?: string;
+  eventPackReviewState?: 'NOT_STARTED' | 'IN_PROGRESS' | 'FROZEN';
   isSynthetic?: boolean;
   syntheticLabel?: string;
   syntheticLabelZh?: string;
@@ -342,6 +343,7 @@ export interface ScenarioDraft {
   question?: string;
   questionZh?: string;
   questionInterventionParameter?: InterventionParameter;
+  questionReviewMethod?: 'GENERATED_ALIGNED' | 'USER_CONFIRMED_UNCHANGED';
   intervention: InterventionDefinition;
   seedCount: 10 | 25 | 50;
   seedRoot?: number;
@@ -603,6 +605,10 @@ export interface GuidedWorkflowProposal {
   readyForHumanReview: boolean;
   blockedReasons: string[];
   missingFields?: Array<'title' | 'summary' | 'instrument' | 'asOf' | 'researchQuestion'>;
+  unresolvedFields?: Array<{
+    field: 'title' | 'summary' | 'instrument' | 'asOf' | 'researchQuestion';
+    reason: string;
+  }>;
 }
 
 export interface GuidedWorkflowMessage {
