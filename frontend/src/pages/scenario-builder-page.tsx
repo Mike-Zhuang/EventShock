@@ -44,6 +44,10 @@ import { translateValidation, useI18n } from '../i18n';
 import { getPageGuide } from '../page-guidance';
 import { getParameterHelp } from '../parameter-help';
 import {
+  getScenarioReadiness,
+  type ScenarioReadinessBlocker,
+} from '../scenario-readiness';
+import {
   scenarioContentDigest,
   scenarioContentSignature,
   useWorkflow,
@@ -165,13 +169,14 @@ const INTERVENTION_QUESTION_NAMES: Record<InterventionParameter, { en: string; z
 export function buildAlignedInterventionQuestions(
   parameter: InterventionParameter,
   instrument: string,
-): Pick<ScenarioDraft, 'question' | 'questionZh' | 'questionInterventionParameter'> {
+): Pick<ScenarioDraft, 'question' | 'questionZh' | 'questionInterventionParameter' | 'questionReviewMethod'> {
   const name = INTERVENTION_QUESTION_NAMES[parameter];
   const visibleInstrument = instrument.trim() || 'the synthetic instrument';
   return {
     question: `Holding the frozen event evidence and all other scenario fields constant, how does changing the synthetic ${name.en} affect ${visibleInstrument}'s simulated market outcomes?`,
     questionZh: `在冻结事件证据和其他情景字段保持不变的情况下，改变合成${name.zh}会如何影响 ${visibleInstrument} 的模拟市场结果？`,
     questionInterventionParameter: parameter,
+    questionReviewMethod: 'GENERATED_ALIGNED',
   };
 }
 
@@ -186,6 +191,38 @@ export function focusScenarioStep(targetId: string): boolean {
   target.scrollIntoView?.({ block: 'start', behavior: reducedMotion ? 'auto' : 'smooth' });
   target.focus({ preventScroll: true });
   return true;
+}
+
+export function scenarioReadinessCopy(
+  blocker: ScenarioReadinessBlocker,
+  isZh: boolean,
+): { title: string; action: string } {
+  const labels: Record<ScenarioReadinessBlocker['code'], { title: string; action: string }> = isZh
+    ? {
+        EVENT_PACK_NOT_SELECTED: { title: '尚未选择 Event Pack。', action: '选择并审核证据' },
+        EVENT_PACK_NOT_FROZEN: { title: 'Event Pack 尚未完成审核与冻结。', action: '继续审核证据' },
+        INTERVENTION_VALUES_INVALID: { title: '基准值与干预值必须在允许范围内且彼此不同。', action: '检查干预值' },
+        QUESTION_REVIEW_REQUIRED: { title: '研究问题尚未针对当前干预完成确认。', action: '复核研究问题' },
+        POPULATION_OUT_OF_RANGE: { title: 'Agent 数量必须是 14 至 250 的整数。', action: '检查 Agent 数量' },
+        SIMULATION_PLAN_INVALID: { title: '仿真步数或根随机种子不在允许范围内。', action: '检查实验设计' },
+        NETWORK_DEGREE_INVALID: { title: '网络参数无效；平均度必须小于 Agent 数量。', action: '检查网络参数' },
+        STOPPING_RULE_INVALID: { title: '停止规则与配对随机种子数量不一致。', action: '检查停止规则' },
+        LLM_CONFIGURATION_INVALID: { title: '混合 LLM 配置、预算或模型可用性不满足运行条件。', action: '检查 LLM 配置' },
+        VALIDATION_IN_PROGRESS: { title: '正在验证当前草稿，请等待完成。', action: '正在验证' },
+      }
+    : {
+        EVENT_PACK_NOT_SELECTED: { title: 'No Event Pack is selected.', action: 'Select and review evidence' },
+        EVENT_PACK_NOT_FROZEN: { title: 'The Event Pack has not been reviewed and frozen.', action: 'Continue evidence review' },
+        INTERVENTION_VALUES_INVALID: { title: 'Baseline and intervention values must be in range and different.', action: 'Check intervention values' },
+        QUESTION_REVIEW_REQUIRED: { title: 'The research question is not confirmed for the current intervention.', action: 'Review the research question' },
+        POPULATION_OUT_OF_RANGE: { title: 'Agent count must be an integer from 14 to 250.', action: 'Check agent count' },
+        SIMULATION_PLAN_INVALID: { title: 'Simulation steps or the root random seed are outside the allowed range.', action: 'Check experiment design' },
+        NETWORK_DEGREE_INVALID: { title: 'Network settings are invalid; average degree must be below agent count.', action: 'Check network settings' },
+        STOPPING_RULE_INVALID: { title: 'The stopping rule does not match the paired-seed count.', action: 'Check the stopping rule' },
+        LLM_CONFIGURATION_INVALID: { title: 'Hybrid LLM settings, budget, or model availability are not runnable.', action: 'Check LLM settings' },
+        VALIDATION_IN_PROGRESS: { title: 'The current draft is being validated.', action: 'Validating' },
+      };
+  return labels[blocker.code];
 }
 
 function numericInputValue(value: string | number): number | undefined {
@@ -425,6 +462,7 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
       eventPackId: guidedHandoff.eventPackId,
       question: guidedHandoff.eventMetadata.researchQuestion,
       questionInterventionParameter: undefined,
+      questionReviewMethod: undefined,
       intervention: {
         parameter: guidedHandoff.intervention.parameter,
         baselineValue: guidedHandoff.intervention.baselineValue,
@@ -436,28 +474,21 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
     );
   }, [eventPack?.id, guidedHandoff, scenario, setScenario]);
 
-  const scenarioIsWithinBounds = useMemo(() => (
-    scenario.intervention.baselineValue >= selectedOption.min
-    && scenario.intervention.baselineValue <= selectedOption.max
-    && scenario.intervention.interventionValue >= selectedOption.min
-    && scenario.intervention.interventionValue <= selectedOption.max
-    && scenario.intervention.baselineValue !== scenario.intervention.interventionValue
-    && scenario.populationSize >= 14
-    && scenario.populationSize <= 250
-    && scenario.steps >= 30
-    && scenario.steps <= 300
-    && (scenario.seedRoot ?? 2_026_070_700) >= 1
-    && (scenario.seedRoot ?? 2_026_070_700) <= 2_147_483_000
-    && (scenario.stoppingRule?.minimumPairs ?? scenario.seedCount) >= 5
-    && (scenario.stoppingRule?.minimumPairs ?? scenario.seedCount) <= scenario.seedCount
-    && !questionNeedsReview
-    && network.averageDegree < scenario.populationSize
-    && (llmPolicy.mode === 'RULE_ONLY' || (
-      llmPolicy.representativeAgentCount > 0
-      && llmPolicy.representativeAgentCount <= scenario.populationSize
-      && llmPolicy.callBudget >= llmPolicy.representativeAgentCount
-    ))
-  ), [llmPolicy, network.averageDegree, questionNeedsReview, scenario, selectedOption]);
+  const scenarioReadiness = useMemo(() => getScenarioReadiness({
+    eventPack,
+    scenario: { ...scenario, network, llmPolicy },
+    interventionBounds: selectedOption,
+    llmModelReady: selectedLlmModelAvailability === 'READY',
+    validationInProgress: validationState === 'loading',
+  }), [
+    eventPack,
+    llmPolicy,
+    network,
+    scenario,
+    selectedLlmModelAvailability,
+    selectedOption,
+    validationState,
+  ]);
 
   const update = (partial: Partial<ScenarioDraft>) => setScenario({ ...scenario, ...partial });
   const updateIntervention = (partial: Partial<ScenarioDraft['intervention']>) => {
@@ -487,6 +518,7 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
     setScenario({
       ...scenario,
       questionInterventionParameter: undefined,
+      questionReviewMethod: undefined,
       intervention: {
         parameter: option.parameter,
         baselineValue: option.baselineValue,
@@ -496,6 +528,11 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
   };
 
   const validate = async () => {
+    if (!scenarioReadiness.ready) {
+      const firstActionable = scenarioReadiness.blockers.find((blocker) => blocker.targetId);
+      if (firstActionable?.targetId) focusScenarioStep(firstActionable.targetId);
+      return;
+    }
     try {
       const result = await validateScenario(
         selectedSavedScenario && draftMatchesSaved
@@ -824,9 +861,12 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
                 labelText={isZh ? '英文研究问题' : 'English research question'}
                 value={scenario.question ?? t('scenario.questionValue', { parameter: t(selectedOption.labelKey).toLowerCase() })}
                 maxLength={500}
+                invalid={questionNeedsReview}
+                invalidText={isZh ? '请针对当前干预生成新问题，或明确确认保留现有措辞。' : 'Generate wording for the current intervention or explicitly confirm the existing wording.'}
                 onChange={(event) => update({
                   question: event.target.value,
                   questionInterventionParameter: undefined,
+                  questionReviewMethod: undefined,
                 })}
               />
               <TextInput
@@ -837,6 +877,7 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
                 onChange={(event) => update({
                   questionZh: event.target.value,
                   questionInterventionParameter: undefined,
+                  questionReviewMethod: undefined,
                 })}
               />
             </div>
@@ -868,6 +909,7 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
                     disabled={(scenario.question ?? '').trim().length < 8}
                     onClick={() => update({
                       questionInterventionParameter: scenario.intervention.parameter,
+                      questionReviewMethod: 'USER_CONFIRMED_UNCHANGED',
                     })}
                   >
                     {isZh ? '保留现有措辞并确认' : 'Keep wording and confirm'}
@@ -997,10 +1039,10 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
                 })}
                 {!modelCatalog ? <SelectItem value="glm-5.2" text="glm-5.2" /> : null}
               </Select>
-              <NumberInput id="scenario-llm-count" label={isZh ? '代表性节点数' : 'Representative node count'} decorator={parameterHelp('representativeLlmAgents', isZh ? '代表性节点数' : 'Representative node count')} min={0} max={100} value={representativeLlmAgentCount} disabled={llmPolicy.mode === 'RULE_ONLY'} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) { const count = Math.round(value); setScenario({ ...scenario, llmPolicy: { ...llmPolicy, representativeAgentCount: count }, population: { ...population, representativeLlmAgents: count } }); } }} />
-              <NumberInput id="scenario-llm-interval" label={isZh ? '决策间隔（步）' : 'Decision interval (steps)'} decorator={parameterHelp('decisionInterval', isZh ? '决策间隔（步）' : 'Decision interval (steps)')} min={1} max={100} value={llmPolicy.decisionIntervalSteps} disabled={llmPolicy.mode === 'RULE_ONLY'} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) updateLlmPolicy({ decisionIntervalSteps: Math.round(value) }); }} />
-              <NumberInput id="scenario-llm-budget" label={isZh ? '调用预算' : 'Call budget'} decorator={parameterHelp('callBudget', isZh ? '调用预算' : 'Call budget')} min={0} max={500} value={llmPolicy.callBudget} disabled={llmPolicy.mode === 'RULE_ONLY'} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) updateLlmPolicy({ callBudget: Math.round(value) }); }} />
-              <NumberInput id="scenario-cost-budget" label={isZh ? '模型费用硬上限（USD）' : 'Model-cost hard cap (USD)'} decorator={parameterHelp('costCap', isZh ? '模型费用硬上限（USD）' : 'Model-cost hard cap (USD)')} helperText={isZh ? '最大责任上限，不是预计账单；调用后按实耗 token 结算' : 'Maximum liability, not an expected bill; actual tokens settle after'} min={0} max={100} step={0.1} value={llmPolicy.maxCostUsd} disabled={llmPolicy.mode === 'RULE_ONLY'} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) updateLlmPolicy({ maxCostUsd: value }); }} />
+              <NumberInput id="scenario-llm-count" label={isZh ? '代表性节点数' : 'Representative node count'} decorator={parameterHelp('representativeLlmAgents', isZh ? '代表性节点数' : 'Representative node count')} min={0} max={100} value={representativeLlmAgentCount} disabled={llmPolicy.mode === 'RULE_ONLY'} invalid={llmPolicy.mode === 'HYBRID_LLM' && (llmPolicy.representativeAgentCount < 1 || llmPolicy.representativeAgentCount > scenario.populationSize)} invalidText={isZh ? '必须至少为 1 且不超过 Agent 总数。' : 'Must be at least 1 and no greater than total agent count.'} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) { const count = Math.round(value); setScenario({ ...scenario, llmPolicy: { ...llmPolicy, representativeAgentCount: count }, population: { ...population, representativeLlmAgents: count } }); } }} />
+              <NumberInput id="scenario-llm-interval" label={isZh ? '决策间隔（步）' : 'Decision interval (steps)'} decorator={parameterHelp('decisionInterval', isZh ? '决策间隔（步）' : 'Decision interval (steps)')} min={1} max={100} value={llmPolicy.decisionIntervalSteps} disabled={llmPolicy.mode === 'RULE_ONLY'} invalid={llmPolicy.mode === 'HYBRID_LLM' && (llmPolicy.decisionIntervalSteps < 1 || llmPolicy.decisionIntervalSteps > 100)} invalidText={t('scenario.invalidRange')} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) updateLlmPolicy({ decisionIntervalSteps: Math.round(value) }); }} />
+              <NumberInput id="scenario-llm-budget" label={isZh ? '调用预算' : 'Call budget'} decorator={parameterHelp('callBudget', isZh ? '调用预算' : 'Call budget')} min={0} max={500} value={llmPolicy.callBudget} disabled={llmPolicy.mode === 'RULE_ONLY'} invalid={llmPolicy.mode === 'HYBRID_LLM' && llmPolicy.callBudget < llmPolicy.representativeAgentCount} invalidText={isZh ? '调用预算必须覆盖全部代表性节点。' : 'The call budget must cover every representative node.'} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) updateLlmPolicy({ callBudget: Math.round(value) }); }} />
+              <NumberInput id="scenario-cost-budget" label={isZh ? '模型费用硬上限（USD）' : 'Model-cost hard cap (USD)'} decorator={parameterHelp('costCap', isZh ? '模型费用硬上限（USD）' : 'Model-cost hard cap (USD)')} helperText={isZh ? '最大责任上限，不是预计账单；调用后按实耗 token 结算' : 'Maximum liability, not an expected bill; actual tokens settle after'} min={0} max={100} step={0.1} value={llmPolicy.maxCostUsd} disabled={llmPolicy.mode === 'RULE_ONLY'} invalid={llmPolicy.mode === 'HYBRID_LLM' && llmPolicy.maxCostUsd < 0} invalidText={t('scenario.invalidRange')} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) updateLlmPolicy({ maxCostUsd: value }); }} />
             </div>
             {llmPolicy.mode === 'HYBRID_LLM' ? (
               <InlineNotification
@@ -1051,10 +1093,10 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
                 <SelectItem value="ECHO_CHAMBER" text={isZh ? '回音室' : 'Echo chamber'} />
                 <SelectItem value="CORE_PERIPHERY" text={isZh ? '核心-边缘' : 'Core-periphery'} />
               </Select>
-              <NumberInput id="network-degree" label={isZh ? '平均度' : 'Average degree'} decorator={parameterHelp('averageDegree', isZh ? '平均度' : 'Average degree')} value={network.averageDegree} min={2} max={50} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) updateNetwork({ averageDegree: Math.round(value) }); }} />
-              <NumberInput id="network-rewiring" label={isZh ? '重连概率' : 'Rewiring probability'} decorator={parameterHelp('rewiringProbability', isZh ? '重连概率' : 'Rewiring probability')} value={network.rewiringProbability} min={0} max={1} step={0.01} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) updateNetwork({ rewiringProbability: value }); }} />
-              <NumberInput id="network-echo" label={isZh ? '回音室强度' : 'Echo chamber strength'} decorator={parameterHelp('echoChamberStrength', isZh ? '回音室强度' : 'Echo chamber strength')} value={network.echoChamberStrength} min={0} max={1} step={0.05} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) updateNetwork({ echoChamberStrength: value }); }} />
-              <NumberInput id="network-correction" label={isZh ? '更正触达率' : 'Correction reach'} decorator={parameterHelp('correctionReach', isZh ? '更正触达率' : 'Correction reach')} value={network.correctionReach} min={0} max={1} step={0.05} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) updateNetwork({ correctionReach: value }); }} />
+              <NumberInput id="network-degree" label={isZh ? '平均度' : 'Average degree'} decorator={parameterHelp('averageDegree', isZh ? '平均度' : 'Average degree')} value={network.averageDegree} min={2} max={50} invalid={network.averageDegree < 2 || network.averageDegree > 50 || network.averageDegree >= scenario.populationSize} invalidText={isZh ? '平均度必须为 2 至 50，且小于 Agent 总数。' : 'Average degree must be 2–50 and below total agent count.'} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) updateNetwork({ averageDegree: Math.round(value) }); }} />
+              <NumberInput id="network-rewiring" label={isZh ? '重连概率' : 'Rewiring probability'} decorator={parameterHelp('rewiringProbability', isZh ? '重连概率' : 'Rewiring probability')} value={network.rewiringProbability} min={0} max={1} step={0.01} invalid={network.rewiringProbability < 0 || network.rewiringProbability > 1} invalidText={t('scenario.invalidRange')} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) updateNetwork({ rewiringProbability: value }); }} />
+              <NumberInput id="network-echo" label={isZh ? '回音室强度' : 'Echo chamber strength'} decorator={parameterHelp('echoChamberStrength', isZh ? '回音室强度' : 'Echo chamber strength')} value={network.echoChamberStrength} min={0} max={1} step={0.05} invalid={network.echoChamberStrength < 0 || network.echoChamberStrength > 1} invalidText={t('scenario.invalidRange')} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) updateNetwork({ echoChamberStrength: value }); }} />
+              <NumberInput id="network-correction" label={isZh ? '更正触达率' : 'Correction reach'} decorator={parameterHelp('correctionReach', isZh ? '更正触达率' : 'Correction reach')} value={network.correctionReach} min={0} max={1} step={0.05} invalid={network.correctionReach < 0 || network.correctionReach > 1} invalidText={t('scenario.invalidRange')} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) updateNetwork({ correctionReach: value }); }} />
             </div>
           </section>
 
@@ -1103,12 +1145,12 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
             </div>
             <div className="number-grid review-config-grid">
               <NumberInput id="simulation-steps" label={t('scenario.steps')} decorator={parameterHelp('simulationSteps', t('scenario.steps'))} helperText="30 - 300" value={scenario.steps} min={30} max={300} step={1} invalid={scenario.steps < 30 || scenario.steps > 300} invalidText={t('scenario.invalidRange')} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) update({ steps: Math.round(value) }); }} />
-              <NumberInput id="seed-root" label={isZh ? '根随机种子' : 'Root random seed'} decorator={parameterHelp('rootSeed', isZh ? '根随机种子' : 'Root random seed')} helperText="1 - 2147483000" value={scenario.seedRoot ?? 2_026_070_700} min={1} max={2_147_483_000} step={1} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) update({ seedRoot: Math.round(value) }); }} />
+              <NumberInput id="seed-root" label={isZh ? '根随机种子' : 'Root random seed'} decorator={parameterHelp('rootSeed', isZh ? '根随机种子' : 'Root random seed')} helperText="1 - 2147483000" value={scenario.seedRoot ?? 2_026_070_700} min={1} max={2_147_483_000} step={1} invalid={(scenario.seedRoot ?? 2_026_070_700) < 1 || (scenario.seedRoot ?? 2_026_070_700) > 2_147_483_000} invalidText={t('scenario.invalidRange')} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) update({ seedRoot: Math.round(value) }); }} />
               <Select id="primary-outcome" labelText={isZh ? '主要结果指标' : 'Primary outcome'} decorator={parameterHelp('primaryOutcome', isZh ? '主要结果指标' : 'Primary outcome')} value={scenario.primaryOutcome ?? 'maxSpreadBps'} onChange={(event) => update({ primaryOutcome: event.target.value, secondaryOutcomes: (scenario.secondaryOutcomes ?? []).filter((item) => item !== event.target.value) })}>
                 {OUTCOME_OPTIONS.map((outcome) => <SelectItem key={outcome.id} value={outcome.id} text={t(outcome.key)} />)}
               </Select>
-              <NumberInput id="minimum-pairs" label={isZh ? '最少有效配对' : 'Minimum valid pairs'} decorator={parameterHelp('minimumPairs', isZh ? '最少有效配对' : 'Minimum valid pairs')} min={5} max={scenario.seedCount} step={1} value={scenario.stoppingRule?.minimumPairs ?? Math.min(10, scenario.seedCount)} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) update({ stoppingRule: { minimumPairs: Math.round(value), maximumPairs: scenario.seedCount, targetCiHalfWidth: scenario.stoppingRule?.targetCiHalfWidth } }); }} />
-              <NumberInput id="target-ci-half-width" label={isZh ? '目标 95% 区间半宽（可选）' : 'Target 95% interval half-width (optional)'} decorator={parameterHelp('targetCiHalfWidth', isZh ? '目标 95% 区间半宽（可选）' : 'Target 95% interval half-width (optional)')} min={0.0001} max={100} step={0.01} value={scenario.stoppingRule?.targetCiHalfWidth ?? ''} onChange={(_event, state) => { const rawValue = String(state.value).trim(); const value = numericInputValue(state.value); update({ stoppingRule: { minimumPairs: scenario.stoppingRule?.minimumPairs ?? Math.min(10, scenario.seedCount), maximumPairs: scenario.seedCount, targetCiHalfWidth: rawValue === '' ? undefined : value } }); }} />
+              <NumberInput id="minimum-pairs" label={isZh ? '最少有效配对' : 'Minimum valid pairs'} decorator={parameterHelp('minimumPairs', isZh ? '最少有效配对' : 'Minimum valid pairs')} min={5} max={scenario.seedCount} step={1} value={scenario.stoppingRule?.minimumPairs ?? Math.min(10, scenario.seedCount)} invalid={(scenario.stoppingRule?.minimumPairs ?? scenario.seedCount) < 5 || (scenario.stoppingRule?.minimumPairs ?? scenario.seedCount) > scenario.seedCount} invalidText={isZh ? '必须至少为 5 且不超过配对种子数量。' : 'Must be at least 5 and no greater than the paired-seed count.'} onChange={(_event, state) => { const value = numericInputValue(state.value); if (value !== undefined) update({ stoppingRule: { minimumPairs: Math.round(value), maximumPairs: scenario.seedCount, targetCiHalfWidth: scenario.stoppingRule?.targetCiHalfWidth } }); }} />
+              <NumberInput id="target-ci-half-width" label={isZh ? '目标 95% 区间半宽（可选）' : 'Target 95% interval half-width (optional)'} decorator={parameterHelp('targetCiHalfWidth', isZh ? '目标 95% 区间半宽（可选）' : 'Target 95% interval half-width (optional)')} min={0.0001} max={100} step={0.01} value={scenario.stoppingRule?.targetCiHalfWidth ?? ''} invalid={scenario.stoppingRule?.targetCiHalfWidth !== undefined && scenario.stoppingRule.targetCiHalfWidth <= 0} invalidText={t('scenario.invalidRange')} onChange={(_event, state) => { const rawValue = String(state.value).trim(); const value = numericInputValue(state.value); update({ stoppingRule: { minimumPairs: scenario.stoppingRule?.minimumPairs ?? Math.min(10, scenario.seedCount), maximumPairs: scenario.seedCount, targetCiHalfWidth: rawValue === '' ? undefined : value } }); }} />
             </div>
             <fieldset className="secondary-outcomes">
               <legend>{isZh ? '次要与探索性指标' : 'Secondary and exploratory outcomes'}</legend>
@@ -1165,11 +1207,52 @@ export function ScenarioBuilderPage({ navigate }: { navigate: (view: ViewId) => 
             <div><dt>{isZh ? '智能体模式' : 'Agent mode'}</dt><dd>{llmPolicy.mode}</dd></div>
             <div><dt>{isZh ? '预计 LLM 调用上限' : 'Estimated LLM call cap'}</dt><dd>{llmPolicy.mode === 'HYBRID_LLM' ? Math.min(llmPolicy.callBudget, llmPolicy.representativeAgentCount * Math.ceil(scenario.steps / llmPolicy.decisionIntervalSteps)) : 0}</dd></div>
           </dl>
+          <section
+            className={`scenario-readiness ${scenarioReadiness.ready ? 'scenario-readiness--ready' : ''}`}
+            aria-labelledby="scenario-readiness-heading"
+            aria-live="polite"
+          >
+            <div className="scenario-readiness__heading">
+              <h3 id="scenario-readiness-heading">
+                {scenarioReadiness.ready
+                  ? isZh ? '可以进行运行前验证' : 'Ready for preflight validation'
+                  : isZh ? `还需处理 ${scenarioReadiness.blockers.length} 项` : `${scenarioReadiness.blockers.length} item(s) need attention`}
+              </h3>
+              <p>{isZh
+                ? '这里会一次列出所有阻塞项；验证当前草稿不要求先保存场景，但 Event Pack 必须完成审核与冻结。后端仍会执行最终验证。'
+                : 'All current blockers are listed here. The current draft does not need to be saved first, but its Event Pack must be reviewed and frozen. The backend still performs final validation.'}</p>
+            </div>
+            {scenarioReadiness.blockers.length > 0 ? (
+              <ol className="scenario-readiness__list">
+                {scenarioReadiness.blockers.map((blocker) => {
+                  const copy = scenarioReadinessCopy(blocker, isZh);
+                  return (
+                    <li key={blocker.code}>
+                      <span>{copy.title}</span>
+                      {blocker.action === 'SELECT_CASE' ? (
+                        <Button kind="ghost" size="sm" onClick={() => navigate('cases')}>
+                          {copy.action}
+                        </Button>
+                      ) : blocker.action === 'REVIEW_EVIDENCE' ? (
+                        <Button kind="ghost" size="sm" onClick={() => navigate('pack')}>
+                          {copy.action}
+                        </Button>
+                      ) : blocker.targetId ? (
+                        <Button kind="ghost" size="sm" onClick={() => focusScenarioStep(blocker.targetId!)}>
+                          {copy.action}
+                        </Button>
+                      ) : <small>{copy.action}</small>}
+                    </li>
+                  );
+                })}
+              </ol>
+            ) : null}
+          </section>
           <Notice>{t('results.disclaimer')}</Notice>
           <Button
             className="scenario-diff__submit"
             renderIcon={ArrowRight}
-            disabled={!isFrozen || !scenarioIsWithinBounds || validationState === 'loading'}
+            disabled={!scenarioReadiness.ready}
             onClick={() => void validate()}
           >
             {validationState === 'loading' ? t('common.loading') : t('scenario.validateDraft')}

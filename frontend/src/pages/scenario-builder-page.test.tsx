@@ -18,6 +18,7 @@ import {
   GuidedScenarioReplacementError,
   linkSavedScenarioToGuidedWorkflow,
   MechanismDisabledRecovery,
+  scenarioReadinessCopy,
   scenarioQuestionNeedsReview,
   scenariosHaveSameContent,
   SecondaryOutcomeOption,
@@ -64,6 +65,21 @@ describe('次要结果指标布局', () => {
 });
 
 describe('情景验证修复与草稿版本语义', () => {
+  it('为阻塞项提供完整的中英文用户文案', () => {
+    const blocker = {
+      code: 'EVENT_PACK_NOT_FROZEN' as const,
+      action: 'REVIEW_EVIDENCE' as const,
+    };
+    expect(scenarioReadinessCopy(blocker, false)).toEqual({
+      title: 'The Event Pack has not been reviewed and frozen.',
+      action: 'Continue evidence review',
+    });
+    expect(scenarioReadinessCopy(blocker, true)).toEqual({
+      title: 'Event Pack 尚未完成审核与冻结。',
+      action: '继续审核证据',
+    });
+  });
+
   it('切换干预后要求重新确认研究问题，并生成与干预一致的双语问题', () => {
     const scenario: ScenarioDraft = {
       eventPackId: 'pack-one',
@@ -96,6 +112,7 @@ describe('情景验证修复与草稿版本语义', () => {
     expect(aligned.question).toContain('SYNTH-BA');
     expect(aligned.questionZh).toContain('社交放大强度');
     expect(aligned.questionInterventionParameter).toBe('socialAmplification');
+    expect(aligned.questionReviewMethod).toBe('GENERATED_ALIGNED');
     expect(scenarioQuestionNeedsReview({ ...staleScenario, ...aligned })).toBe(false);
   });
 

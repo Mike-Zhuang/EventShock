@@ -1183,6 +1183,19 @@ code {
   line-height: 1.5;
 }
 
+.case-description__instrument {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  margin-inline: 2px;
+  white-space: nowrap;
+}
+
+.case-description__instrument small {
+  color: var(--text-tertiary);
+  font-size: 0.78em;
+}
+
 .case-row__meta {
   display: grid;
   justify-items: end;
@@ -1960,6 +1973,65 @@ code {
 
 .scenario-diff .research-notice {
   margin-top: 22px;
+}
+
+.scenario-readiness {
+  margin-top: 20px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-subtle);
+}
+
+.scenario-readiness--ready {
+  border-color: var(--positive);
+}
+
+.scenario-readiness__heading {
+  padding: 14px 16px;
+}
+
+.scenario-readiness__heading h3,
+.scenario-readiness__heading p {
+  margin: 0;
+}
+
+.scenario-readiness__heading h3 {
+  font-size: 15px;
+}
+
+.scenario-readiness__heading p {
+  margin-top: 5px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.scenario-readiness__list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--border);
+}
+
+.scenario-readiness__list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px 10px 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.scenario-readiness__list li:last-child {
+  border-bottom: 0;
+}
+
+.scenario-readiness__list .cds--btn {
+  min-height: 32px;
+  padding-block: 6px;
 }
 
 .scenario-diff__submit {
@@ -9326,6 +9398,29 @@ code {
   padding-inline-start: 20px;
 }
 
+.guided-proposal__unresolved {
+  padding: 14px 16px;
+  border: 1px solid var(--negative);
+  background: var(--surface-subtle);
+}
+
+.guided-proposal__unresolved p {
+  margin: 6px 0 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.guided-proposal__unresolved li {
+  display: grid;
+  gap: 3px;
+  margin-top: 8px;
+}
+
+.guided-proposal__unresolved li span {
+  color: var(--text-secondary);
+}
+
 .guided-proposal__instruction {
   max-width: 72ch;
   margin: 0;
@@ -9955,6 +10050,15 @@ code {
 }
 
 @media (max-width: 760px) {
+  .scenario-readiness__list li {
+    grid-template-columns: 1fr;
+  }
+
+  .scenario-readiness__list .cds--btn {
+    width: 100%;
+    max-width: none;
+  }
+
   .guided-responsibility-map ol {
     grid-template-columns: 1fr;
   }

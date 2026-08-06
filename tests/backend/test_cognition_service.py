@@ -426,6 +426,9 @@ def test_guided_future_event_is_warned_but_not_rejected() -> None:
     )
 
     assert proposal.readyForHumanReview is True
+    assert proposal.proposedEventMetadata is not None
+    assert proposal.proposedEventMetadata.asOf == datetime(2099, 1, 1, tzinfo=UTC)
+    assert proposal.proposedEventMetadata.asOfPrecision == "DAY"
     assert "FUTURE_EVENT_REQUIRES_HUMAN_CONFIRMATION" in proposal.blockedReasons
     assert "planned future-event scenario" in proposal.assistantMessage
 

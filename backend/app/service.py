@@ -299,7 +299,24 @@ class EventPackService:
             self._caseSummary(manifest)
             for manifest in self.database.listCustomEventPacks(sessionId)
         ]
-        return [*customCases, *canonicalCases]
+        cases = [*customCases, *canonicalCases]
+        for caseItem in cases:
+            eventPackId = caseItem.get("eventPackId")
+            draft = (
+                self.database.getEventPackDraft(sessionId, eventPackId)
+                if isinstance(eventPackId, str)
+                else None
+            )
+            if draft is None:
+                caseItem["status"] = "DRAFT"
+                caseItem["eventPackReviewState"] = "NOT_STARTED"
+            elif draft["frozen"]:
+                caseItem["status"] = "FROZEN"
+                caseItem["eventPackReviewState"] = "FROZEN"
+            else:
+                caseItem["status"] = "DRAFT"
+                caseItem["eventPackReviewState"] = "IN_PROGRESS"
+        return cases
 
     def getEventPack(self, eventPackId: str, sessionId: str | None) -> dict[str, Any]:
         canonical = self.canonicalPacks.get(eventPackId)
@@ -319,6 +336,7 @@ class EventPackService:
                         "questionInterventionParameter",
                         intervention.get("parameter"),
                     )
+                    defaultExperiment.setdefault("questionReviewMethod", "GENERATED_ALIGNED")
         draft = self.database.getEventPackDraft(sessionId, eventPackId) if sessionId else None
         if draft:
             eventPack["claims"] = draft["claims"]
@@ -391,6 +409,7 @@ class EventPackService:
                 ),
                 "questionZh": "较低的做市能力会如何改变模拟风险分布？",
                 "questionInterventionParameter": "marketMakerCapacity",
+                "questionReviewMethod": "GENERATED_ALIGNED",
                 "intervention": {
                     "parameter": "marketMakerCapacity",
                     "baselineValue": 1.0,
@@ -986,10 +1005,29 @@ class EventPackService:
                 "The research question was confirmed for a different intervention.",
             )
         else:
+            if requestData.questionReviewMethod == "USER_CONFIRMED_UNCHANGED":
+                warnings.append(
+                    {
+                        "code": "QUESTION_WORDING_HUMAN_CONFIRMED",
+                        "message": (
+                            "The user kept the existing research-question wording after "
+                            "changing the intervention. Treat alignment as a recorded human "
+                            "judgment rather than generated semantic equivalence."
+                        ),
+                    }
+                )
+                alignmentMessage = (
+                    "The user explicitly kept the existing wording for the selected "
+                    "intervention; semantic alignment remains a human judgment."
+                )
+            else:
+                alignmentMessage = (
+                    "The research question was explicitly confirmed for the selected intervention."
+                )
             addCheck(
                 "QUESTION_INTERVENTION_ALIGNMENT",
                 "PASS",
-                "The research question was explicitly confirmed for the selected intervention.",
+                alignmentMessage,
             )
 
         unknownOutcomes = sorted(
@@ -4495,6 +4533,8 @@ def _buildExport(experiment: dict[str, Any]) -> bytes:
             f"- Event Pack hash: `{result['manifest']['eventPackHash']}`\n"
             f"- Preregistered primary outcome: "
             f"`{result['analysisDiagnostics']['preregisteredPrimaryOutcome']}`\n"
+            f"- Research-question review method: "
+            f"`{requestData.get('questionReviewMethod') or 'NOT_RECORDED'}`\n"
             "- Negative control, parameter-restoration knockout, local sensitivity, "
             "and Holm-adjusted sign tests are recorded in `analysis_diagnostics.json`.\n"
             "- Baseline and intervention use identical seed lists and differ by "
@@ -4511,12 +4551,17 @@ def _buildExport(experiment: dict[str, Any]) -> bytes:
             "order/trade execution summaries, and limitations. "
             "`cognitive_decisions.json` remains present under the fixed export contract; "
             f"when its applicability is `NOT_APPLICABLE`, `{NO_EXTERNAL_COGNITION_REASON}`. "
+            "The preflight checkpoint-capacity check is a measured, soft warning rather than "
+            "a guarantee that storage cannot fail; completed pairs are persisted separately "
+            "from fixed experiment metadata. "
             "From the repository root, verify it with `python scripts/replay-bundle.py "
             "<export.zip>`. Re-run it only with engine version "
             f"`{result['manifest']['engineVersion']}` and CPython 3.12.13.\n\n"
             "本压缩包记录场景、配对种子、逐次指标、事件日志哈希、抽样追踪、"
             "代表性订单/成交执行摘要与限制。固定导出契约会始终保留 "
             "`cognitive_decisions.json`；`NOT_APPLICABLE` 表示本次未请求外部认知。"
+            "运行前的检查点容量检查依据历史实测数据提供软提示，并不承诺存储绝不会失败；"
+            "已完成的配对与固定实验元数据会分开保存。"
             "在仓库根目录运行 `python scripts/replay-bundle.py <export.zip>` 核验；"
             "只应使用相同引擎版本和 CPython 3.12.13 重放。\n",
         )

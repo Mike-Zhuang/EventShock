@@ -345,7 +345,7 @@ def test_experiment_runtime_and_compressed_checkpoint_round_trip(tmp_path: Path)
 
 
 @pytest.mark.parametrize("seedCount", [25, 50])
-def test_normalized_checkpoint_pairs_round_trip_without_growing_metadata_blob(
+def test_hybrid_checkpoint_pairs_round_trip_without_growing_metadata_blob(
     tmp_path: Path,
     seedCount: int,
 ) -> None:
@@ -356,14 +356,39 @@ def test_normalized_checkpoint_pairs_round_trip_without_growing_metadata_blob(
     database.createExperiment(
         experimentId,
         owner,
-        {"eventPackId": "spacex-synthetic-v1", "seedCount": seedCount},
+        {
+            "eventPackId": "spacex-synthetic-v1",
+            "seedCount": seedCount,
+            "populationSize": 56,
+            "steps": 120,
+            "llmPolicy": {
+                "mode": "HYBRID_LLM",
+                "provider": "fake-provider",
+                "modelId": "fake-structured-model",
+            },
+        },
         None,
     )
+    # 冻结认知信号只写入固定大小的元数据；每个配对检查点不得复制整份 LLM trace。
+    frozenSignals = [
+        {
+            "agentId": f"representative-agent-{index:02d}",
+            "decisionRound": index // 4,
+            "actionPreference": "HOLD",
+            "decisionSummary": "Validated fake structured decision for checkpoint testing.",
+            "model": "fake-structured-model",
+        }
+        for index in range(12)
+    ]
     metadata = {
         "schemaVersion": "2.0.0",
         "pairStorage": "NORMALIZED_V1",
         "completedPairs": 0,
-        "cognitionRun": {"signals": []},
+        "cognitionRun": {
+            "resolvedMode": "HYBRID_LLM",
+            "externalModelUsed": True,
+            "signals": frozenSignals,
+        },
     }
     database.updateExperiment(
         experimentId,
@@ -421,6 +446,7 @@ def test_normalized_checkpoint_pairs_round_trip_without_growing_metadata_blob(
     assert len(restored["checkpointPairs"]) == seedCount
     assert restored["checkpointPairs"][0]["seed"] == 2026070700
     assert restored["checkpointPairs"][-1]["seed"] == 2026070700 + seedCount - 1
+    assert restored["checkpoint"]["cognitionRun"]["signals"] == frozenSignals
     assert telemetry["pairCount"] == seedCount
     assert finalMetadataBytes - initialMetadataBytes < 32
     assert estimate["sampleCount"] == seedCount

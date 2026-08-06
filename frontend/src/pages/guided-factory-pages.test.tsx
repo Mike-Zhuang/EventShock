@@ -672,6 +672,31 @@ describe('guided workflow page', () => {
     expect(screen.getByRole('button', { name: 'Apply reviewed candidate' })).toBeEnabled();
   });
 
+  it('shows unresolved inputs separately and never presents placeholders as formal metadata', async () => {
+    const unresolvedWorkflow: GuidedWorkflow = {
+      ...guidedWorkflow,
+      pendingProposal: {
+        ...guidedWorkflow.pendingProposal!,
+        proposedEventMetadata: undefined,
+        readyForHumanReview: false,
+        missingFields: ['instrument'],
+        unresolvedFields: [{
+          field: 'instrument',
+          reason: 'You said the instrument is not known yet.',
+        }],
+      },
+    };
+    vi.mocked(api.getGuidedWorkflows).mockResolvedValue([unresolvedWorkflow]);
+    vi.mocked(api.getGuidedWorkflow).mockResolvedValue(unresolvedWorkflow);
+
+    render(<I18nProvider><GuidedWorkflowPage navigate={vi.fn()} /></I18nProvider>);
+
+    expect(await screen.findByText('Information you still need to provide')).toBeInTheDocument();
+    expect(screen.getByText('Synthetic instrument code')).toBeInTheDocument();
+    expect(screen.getByText('You said the instrument is not known yet.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Apply reviewed candidate' })).toBeDisabled();
+  });
+
   it('updates event-goal field progress while the user completes the batch panel', async () => {
     const user = userEvent.setup();
     const incompleteWorkflow: GuidedWorkflow = {

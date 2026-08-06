@@ -1,11 +1,49 @@
+import { useState } from 'react';
 import { Button, Tag } from '@carbon/react';
 import { ArrowRight, CalendarBlank, Flask, ShieldCheck, UsersThree, WarningCircle } from '@phosphor-icons/react';
+import type { ViewId } from '../app';
+import type { CaseSummary } from '../api/types';
 import { EmptyState, ErrorPanel, LoadingPanel, PageHeader, StatusBadge } from '../components/common';
 import { SyntheticInstrumentLabel } from '../components/synthetic-instrument-label';
 import { useI18n } from '../i18n';
 import { getPageGuide } from '../page-guidance';
 import { useWorkflow } from '../state/workflow-context';
-import type { ViewId } from '../app';
+
+export function CaseDescription({
+  text,
+  instrument,
+  isZh,
+}: {
+  text: string;
+  instrument?: string;
+  isZh: boolean;
+}) {
+  if (!instrument) return <>{text}</>;
+  const escapedInstrument = instrument.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const parts = text.split(new RegExp(`(\\b${escapedInstrument}\\b)`, 'gi'));
+  return (
+    <>
+      {parts.map((part, index) => part.toUpperCase() === instrument.toUpperCase()
+        ? (
+          <span className="case-description__instrument" key={`${part}-${index}`}>
+            <code>{part}</code>
+            <small>{isZh ? '合成市场代理' : 'synthetic market proxy'}</small>
+          </span>
+        )
+        : part)}
+    </>
+  );
+}
+
+export function casePrimaryActionLabel(caseItem: CaseSummary, isZh: boolean): string {
+  if (caseItem.eventPackReviewState === 'FROZEN' || caseItem.status?.toUpperCase() === 'FROZEN') {
+    return isZh ? '构建情景' : 'Build scenario';
+  }
+  if (caseItem.eventPackReviewState === 'IN_PROGRESS') {
+    return isZh ? '继续审核证据' : 'Continue evidence review';
+  }
+  return isZh ? '先审核证据' : 'Review evidence first';
+}
 
 export function CaseLibraryPage({ navigate }: { navigate: (view: ViewId) => void }) {
   const { language, t } = useI18n();
@@ -17,15 +55,31 @@ export function CaseLibraryPage({ navigate }: { navigate: (view: ViewId) => void
     refreshCases,
     selectCase,
   } = useWorkflow();
+  const [busyCaseId, setBusyCaseId] = useState<string>();
 
   const openCase = async (caseItem: (typeof cases)[number]) => {
-    await selectCase(caseItem);
-    navigate('pack');
+    setBusyCaseId(caseItem.id);
+    try {
+      await selectCase(caseItem);
+      navigate('pack');
+    } catch {
+      // 工作流上下文已保存可见错误；加载失败时留在案例库，不进入无效页面。
+    } finally {
+      setBusyCaseId(undefined);
+    }
   };
 
   const buildFromCase = async (caseItem: (typeof cases)[number]) => {
-    await selectCase(caseItem);
-    navigate('scenario');
+    setBusyCaseId(caseItem.id);
+    try {
+      const nextPack = await selectCase(caseItem);
+      const isFrozen = nextPack.status.toUpperCase() === 'FROZEN' || Boolean(nextPack.frozenAt);
+      navigate(isFrozen ? 'scenario' : 'pack');
+    } catch {
+      // 工作流上下文已保存可见错误；不得在 Event Pack 未加载时继续导航。
+    } finally {
+      setBusyCaseId(undefined);
+    }
   };
 
   const validationStatusLabel = (status: string) => {
@@ -121,7 +175,13 @@ export function CaseLibraryPage({ navigate }: { navigate: (view: ViewId) => void
                     {caseItem.status ? <StatusBadge status={caseItem.status} /> : null}
                   </div>
                   <h2>{language === 'zh-CN' ? caseItem.nameZh ?? caseItem.name : caseItem.name}</h2>
-                  <p>{language === 'zh-CN' ? caseItem.descriptionZh ?? caseItem.description ?? t('common.noData') : caseItem.description ?? t('common.noData')}</p>
+                  <p>
+                    <CaseDescription
+                      text={language === 'zh-CN' ? caseItem.descriptionZh ?? caseItem.description ?? t('common.noData') : caseItem.description ?? t('common.noData')}
+                      instrument={caseItem.instrument}
+                      isZh={language === 'zh-CN'}
+                    />
+                  </p>
                   {caseItem.instrument ? <SyntheticInstrumentLabel instrument={caseItem.instrument} compact /> : null}
                 </div>
               </div>
@@ -130,8 +190,10 @@ export function CaseLibraryPage({ navigate }: { navigate: (view: ViewId) => void
                   <span><CalendarBlank size={16} />{new Intl.DateTimeFormat(language, { dateStyle: 'medium' }).format(new Date(caseItem.updatedAt))}</span>
                 ) : null}
                 <div className="case-row__actions">
-                  <Button kind="ghost" size="sm" onClick={() => void openCase(caseItem)}>{t('home.openPack')}</Button>
-                  <Button kind="tertiary" size="sm" renderIcon={ArrowRight} onClick={() => void buildFromCase(caseItem)}>{t('home.startScenario')}</Button>
+                  <Button kind="ghost" size="sm" disabled={busyCaseId === caseItem.id} onClick={() => void openCase(caseItem)}>{t('home.openPack')}</Button>
+                  <Button kind="tertiary" size="sm" renderIcon={ArrowRight} disabled={busyCaseId === caseItem.id} onClick={() => void buildFromCase(caseItem)}>
+                    {busyCaseId === caseItem.id ? t('common.loading') : casePrimaryActionLabel(caseItem, language === 'zh-CN')}
+                  </Button>
                 </div>
               </div>
             </article>

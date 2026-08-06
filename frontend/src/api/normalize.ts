@@ -710,6 +710,15 @@ function normalizeGuidedProposal(value: unknown): GuidedWorkflowProposal {
     missingFields: asStringArray(
       read(value, 'missingFields', 'missing_fields'),
     ) as GuidedWorkflowProposal['missingFields'],
+    unresolvedFields: unwrapItems(read(value, 'unresolvedFields', 'unresolved_fields'))
+      .map((item) => {
+        if (!isRecord(item)) return null;
+        const field = asOptionalString(read(item, 'field'));
+        const reason = asOptionalString(read(item, 'reason'));
+        if (!field || !reason || !['title', 'summary', 'instrument', 'asOf', 'researchQuestion'].includes(field)) return null;
+        return { field, reason } as NonNullable<GuidedWorkflowProposal['unresolvedFields']>[number];
+      })
+      .filter((item): item is NonNullable<GuidedWorkflowProposal['unresolvedFields']>[number] => item !== null),
   };
 }
 
@@ -1199,6 +1208,12 @@ function normalizeScenario(value: unknown): ScenarioDraft | undefined {
     questionInterventionParameter: asParameter(
       read(value, 'questionInterventionParameter', 'question_intervention_parameter'),
     ),
+    questionReviewMethod: (() => {
+      const method = asOptionalString(read(value, 'questionReviewMethod', 'question_review_method'));
+      return method === 'GENERATED_ALIGNED' || method === 'USER_CONFIRMED_UNCHANGED'
+        ? method
+        : undefined;
+    })(),
     intervention,
     seedCount: seedCount as 10 | 25 | 50,
     seedRoot: asNumber(read(value, 'seedRoot', 'seed_root')),
@@ -1411,6 +1426,12 @@ export function normalizeCases(value: unknown): CaseSummary[] {
         eventPackId: asOptionalString(read(item, 'eventPackId', 'event_pack_id')),
         instrument: asOptionalString(read(item, 'instrument')),
         status: asOptionalString(read(item, 'status')),
+        eventPackReviewState: (() => {
+          const state = asOptionalString(read(item, 'eventPackReviewState', 'event_pack_review_state'));
+          return state === 'NOT_STARTED' || state === 'IN_PROGRESS' || state === 'FROZEN'
+            ? state
+            : undefined;
+        })(),
         isSynthetic: asBoolean(read(item, 'synthetic', 'isSynthetic', 'is_synthetic')),
         syntheticLabel: asOptionalString(read(item, 'syntheticLabel')),
         syntheticLabelZh: asOptionalString(read(item, 'syntheticLabelZh')),

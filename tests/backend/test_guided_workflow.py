@@ -88,6 +88,41 @@ def _eventMetadata() -> ProposedEventMetadata:
     )
 
 
+@pytest.mark.parametrize("placeholder", ["TBD", "unknown", "待补充", "不知道"])
+def test_guided_event_metadata_rejects_unresolved_placeholders(placeholder: str) -> None:
+    payload = _eventMetadata().model_dump()
+    payload["summary"] = placeholder
+    with pytest.raises(ValidationError, match="placeholder text"):
+        ProposedEventMetadata.model_validate(payload)
+
+
+def test_guided_unresolved_fields_remain_separate_from_formal_metadata() -> None:
+    proposal = GuidedWorkflowProposal(
+        stage=GuidedStage.EVENT_GOAL,
+        assistantMessage="Please provide the exact instrument before reviewing this candidate.",
+        clarificationRequired=True,
+        readyForHumanReview=False,
+        missingFields=("instrument",),
+        unresolvedFields=(
+            {"field": "instrument", "reason": "The user said the instrument is not known yet."},
+        ),
+    )
+    assert proposal.proposedEventMetadata is None
+    assert proposal.unresolvedFields[0].field == "instrument"
+
+    with pytest.raises(ValidationError, match="must also be declared missing"):
+        GuidedWorkflowProposal(
+            stage=GuidedStage.EVENT_GOAL,
+            assistantMessage="The unresolved item must remain visibly separate from metadata.",
+            clarificationRequired=True,
+            readyForHumanReview=False,
+            missingFields=(),
+            unresolvedFields=(
+                {"field": "instrument", "reason": "The instrument is not known yet."},
+            ),
+        )
+
+
 def test_guided_intervention_uses_the_same_bounds_as_saved_scenarios() -> None:
     with pytest.raises(ValueError, match="greater than 0"):
         ProposedIntervention(
@@ -646,6 +681,49 @@ def test_ai_proposal_requires_explicit_apply_and_advance_requires_human_review(
     )
     assert advanced.stage is GuidedStage.SOURCE_METHOD
     assert advanced.version == applied.version + 1
+
+
+def test_unresolved_ai_proposal_cannot_be_applied_through_the_api_boundary(
+    tmp_path: Path,
+) -> None:
+    fixture = _workflowFixture(tmp_path)
+    workflow = fixture.service.create(fixture.firstOwnerId, "en")
+    pending = fixture.service.saveTurn(
+        workflowId=workflow.id,
+        ownerUserId=fixture.firstOwnerId,
+        request=_turn(
+            message="I do not know the exact instrument yet.",
+            expectedVersion=workflow.version,
+            clientRequestId="request-unresolved-apply-001",
+        ),
+        proposal=GuidedWorkflowProposal(
+            stage=GuidedStage.EVENT_GOAL,
+            assistantMessage="Please identify the instrument before applying this proposal.",
+            clarificationRequired=True,
+            readyForHumanReview=False,
+            missingFields=("instrument",),
+            unresolvedFields=(
+                {
+                    "field": "instrument",
+                    "reason": "The user has not identified a research instrument.",
+                },
+            ),
+        ),
+    )
+
+    assert pending.pendingProposalId is not None
+    with pytest.raises(GuidedWorkflowConflictError, match="not ready for human application"):
+        _applyPending(
+            fixture,
+            workflow.id,
+            fixture.firstOwnerId,
+            expectedVersion=pending.version,
+            proposalId=pending.pendingProposalId,
+        )
+
+    unchanged = fixture.service.get(workflow.id, fixture.firstOwnerId)
+    assert unchanged.draft.eventMetadata is None
+    assert unchanged.pendingProposalId == pending.pendingProposalId
 
 
 def test_stage_machine_enforces_stage_specific_proposals_and_all_prerequisites(

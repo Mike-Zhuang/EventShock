@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal
@@ -77,6 +78,48 @@ class ProposedEventMetadata(StrictModel):
     asOfPrecision: Literal["DAY", "SECOND"] = "SECOND"
     researchQuestion: str = Field(min_length=8, max_length=500)
 
+    @field_validator(
+        "title",
+        "titleZh",
+        "summary",
+        "summaryZh",
+        "instrument",
+        "researchQuestion",
+        mode="before",
+    )
+    @classmethod
+    def rejectPlaceholderMetadata(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = re.sub(r"[.!。！?？]+$", "", value.strip()).casefold()
+        if normalized in {
+            "unknown",
+            "tbd",
+            "to be determined",
+            "not sure",
+            "unsure",
+            "pending",
+            "n/a",
+            "na",
+            "i don't know",
+            "i do not know",
+            "idk",
+            "待定",
+            "待补",
+            "待补充",
+            "未知",
+            "不确定",
+            "不知道",
+            "稍后补",
+        }:
+            raise ValueError("placeholder text cannot enter formal event metadata")
+        return value.strip()
+
+
+class GuidedUnresolvedField(StrictModel):
+    field: Literal["title", "summary", "instrument", "asOf", "researchQuestion"]
+    reason: str = Field(min_length=3, max_length=240)
+
 
 class ProposedIntervention(StrictModel):
     parameter: Literal[
@@ -127,6 +170,7 @@ class GuidedWorkflowProposal(StrictModel):
     missingFields: tuple[
         Literal["title", "summary", "instrument", "asOf", "researchQuestion"], ...
     ] = Field(default=(), max_length=5)
+    unresolvedFields: tuple[GuidedUnresolvedField, ...] = Field(default=(), max_length=5)
 
     @model_validator(mode="after")
     def validateStageAuthority(self) -> GuidedWorkflowProposal:
@@ -154,6 +198,13 @@ class GuidedWorkflowProposal(StrictModel):
             raise ValueError("a complete event metadata proposal cannot declare missing fields")
         if self.readyForHumanReview and self.missingFields:
             raise ValueError("a proposal with missing fields cannot be ready for human review")
+        unresolvedNames = [item.field for item in self.unresolvedFields]
+        if len(unresolvedNames) != len(set(unresolvedNames)):
+            raise ValueError("unresolved fields must be unique")
+        if any(field not in self.missingFields for field in unresolvedNames):
+            raise ValueError("every unresolved field must also be declared missing")
+        if self.readyForHumanReview and self.unresolvedFields:
+            raise ValueError("a proposal with unresolved fields cannot be ready for human review")
         return self
 
 
