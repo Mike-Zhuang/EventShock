@@ -195,7 +195,9 @@ class ModelPolicy(StrictFrozenModel):
     max_transport_attempts: int = Field(default=3, ge=1, le=3)
     repair_attempts: LiteralOne = 1
     base_backoff_seconds: float = Field(default=0.25, ge=0.0, le=10.0)
-    allow_rule_fallback: bool = True
+    # 结构化模型工作流默认失败关闭。需要弹性混合时，调用方必须按用户在
+    # 运行前作出的明确选择逐次开启，避免隐藏规则输出。
+    allow_rule_fallback: bool = False
 
 
 @dataclass(frozen=True, slots=True)

@@ -116,7 +116,12 @@ export function focusMainContent(): void {
 interface NavigationItem {
   id: ViewId;
   label: string;
-  icon: ComponentType<{ size?: number; weight?: 'regular' | 'fill' }>;
+  icon: ComponentType<{
+    size?: number;
+    weight?: 'regular' | 'fill';
+    'aria-hidden'?: boolean | 'true' | 'false';
+  }>;
+  step?: string;
 }
 
 function SidebarFooter({
@@ -194,11 +199,12 @@ function NavigationItems({
               <button
                 key={item.id}
                 type="button"
-                className={`navigation-item${view === item.id ? ' is-active' : ''}`}
+                className={`navigation-item${item.step ? ' has-step' : ''}${view === item.id ? ' is-active' : ''}`}
                 aria-current={view === item.id ? 'page' : undefined}
                 onClick={() => onNavigate(item.id)}
               >
-                <Icon size={19} weight={view === item.id ? 'fill' : 'regular'} />
+                {item.step ? <span className="navigation-item__step" aria-hidden="true">{item.step}</span> : null}
+                <Icon size={19} weight={view === item.id ? 'fill' : 'regular'} aria-hidden="true" />
                 <span>{item.label}</span>
               </button>
             );
@@ -415,14 +421,14 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
       {
         label: t('nav.groupCore'),
         items: [
-          { id: 'guided', label: t('nav.guided'), icon: Path },
-          { id: 'cases', label: t('nav.cases'), icon: Books },
-          { id: 'factory', label: t('nav.factory'), icon: Factory },
-          { id: 'pack', label: t('nav.pack'), icon: ClipboardText },
-          { id: 'scenario', label: t('nav.scenario'), icon: SlidersHorizontal },
-          { id: 'preflight', label: t('nav.preflight'), icon: CheckSquare },
-          { id: 'runs', label: t('nav.runs'), icon: PlayCircle },
-          { id: 'results', label: t('nav.results'), icon: ChartLineUp },
+          { id: 'guided', label: t('nav.guided'), icon: Path, step: '01' },
+          { id: 'cases', label: t('nav.cases'), icon: Books, step: '02' },
+          { id: 'factory', label: t('nav.factory'), icon: Factory, step: '03' },
+          { id: 'pack', label: t('nav.pack'), icon: ClipboardText, step: '04' },
+          { id: 'scenario', label: t('nav.scenario'), icon: SlidersHorizontal, step: '05' },
+          { id: 'preflight', label: t('nav.preflight'), icon: CheckSquare, step: '06' },
+          { id: 'runs', label: t('nav.runs'), icon: PlayCircle, step: '07' },
+          { id: 'results', label: t('nav.results'), icon: ChartLineUp, step: '08' },
         ],
       },
       {
@@ -529,7 +535,7 @@ function AppShell({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: (
         firstGoal: preferences.firstGoal,
         workspaceMode: nextMode,
       });
-      navigate(nextMode === 'GUIDED' ? 'guided' : 'study');
+      navigate('guided');
     } catch {
       setWorkspaceModeError(true);
     } finally {

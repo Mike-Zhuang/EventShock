@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.app.cognition import (
+    HYBRID_BELIEF_PROMPT,
     ActionPreference,
     AgentProfile,
     CognitionService,
@@ -232,10 +233,7 @@ def _extractionQualityMetadata(
 ) -> dict[str, Any]:
     """把抽取质量与批量审核权限写入不可含糊的服务端契约。"""
 
-    ruleFallback = "RULE_FALLBACK" in extractionMode or extractionMode in {
-        "RULE_ONLY",
-        "RULE_FALLBACK",
-    }
+    ruleFallback = "RULE_FALLBACK" in extractionMode or extractionMode.startswith("RULE_ONLY")
     bulkApprovalAllowed = not ruleFallback and all(
         claim.get("bulkApprovalEligible", True) is not False for claim in claims
     )
@@ -369,7 +367,11 @@ class EventPackService:
         elif len(eventPackId) > 100 or re.fullmatch(r"custom-[a-z0-9-]+", eventPackId) is None:
             raise ValueError("eventPackId must be a valid custom immutable identifier")
         sourceRecords = [self._sourceRecord(source) for source in requestData.sources]
-        extractedClaims = claims or self.extractCandidateClaims(requestData, maximumClaims=16)
+        # ``None`` 表示调用方明确选择了人工规则抽取；空列表则是模型主动
+        # abstain 的有效状态，绝不能被 truthy 回退悄悄替换成句子切分结果。
+        extractedClaims = (
+            self.extractCandidateClaims(requestData, maximumClaims=16) if claims is None else claims
+        )
         extractionQuality = _extractionQualityMetadata(extractionMode, extractedClaims)
         manifest = {
             "schemaVersion": "1.0.0",
@@ -1670,6 +1672,16 @@ class ExperimentService:
                 409,
                 "Rule continuation is available only while hybrid cognition is preparing.",
             )
+        if not bool(experiment["request"].get("llmPolicy", {}).get("fallbackToRules", False)):
+            raise ApiError(
+                "COGNITION_RULE_CONTINUATION_DISABLED",
+                409,
+                (
+                    "This experiment uses strict LLM mode. Rule continuation was not "
+                    "authorized before launch; cancel the run or create a new elastic "
+                    "hybrid experiment explicitly."
+                ),
+            )
         cognitionProgress = copy.deepcopy(runtime.get("cognitionProgress") or {})
         cognitionProgress.update(
             {
@@ -2699,7 +2711,7 @@ class ExperimentService:
         llmPolicy = requestData.get("llmPolicy", {})
         mode = llmPolicy.get("mode", "RULE_ONLY")
         hybridRequested = mode == "HYBRID_LLM"
-        fallbackAllowed = bool(llmPolicy.get("fallbackToRules", True))
+        fallbackAllowed = bool(llmPolicy.get("fallbackToRules", False))
         costBudget = ModelCostBudget(float(llmPolicy.get("maxCostUsd", 10.0)))
         policyProvider = str(llmPolicy.get("provider", "zhipu"))
         policyModel = str(llmPolicy.get("modelId", "glm-5.2"))
@@ -2713,8 +2725,8 @@ class ExperimentService:
             "resolvedModel": None,
             "configuredButUnusedProvider": None,
             "configuredButUnusedModel": None,
-            "promptVersion": "belief_v1.0.0",
-            "promptSchemaVersion": "belief_decision_v1.0.0",
+            "promptVersion": HYBRID_BELIEF_PROMPT.version,
+            "promptSchemaVersion": HYBRID_BELIEF_PROMPT.schemaVersion,
             "calls": 0,
             "totalTokens": 0,
             "fallbackCount": 0,

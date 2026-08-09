@@ -20,10 +20,11 @@ def bootstrapAdmin(
 ) -> tuple[str, bool, dict[str, int]]:
     repository = AuthRepository(database)
     repository.initialize()
+    normalizedEmail = normalizeEmail(adminEmail)
     user, created = repository.ensureAdmin(
         userId=f"usr-{uuid.uuid4().hex}",
-        email=normalizeEmail(adminEmail),
-        passwordHash=hashPassword(password),
+        email=normalizedEmail,
+        passwordHash=hashPassword(password, identity=normalizedEmail),
     )
     claimed = database.claimLegacyRecords(user.id)
     if created:

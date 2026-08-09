@@ -202,7 +202,9 @@ class LlmPolicy(StrictModel):
     decisionIntervalSteps: int = Field(default=12, ge=1, le=100)
     callBudget: int = Field(default=24, ge=0, le=500)
     maxCostUsd: float = Field(default=10.0, ge=0, le=100)
-    fallbackToRules: bool = True
+    # 严格模式是默认值：用户明确选择 LLM 参与时，校验失败必须可见，不能把
+    # 规则输出伪装成已经成功的模型决策。弹性混合模式只能由用户主动开启。
+    fallbackToRules: bool = False
 
     @model_validator(mode="after")
     def validateProviderModelPair(self) -> LlmPolicy:
@@ -341,6 +343,7 @@ class EventPackCreateRequest(StrictModel):
     instrument: str = Field(default="CUSTOM", min_length=1, max_length=32)
     sources: list[EventSourceInput] = Field(min_length=1, max_length=24)
     acknowledgedContentReview: bool = False
+    useLlm: bool = True
 
     @model_validator(mode="after")
     def validateSourceCollection(self) -> EventPackCreateRequest:

@@ -19,7 +19,7 @@ from backend.app.cognition.persistent_credentials import (
 from backend.app.database import Database
 
 ADMIN_EMAIL = "administrator@example.com"
-ADMIN_PASSWORD = "Administrator password!"
+ADMIN_PASSWORD = "Correct Horse Battery 47!"
 
 
 def createVault(

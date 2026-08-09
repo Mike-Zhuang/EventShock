@@ -1349,6 +1349,7 @@ def test_guided_source_review_survives_factory_build_deletion_via_materializatio
                 "asOf": "2026-07-20T13:00:00Z",
                 "instrument": "TEST",
                 "maximumClaims": 8,
+                "useLlm": False,
                 "requestedImpactChannels": ["belief", "liquidity"],
                 "acknowledgedContentReview": True,
             },

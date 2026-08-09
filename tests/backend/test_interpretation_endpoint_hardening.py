@@ -294,9 +294,7 @@ def test_interpretation_stream_emits_safe_progress_and_strict_final_json(
             },
             json=_requestPayload("request-stream-success-001"),
         )
-        sseMetrics = client.get("/api/v1/system/metrics").json()["runtime"][
-            "resultInterpretationSse"
-        ]
+        sseMetrics = client.app.state.runtimeMetrics.snapshot()["resultInterpretationSse"]
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
@@ -370,9 +368,7 @@ def test_interpretation_stream_converts_api_error_to_stable_safe_event(
             },
             json=_requestPayload("request-stream-error-001"),
         )
-        sseMetrics = client.get("/api/v1/system/metrics").json()["runtime"][
-            "resultInterpretationSse"
-        ]
+        sseMetrics = client.app.state.runtimeMetrics.snapshot()["resultInterpretationSse"]
 
     assert response.status_code == 200
     assert internalSchemaSentinel not in response.text
@@ -437,9 +433,7 @@ def test_interpretation_stream_records_client_cancellation_without_model_content
             return firstFrame.decode() if isinstance(firstFrame, bytes) else firstFrame
 
         firstFrame = asyncio.run(closeAfterInitialStatus())
-        sseMetrics = client.get("/api/v1/system/metrics").json()["runtime"][
-            "resultInterpretationSse"
-        ]
+        sseMetrics = client.app.state.runtimeMetrics.snapshot()["resultInterpretationSse"]
 
     assert "event: status" in firstFrame
     assert sseMetrics["terminalCount"] == 1

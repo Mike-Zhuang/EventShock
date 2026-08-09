@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = { file = "LICENSE" }
 dependencies = [
+  "confusable-homoglyphs>=3.3.1,<4",
   "cryptography>=49,<50",
   "duckdb>=1.5.4,<2",
   "fastapi>=0.116,<1",

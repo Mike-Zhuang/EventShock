@@ -340,7 +340,7 @@ def test_result_interpretation_prompt_requests_safe_gfm_and_prose_citations() ->
     prompt = RESULT_INTERPRETATION_PROMPT.systemPrompt
     normalizedPrompt = " ".join(prompt.split())
 
-    assert RESULT_INTERPRETATION_PROMPT.version == "result_interpretation_v1.4.0"
+    assert RESULT_INTERPRETATION_PROMPT.version == "result_interpretation_v1.5.0"
     assert "never copy raw exception names" in RESULT_INTERPRETATION_PROMPT.systemPrompt
     assert RESULT_INTERPRETATION_PROMPT.schemaVersion == "result_interpretation_v1.0.0"
     assert "GitHub Flavored Markdown" in prompt
@@ -369,7 +369,7 @@ def test_zhipu_gateway_accepts_valid_json_and_records_audit_metadata() -> None:
         lambda gateway: gateway.generateStructured(
             makeRequest(observation),
             BeliefDecision,
-            ModelPolicy(base_backoff_seconds=0.0),
+            ModelPolicy(base_backoff_seconds=0.0, allow_rule_fallback=True),
         ),
     )
 
@@ -405,7 +405,7 @@ def test_zhipu_gateway_marks_untrusted_success_usage_as_uncertain(
         lambda gateway: gateway.generateStructured(
             makeRequest(observation),
             BeliefDecision,
-            ModelPolicy(base_backoff_seconds=0.0),
+            ModelPolicy(base_backoff_seconds=0.0, allow_rule_fallback=True),
         ),
     )
 
@@ -429,7 +429,7 @@ def test_zhipu_gateway_omits_thinking_for_unsupported_legacy_model() -> None:
         lambda gateway: gateway.generateStructured(
             modelRequest,
             BeliefDecision,
-            ModelPolicy(base_backoff_seconds=0.0),
+            ModelPolicy(base_backoff_seconds=0.0, allow_rule_fallback=True),
         ),
     )
 
@@ -561,10 +561,11 @@ def test_schema_failure_gets_exactly_one_repair_and_usage_is_accumulated() -> No
     assert requestPayloads[0]["thinking"] == {"type": "enabled"}
     assert requestPayloads[1]["thinking"] == {"type": "disabled"}
     assert 6 <= len(requestPayloads[1]["request_id"]) <= 64
-    assert len(requestPayloads[1]["messages"]) == 4
+    assert len(requestPayloads[1]["messages"]) == 3
     assert "SCHEMA_INVALID" in requestPayloads[1]["messages"][-1]["content"]
-    repairedOutput = requestPayloads[1]["messages"][-2]["content"]
-    assert "<END_INVALID_MODEL_OUTPUT>" not in repairedOutput
+    repairedOutput = requestPayloads[1]["messages"][-1]["content"]
+    # 唯一未转义的结束标记属于服务端边界；模型原文中的碰撞标记必须被编码。
+    assert repairedOutput.count("<END_INVALID_MODEL_OUTPUT>") == 1
     assert r"\u003cEND_INVALID_MODEL_OUTPUT\u003e" in repairedOutput
     assert result.repairUsed is True
     assert result.fallbackUsed is False
@@ -597,7 +598,7 @@ def test_zhipu_repair_usage_failure_is_an_uncertain_billable_attempt(
         lambda gateway: gateway.generateStructured(
             makeRequest(observation),
             BeliefDecision,
-            ModelPolicy(base_backoff_seconds=0.0),
+            ModelPolicy(base_backoff_seconds=0.0, allow_rule_fallback=True),
         ),
     )
 
@@ -769,7 +770,11 @@ def test_repair_transport_failure_preserves_prior_usage_and_unknown_attempts() -
         lambda gateway: gateway.generateStructured(
             makeRequest(observation),
             BeliefDecision,
-            ModelPolicy(max_transport_attempts=2, base_backoff_seconds=0.0),
+            ModelPolicy(
+                max_transport_attempts=2,
+                base_backoff_seconds=0.0,
+                allow_rule_fallback=True,
+            ),
         ),
     )
 
@@ -795,7 +800,7 @@ def test_unknown_evidence_after_repair_uses_explicit_rule_fallback() -> None:
         lambda gateway: gateway.generateStructured(
             makeRequest(observation),
             BeliefDecision,
-            ModelPolicy(base_backoff_seconds=0.0),
+            ModelPolicy(base_backoff_seconds=0.0, allow_rule_fallback=True),
         ),
     )
 
@@ -831,7 +836,7 @@ def test_retryable_rate_limit_retries_but_authentication_does_not() -> None:
         lambda gateway: gateway.generateStructured(
             makeRequest(observation),
             BeliefDecision,
-            ModelPolicy(base_backoff_seconds=0.0),
+            ModelPolicy(base_backoff_seconds=0.0, allow_rule_fallback=True),
         ),
     )
     assert requestCount == 2
@@ -854,7 +859,7 @@ def test_retryable_rate_limit_retries_but_authentication_does_not() -> None:
         lambda gateway: gateway.generateStructured(
             makeRequest(observation),
             BeliefDecision,
-            ModelPolicy(base_backoff_seconds=0.0),
+            ModelPolicy(base_backoff_seconds=0.0, allow_rule_fallback=True),
         ),
     )
     assert authCount == 1

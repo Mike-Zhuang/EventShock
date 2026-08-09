@@ -112,7 +112,7 @@ const DEFAULT_SCENARIO: ScenarioDraft = {
     decisionIntervalSteps: 12,
     callBudget: 24,
     maxCostUsd: 10,
-    fallbackToRules: true,
+    fallbackToRules: false,
   },
   primaryOutcome: 'maxSpreadBps',
   secondaryOutcomes: ['maxDrawdownPct', 'recoverySteps', 'cascadeScore'],

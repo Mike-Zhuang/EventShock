@@ -17,7 +17,7 @@ import {
   Warning,
   User,
 } from '@phosphor-icons/react';
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { Navigate } from '../app';
 import { api, ApiError } from '../api/client';
 import type {
@@ -517,6 +517,9 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
   const [operationError, setOperationError] = useState<string>();
   const [recoveryIntent, setRecoveryIntent] = useState<GuidedRecoveryIntent>();
   const [archiveRequested, setArchiveRequested] = useState(false);
+  const [successNotice, setSuccessNotice] = useState<string>();
+  const [composerNotice, setComposerNotice] = useState<string>();
+  const composerRef = useRef<HTMLTextAreaElement>(null);
 
   const fillComposerFromEventGoalBatch = () => {
     const labels = EVENT_GOAL_FIELD_LABELS;
@@ -711,7 +714,14 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
 
   const createWorkflow = () => run(
     'create',
-    () => api.createGuidedWorkflow(language),
+    async () => {
+      const next = await api.createGuidedWorkflow(language);
+      setSuccessNotice(isZh
+        ? '新的 AI 引导已创建。当前阶段已经定位到下方，请从一句自然语言描述开始。'
+        : 'A new guided workflow was created. The current stage is focused below; start with one natural-language description.');
+      window.requestAnimationFrame(() => focusGuidedTarget('guided-current-stage'));
+      return next;
+    },
   );
 
   const sendMessage = async (event: FormEvent) => {
@@ -869,11 +879,26 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
 
   const applyProposal = () => {
     if (!workflow?.pendingProposalId) return;
-    void run('apply', () => api.applyGuidedProposal(
-      workflow.id,
-      workflow.pendingProposalId!,
-      workflow.version,
-    ));
+    void run('apply', async () => {
+      const next = await api.applyGuidedProposal(
+        workflow.id,
+        workflow.pendingProposalId!,
+        workflow.version,
+      );
+      setSuccessNotice(isZh
+        ? '已应用你核对过的草稿。请查看“阶段确认”，它是当前唯一的下一步。'
+        : 'Your reviewed draft was applied. Continue at Stage confirmation, now the only next step.');
+      window.requestAnimationFrame(() => focusGuidedTarget('guided-advance-heading'));
+      return next;
+    });
+  };
+
+  const fillSuggestedAnswer = (option: string) => {
+    setMessage(option);
+    setComposerNotice(isZh
+      ? '建议已填入输入框，尚未发送。请核对后按“发送并生成候选”。'
+      : 'The suggestion is in the composer and has not been sent. Review it, then select Send and propose.');
+    window.requestAnimationFrame(() => composerRef.current?.focus());
   };
 
   const advanceWorkflow = () => {
@@ -1008,18 +1033,19 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
         )}
       />
 
-      <section
-        className="guided-responsibility-map"
-        aria-labelledby="guided-responsibility-map-heading"
-      >
-        <div className="section-heading">
-          <h2 id="guided-responsibility-map-heading">
-            {isZh ? 'AI 与人工职责全流程' : 'End-to-end AI and human responsibilities'}
-          </h2>
-          <p>{isZh
-            ? '引导负责提出和衔接草稿；涉及证据授权、主张判断、冻结、费用与提交责任的步骤必须在专业页由人完成。'
-            : 'Guidance proposes and connects drafts. Evidence authorization, claim judgment, freezing, cost review, and submission accountability remain human actions in dedicated workspaces.'}</p>
-        </div>
+      <section className="guided-value-summary" aria-label={isZh ? '产品价值与边界' : 'Product value and boundary'}>
+        <strong>{isZh ? '把零散事件材料变成可复核、可重放的单变量压力实验' : 'Turn scattered event material into a reviewable, replayable one-variable stress study'}</strong>
+        <p>{isZh
+          ? 'AI 帮你起草事件、来源方法和情景参数；你负责核对证据、批准主张、确认费用并决定是否运行。'
+          : 'AI drafts the event, source method, and scenario settings. You verify evidence, approve claims, confirm cost, and decide whether to run.'}</p>
+        <span>{isZh ? '当前只处理一个阶段，页面会明确告诉你下一步。' : 'Only one stage is active, and the page tells you the next action.'}</span>
+      </section>
+
+      <details className="guided-responsibility-map">
+        <summary id="guided-responsibility-map-heading">
+          <span>{isZh ? '查看 AI 与人工职责全流程' : 'View end-to-end AI and human responsibilities'}</span>
+          <small>{isZh ? '需要了解审核、冻结和提交边界时展开' : 'Expand when you need review, freeze, and submission boundaries'}</small>
+        </summary>
         <ol>
           {RESPONSIBILITY_FLOW.map((item, index) => (
             <li key={item.key}>
@@ -1041,7 +1067,7 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
             </li>
           ))}
         </ol>
-      </section>
+      </details>
 
       {error && !advanceError ? (
         <div className="guided-inline-error">
@@ -1066,6 +1092,16 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
             </Button>
           ) : null}
         </div>
+      ) : null}
+
+      {successNotice ? (
+        <InlineNotification
+          kind="success"
+          lowContrast
+          title={isZh ? '操作已完成' : 'Action completed'}
+          subtitle={successNotice}
+          onCloseButtonClick={() => setSuccessNotice(undefined)}
+        />
       ) : null}
 
       {workflows.length === 0 || !workflow ? (
@@ -1461,46 +1497,6 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
               />
             ) : null}
 
-            {turnOperations.length > 0 ? (
-              <details className="guided-operation-history">
-                <summary>
-                  {isZh
-                    ? `模型调用与恢复记录（${turnOperations.length}）`
-                    : `Model call and recovery history (${turnOperations.length})`}
-                </summary>
-                <ol>
-                  {turnOperations.map((operation, index) => (
-                    <li key={operation.clientRequestId}>
-                      <div>
-                        <strong>{isZh
-                          ? `第 ${index + 1} 次调用 · ${guidedOperationStatus(operation.status, isZh)}`
-                          : `Call ${index + 1} · ${guidedOperationStatus(operation.status, isZh)}`}</strong>
-                        <time dateTime={operation.updatedAt}>
-                          {safeDate(operation.updatedAt, language)}
-                        </time>
-                      </div>
-                      <details className="guided-operation-history__technical">
-                        <summary>{isZh ? '技术详情' : 'Technical details'}</summary>
-                        <code>{operation.clientRequestId}</code>
-                        {operation.supersedesClientRequestId ? (
-                          <span>
-                            {isZh ? '替代调用：' : 'Supersedes: '}
-                            <code>{operation.supersedesClientRequestId}</code>
-                          </span>
-                        ) : null}
-                        {operation.providerRequestId ? (
-                          <span>
-                            {isZh ? '供应商请求：' : 'Provider request: '}
-                            <code>{operation.providerRequestId}</code>
-                          </span>
-                        ) : null}
-                      </details>
-                    </li>
-                  ))}
-                </ol>
-              </details>
-            ) : null}
-
             {pendingProposal ? (
               <section
                 className={`guided-proposal${advanceError?.targetId === 'guided-proposal-heading' ? ' is-invalid' : ''}`}
@@ -1547,33 +1543,12 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
             {pendingProposal?.nextQuestionOptions.length ? (
               <div className="guided-suggestions" aria-label={isZh ? '建议回答' : 'Suggested answers'}>
                 {pendingProposal.nextQuestionOptions.map((option) => (
-                  <button type="button" key={option} onClick={() => setMessage(option)}>{option}</button>
+                  <button type="button" key={option} onClick={() => fillSuggestedAnswer(option)}>
+                    <span>{option}</span>
+                    <small>{isZh ? '填入问题' : 'Fill composer'}</small>
+                  </button>
                 ))}
               </div>
-            ) : null}
-
-            {workflow.archivedProposals && workflow.archivedProposals.length > 0 ? (
-              <details className="guided-proposal-archive">
-                <summary>
-                  {isZh
-                    ? `查看已归档候选（${workflow.archivedProposals.length}）`
-                    : `View archived candidates (${workflow.archivedProposals.length})`}
-                </summary>
-                <ol>
-                  {workflow.archivedProposals.map((archived) => (
-                    <li key={archived.id}>
-                      <div>
-                        <strong>{stageLabel(archived.proposal.stage, isZh)}</strong>
-                        <StatusBadge status={archived.status} />
-                      </div>
-                      <p>{archived.proposal.assistantMessage}</p>
-                      <time dateTime={archived.archivedAt}>
-                        {safeDate(archived.archivedAt, language)}
-                      </time>
-                    </li>
-                  ))}
-                </ol>
-              </details>
             ) : null}
 
             {workflow.status === 'ACTIVE' ? (
@@ -1590,8 +1565,15 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
                   invalidText={advanceError?.targetId === 'guided-message'
                     ? advanceError.message
                     : undefined}
-                  onChange={(event) => setMessage(event.target.value)}
+                  ref={composerRef}
+                  onChange={(event) => {
+                    setMessage(event.target.value);
+                    setComposerNotice(undefined);
+                  }}
                 />
+                {composerNotice ? (
+                  <p className="guided-composer__notice" role="status">{composerNotice}</p>
+                ) : null}
                 <Button
                   type="submit"
                   renderIcon={PaperPlaneTilt}
@@ -1704,6 +1686,78 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
                     : isZh ? '我已人工检查，继续' : 'I reviewed this stage, continue'}
                 </Button>
               </div>
+            ) : null}
+
+            {(turnOperations.length > 0
+              || Boolean(workflow.archivedProposals?.length)) ? (
+              <details className="guided-audit-details">
+                <summary>
+                  {isZh ? '历史与技术记录' : 'History and technical records'}
+                  <small>{isZh
+                    ? '仅在排障或回看旧候选时需要'
+                    : 'Needed only for troubleshooting or reviewing prior candidates'}</small>
+                </summary>
+
+                {turnOperations.length > 0 ? (
+                  <section className="guided-operation-history" aria-label={isZh ? '模型调用记录' : 'Model call history'}>
+                    <strong>{isZh
+                      ? `模型调用与恢复记录（${turnOperations.length}）`
+                      : `Model call and recovery history (${turnOperations.length})`}</strong>
+                    <ol>
+                      {turnOperations.map((operation, index) => (
+                        <li key={operation.clientRequestId}>
+                          <div>
+                            <strong>{isZh
+                              ? `第 ${index + 1} 次调用 · ${guidedOperationStatus(operation.status, isZh)}`
+                              : `Call ${index + 1} · ${guidedOperationStatus(operation.status, isZh)}`}</strong>
+                            <time dateTime={operation.updatedAt}>
+                              {safeDate(operation.updatedAt, language)}
+                            </time>
+                          </div>
+                          <details className="guided-operation-history__technical">
+                            <summary>{isZh ? '技术详情' : 'Technical details'}</summary>
+                            <code>{operation.clientRequestId}</code>
+                            {operation.supersedesClientRequestId ? (
+                              <span>
+                                {isZh ? '替代调用：' : 'Supersedes: '}
+                                <code>{operation.supersedesClientRequestId}</code>
+                              </span>
+                            ) : null}
+                            {operation.providerRequestId ? (
+                              <span>
+                                {isZh ? '供应商请求：' : 'Provider request: '}
+                                <code>{operation.providerRequestId}</code>
+                              </span>
+                            ) : null}
+                          </details>
+                        </li>
+                      ))}
+                    </ol>
+                  </section>
+                ) : null}
+
+                {workflow.archivedProposals && workflow.archivedProposals.length > 0 ? (
+                  <section className="guided-proposal-archive" aria-label={isZh ? '已归档候选' : 'Archived candidates'}>
+                    <strong>{isZh
+                      ? `已归档候选（${workflow.archivedProposals.length}）`
+                      : `Archived candidates (${workflow.archivedProposals.length})`}</strong>
+                    <ol>
+                      {workflow.archivedProposals.map((archived) => (
+                        <li key={archived.id}>
+                          <div>
+                            <strong>{stageLabel(archived.proposal.stage, isZh)}</strong>
+                            <StatusBadge status={archived.status} />
+                          </div>
+                          <p>{archived.proposal.assistantMessage}</p>
+                          <time dateTime={archived.archivedAt}>
+                            {safeDate(archived.archivedAt, language)}
+                          </time>
+                        </li>
+                      ))}
+                    </ol>
+                  </section>
+                ) : null}
+              </details>
             ) : null}
           </section>
         </div>

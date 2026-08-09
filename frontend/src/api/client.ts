@@ -1,5 +1,6 @@
 import {
   normalizeAccountDataExport,
+  normalizeAccountSessions,
   normalizeAccountDeletionReceipt,
   normalizeAdminLlmCredential,
   normalizeAdminActivityPage,
@@ -482,6 +483,16 @@ export const api = {
 
   async logout(): Promise<void> {
     await requestJson('/v1/auth/logout', { method: 'POST' });
+  },
+
+  async listAccountSessions() {
+    return normalizeAccountSessions(await requestJson('/v1/auth/sessions'));
+  },
+
+  async revokeAccountSession(authSessionId: string): Promise<void> {
+    await requestJson(`/v1/auth/sessions/${encodeURIComponent(authSessionId)}`, {
+      method: 'DELETE',
+    });
   },
 
   async exportAccountData(input: AccountDataExportInput): Promise<AccountDataExport> {

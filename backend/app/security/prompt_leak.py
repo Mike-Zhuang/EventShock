@@ -18,6 +18,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from backend.app.security.unicode_skeleton import confusableSkeleton
+
 _ZERO_WIDTH_AND_DIRECTIONAL = frozenset(
     {
         "\u061c",
@@ -184,7 +186,7 @@ class UnsafeModelOutputError(ValueError):
 
 
 def _normalizeForComparison(value: str) -> str:
-    normalized = unicodedata.normalize("NFKC", value)
+    normalized = confusableSkeleton(value)
     withoutFormatting = "".join(
         character
         for character in normalized

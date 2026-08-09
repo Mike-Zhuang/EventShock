@@ -18,7 +18,13 @@ from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+    StreamingResponse,
+)
 from starlette.concurrency import run_in_threadpool
 
 from backend.app.auth import (
@@ -297,6 +303,12 @@ def _modelGatewayApiError(
                 ),
             }
         )
+        # 网关只允许写入脱敏、定长的诊断字段；这些信息能告诉用户失败发生在
+        # 结构还是语义修复阶段，但不会暴露提示词或模型原文。
+        for key in ("failureStage", "violationCodes", "fieldPath"):
+            value = error.safeDiagnostics.get(key)
+            if isinstance(value, (str, int)):
+                details[key] = value
     return ApiError(
         error.code.value,
         _modelGatewayStatusCode(error),
@@ -371,31 +383,53 @@ def _safeResultInterpretationErrorDetails(error: ApiError) -> dict[str, object]:
 def _validateResultInterpretationPrivateInput(
     interpretationRequest: ResultInterpretationChatRequest,
 ) -> None:
-    """在任何外部模型调用前阻断凭据和个人身份信息。"""
+    """在任何外部模型调用前阻断隐私内容、活动载荷和提示注入。"""
 
     for message in interpretationRequest.messages:
-        findingCodes = {
-            finding.code
-            for finding in scanTextContent(
-                message.content,
-                field="resultInterpretationMessage",
-            ).findings
-        }
-        if findingCodes & RESULT_INTERPRETATION_PRIVATE_INPUT_CODES:
+        scan = scanTextContent(
+            message.content,
+            field="resultInterpretationMessage",
+        )
+        if scan.decision is not ContentPolicyDecision.ALLOW:
+            findingCodes = sorted({finding.code for finding in scan.findings})
             raise ApiError(
                 "RESULT_INTERPRETATION_PRIVATE_INPUT",
                 422,
                 (
-                    "Remove API keys, credentials, and personally identifying information "
-                    "before asking the model."
+                    "Remove credentials, personal information, active content, and "
+                    "instruction-override text before asking the model."
                 ),
-                details={"retryable": False},
+                details={"retryable": False, "findingCodes": findingCodes[:8]},
             )
+
+
+def _validateFreeTextEntries(entries: dict[str, str | None]) -> None:
+    """为所有会进入持久化或模型上下文的自由文本提供统一前置门禁。"""
+
+    violations: list[str] = []
+    for fieldName, value in entries.items():
+        if not value:
+            continue
+        scan = scanTextContent(value, field=fieldName)
+        if scan.decision is not ContentPolicyDecision.ALLOW:
+            violations.extend(finding.code for finding in scan.findings)
+    if violations:
+        raise ApiError(
+            "USER_CONTENT_UNSAFE",
+            422,
+            (
+                "Remove credentials, personal information, executable markup, and "
+                "instruction-override text before saving this content."
+            ),
+            details={"findingCodes": sorted(set(violations))[:12]},
+        )
 
 
 def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> FastAPI:
     settings = loadSettings(dataDir)
-    rateLimiter = SlidingWindowRateLimiter()
+    # 登录与验证码属于认证关键桶，必须跨应用重启保留；普通业务桶仍留在内存，
+    # 避免为每个低风险写操作引入数据库竞争。
+    rateLimiter = SlidingWindowRateLimiter(persistencePath=settings.databasePath)
     runtimeMetrics = RuntimeMetrics()
     resultInterpretationSingleFlight = ResultInterpretationSingleFlight()
 
@@ -548,6 +582,10 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         redoc_url=None if settings.production else "/redoc",
         openapi_url=None if settings.production else "/openapi.json",
     )
+    appInstance.state.production = settings.production
+    # 运行指标的 HTTP 端点仅对管理员开放；测试与进程内诊断可直接读取此对象，
+    # 无需为了观测内部状态而绕过生产鉴权边界。
+    appInstance.state.runtimeMetrics = runtimeMetrics
 
     @appInstance.middleware("http")
     async def traceMiddleware(request: Request, callNext):
@@ -682,6 +720,18 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         if settings.authenticationRequired:
             return _authContext(request).userId
         return _optionalSessionId(legacySessionId)
+
+    def requireConfiguredAdministrator(
+        request: Request,
+        legacySessionId: Annotated[str | None, Header(alias="X-Session-ID")] = None,
+    ) -> str:
+        """生产运维端点只允许部署配置的唯一管理员访问。"""
+
+        if settings.authenticationRequired:
+            return _configuredAdministratorContext(request).userId
+        if legacySessionId is None:
+            raise ApiError("SESSION_ID_REQUIRED", 422, "X-Session-ID is required.")
+        return _sessionId(legacySessionId)
 
     def credentialSessionId(request: Request, ownerUserId: str) -> str:
         context = getattr(request.state, "authContext", None)
@@ -876,10 +926,21 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             "status": "ok",
             "service": "eventshock-api",
             "version": "0.1.0",
-            "releaseCommit": settings.releaseCommit,
             "database": "ok",
-            "simulationConcurrency": 1,
+            # 自动部署与回滚门禁必须核对公网实例确实运行目标提交。
+            # 这里只公开不可变的提交哈希，不恢复用户量、队列或模型遥测等敏感信息。
+            "releaseCommit": settings.releaseCommit,
         }
+
+    @appInstance.get("/.well-known/security.txt", response_class=PlainTextResponse)
+    async def getSecurityContact() -> str:
+        return (
+            "Contact: https://github.com/Mike-Zhuang/EventShock-Lab/issues/new/choose\n"
+            "Preferred-Languages: en, zh\n"
+            "Canonical: https://eventshock.mikezhuang.cn/.well-known/security.txt\n"
+            "Policy: https://github.com/Mike-Zhuang/EventShock-Lab/security/policy\n"
+            "Expires: 2027-08-08T23:59:59Z\n"
+        )
 
     @appInstance.get("/api/v1/legal/terms")
     async def getCurrentLegalTerms(
@@ -1575,6 +1636,33 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         )
         return response
 
+    @appInstance.get("/api/v1/auth/sessions")
+    async def listAccountSessions(request: Request) -> dict[str, Any]:
+        authService = _requiredAuthService(request)
+        sessions = authService.listSessions(_authContext(request))
+        return {"items": [item.model_dump(mode="json") for item in sessions]}
+
+    @appInstance.delete("/api/v1/auth/sessions/{authSessionId}")
+    async def revokeAccountSession(authSessionId: str, request: Request) -> Response:
+        authService = _requiredAuthService(request)
+        context = _authContext(request)
+        if not authSessionId.startswith("auth-") or len(authSessionId) > 64:
+            raise ApiError("AUTH_SESSION_ID_INVALID", 422, "The session ID is invalid.")
+        revoked = authService.revokeSession(context, sessionId=authSessionId)
+        if not revoked:
+            raise ApiError("AUTH_SESSION_NOT_FOUND", 404, "The session is no longer active.")
+        if authSessionId != context.authSessionId:
+            return Response(status_code=204)
+        response = Response(status_code=204)
+        response.delete_cookie(
+            AUTH_COOKIE_NAME,
+            path="/",
+            secure=settings.authCookieSecure,
+            httponly=True,
+            samesite="lax",
+        )
+        return response
+
     @appInstance.get("/api/v1/admin/users")
     async def listAdminUsers(
         request: Request,
@@ -1638,7 +1726,10 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         return _publicUserPayload(user)
 
     @appInstance.get("/api/v1/system/metrics")
-    async def getSystemMetrics(request: Request) -> dict[str, Any]:
+    async def getSystemMetrics(
+        request: Request,
+        _administratorId: str = Depends(requireConfiguredAdministrator),
+    ) -> dict[str, Any]:
         database: Database = request.app.state.database
         experiments: ExperimentService = request.app.state.experimentService
         cognition: CognitionService = request.app.state.cognitionService
@@ -2160,14 +2251,23 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 },
             )
             eventPack = _sanitizeAcknowledgedEventPack(eventPack, contentSecurity)
-            cognition: CognitionService = request.app.state.cognitionService
-            claims, extractionMode = await _extractEventClaimsInBatches(
-                cognition,
-                credentialId=credentialSessionId(request, ownerUserId),
-                sources=eventPack.sources,
-                maximumClaims=payload.maximumClaims,
-                requestedImpactChannels=payload.requestedImpactChannels,
-            )
+            if payload.useLlm:
+                cognition: CognitionService = request.app.state.cognitionService
+                claims, extractionMode = await _extractEventClaimsInBatches(
+                    cognition,
+                    credentialId=credentialSessionId(request, ownerUserId),
+                    sources=eventPack.sources,
+                    maximumClaims=payload.maximumClaims,
+                    requestedImpactChannels=payload.requestedImpactChannels,
+                )
+            else:
+                # 规则抽取只能由调用方明确选择；它不是模型失败后的隐藏替代品。
+                claims = eventPackService.extractCandidateClaims(
+                    eventPack,
+                    payload.maximumClaims,
+                    payload.requestedImpactChannels,
+                )
+                extractionMode = "RULE_ONLY_USER_SELECTED"
             result = eventPackService.createEventPack(
                 eventPack,
                 ownerUserId,
@@ -2249,12 +2349,17 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             },
         )
         eventPack = _sanitizeAcknowledgedEventPack(eventPack, contentSecurity)
-        claims, extractionMode = await _extractEventClaimsInBatches(
-            cognition,
-            credentialId=credentialId,
-            sources=eventPack.sources,
-            maximumClaims=16,
-        )
+        if eventPack.useLlm:
+            claims, extractionMode = await _extractEventClaimsInBatches(
+                cognition,
+                credentialId=credentialId,
+                sources=eventPack.sources,
+                maximumClaims=16,
+            )
+        else:
+            # 规则抽取只能由调用方显式选择，绝不能作为模型失败后的隐式替代。
+            claims = service.extractCandidateClaims(eventPack, maximumClaims=16)
+            extractionMode = "RULE_ONLY_USER_SELECTED"
         return service.createEventPack(
             eventPack,
             validatedSessionId,
@@ -2652,12 +2757,18 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         }
 
     @appInstance.get("/api/v1/llm/telemetry")
-    async def getLlmTelemetry(request: Request) -> dict[str, Any]:
+    async def getLlmTelemetry(
+        request: Request,
+        _administratorId: str = Depends(requireConfiguredAdministrator),
+    ) -> dict[str, Any]:
         cognition: CognitionService = request.app.state.cognitionService
         return cognition.getTelemetry().model_dump(mode="json")
 
     @appInstance.get("/api/v1/evals")
-    async def getEvalSummary(request: Request) -> dict[str, Any]:
+    async def getEvalSummary(
+        request: Request,
+        _administratorId: str = Depends(requireConfiguredAdministrator),
+    ) -> dict[str, Any]:
         cognition: CognitionService = request.app.state.cognitionService
         return cognition.getEvalSummary().model_dump(mode="json")
 
@@ -2665,7 +2776,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def runCognitionEvaluation(
         evaluation: EvalRunRequest,
         request: Request,
-        sessionId: str = Depends(requireOwner),
+        sessionId: str = Depends(requireConfiguredAdministrator),
     ) -> dict[str, Any]:
         ownerUserId = _sessionId(sessionId)
         credentialId = credentialSessionId(request, ownerUserId)
@@ -2764,7 +2875,10 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         }
 
     @appInstance.get("/api/v1/governance/release-gate")
-    async def getReleaseGate(request: Request) -> dict[str, Any]:
+    async def getReleaseGate(
+        request: Request,
+        _administratorId: str = Depends(requireConfiguredAdministrator),
+    ) -> dict[str, Any]:
         evaluatedAt = datetime.now(UTC)
         telemetry = request.app.state.cognitionService.getTelemetry()
         report = evaluateP0Release(
@@ -2901,6 +3015,14 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
         validatedSessionId = _sessionId(sessionId)
+        _validateFreeTextEntries(
+            {
+                "study.question": study.preregistration.question,
+                "study.supportCriterion": study.preregistration.supportCriterion,
+                "study.contradictionCriterion": study.preregistration.contradictionCriterion,
+                "study.inconclusiveCriterion": study.preregistration.inconclusiveCriterion,
+            }
+        )
         eventPacks: EventPackService = request.app.state.eventPackService
         studies: StudyApiService = request.app.state.studyService
         eventPack = eventPacks.getEventPack(study.eventPackId, validatedSessionId)
@@ -2946,6 +3068,21 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         request: Request,
         sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
+        _validateFreeTextEntries(
+            {
+                "claim.editedText": review.editedText,
+                "claim.editedTextZh": review.editedTextZh,
+                "claim.rationale": review.rationale,
+                **{
+                    f"claim.impactChannelRationale[{index}].reason": item.reason
+                    for index, item in enumerate(review.editedImpactChannelRationale or [])
+                },
+                **{
+                    f"claim.impactChannelRationale[{index}].reasonZh": item.reasonZh
+                    for index, item in enumerate(review.editedImpactChannelRationale or [])
+                },
+            }
+        )
         service: EventPackService = request.app.state.eventPackService
         return service.reviewClaim(eventPackId, claimId, _sessionId(sessionId), review)
 
@@ -2956,6 +3093,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         request: Request,
         sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
+        _validateFreeTextEntries({"claim.bulkApprovalRationale": approval.rationale})
         service: EventPackService = request.app.state.eventPackService
         return service.approveAllProposedClaims(
             eventPackId,
@@ -3018,7 +3156,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             acknowledgedContentReview=extraction.acknowledgedContentReview,
         )
         cognition: CognitionService = request.app.state.cognitionService
-        claims = None
+        claims: list[dict[str, Any]] | None = None
         extractionMode = "RULE_ONLY"
         if extraction.useLlm and cognition.getConfig(credentialId).configured:
             try:
@@ -3037,22 +3175,43 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                         else f"{providerLabel}_{llmExtraction.model}"
                     )
                 else:
-                    extractionMode = (
-                        f"{llmExtraction.provider.upper()}_{llmExtraction.model}_"
-                        "ABSTAINED_RULE_FALLBACK"
+                    raise ApiError(
+                        "EVENT_EXTRACTION_ABSTAINED",
+                        422,
+                        "The model chose not to extract claims from the approved sources.",
+                        details={
+                            "abstainReason": llmExtraction.extraction.abstain_reason,
+                            "retryWithNewRequestRequired": True,
+                        },
                     )
-            except CredentialNotConfiguredError:
-                extractionMode = "RULE_FALLBACK_LLM_CONFIG_EXPIRED"
+            except CredentialNotConfiguredError as error:
+                raise ApiError(
+                    "LLM_CREDENTIAL_NOT_CONFIGURED",
+                    409,
+                    (
+                        "Configure an API key before AI extraction, or explicitly "
+                        "choose manual extraction."
+                    ),
+                ) from error
             except ModelGatewayError as error:
-                extractionMode = f"RULE_FALLBACK_{error.code.value}"
+                raise _modelGatewayApiError(error) from error
         elif extraction.useLlm:
-            extractionMode = "RULE_FALLBACK_NO_LLM_CONFIG"
+            raise ApiError(
+                "LLM_CREDENTIAL_NOT_CONFIGURED",
+                409,
+                (
+                    "Configure an API key before AI extraction, or explicitly "
+                    "choose manual extraction."
+                ),
+            )
         if claims is None:
+            # 只有 useLlm=false 才能进入明确的人工规则模式。
             claims = service.extractCandidateClaims(
                 extractionInput,
                 extraction.maximumClaims,
                 tuple(extraction.requestedImpactChannels),
             )
+        _validateExtractedClaimContent(claims)
         return service.saveExtractedClaims(
             eventPackId,
             validatedSessionId,
@@ -3076,6 +3235,21 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         request: Request,
         sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
+        _validateFreeTextEntries(
+            {
+                "scenario.name": scenario.name,
+                "scenario.question": scenario.config.question,
+                "scenario.questionZh": scenario.config.questionZh,
+                "scenario.market.instrumentId": scenario.config.market.instrumentId,
+                "scenario.market.benchmarkId": scenario.config.market.benchmarkId,
+                "scenario.population.profileId": scenario.config.population.profileId,
+                "scenario.primaryOutcome": scenario.config.primaryOutcome,
+                **{
+                    f"scenario.secondaryOutcomes[{index}]": value
+                    for index, value in enumerate(scenario.config.secondaryOutcomes)
+                },
+            }
+        )
         service: ScenarioService = request.app.state.scenarioService
         ownerUserId = _sessionId(sessionId)
         return service.createScenario(
@@ -3100,6 +3274,21 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         request: Request,
         sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
+        _validateFreeTextEntries(
+            {
+                "scenario.name": scenario.name,
+                "scenario.question": scenario.config.question,
+                "scenario.questionZh": scenario.config.questionZh,
+                "scenario.market.instrumentId": scenario.config.market.instrumentId,
+                "scenario.market.benchmarkId": scenario.config.market.benchmarkId,
+                "scenario.population.profileId": scenario.config.population.profileId,
+                "scenario.primaryOutcome": scenario.config.primaryOutcome,
+                **{
+                    f"scenario.secondaryOutcomes[{index}]": value
+                    for index, value in enumerate(scenario.config.secondaryOutcomes)
+                },
+            }
+        )
         service: ScenarioService = request.app.state.scenarioService
         return service.updateScenario(scenarioId, scenario, _sessionId(sessionId))
 
@@ -3146,6 +3335,20 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         request: Request,
         sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
+        _validateFreeTextEntries(
+            {
+                "scenario.question": scenario.question,
+                "scenario.questionZh": scenario.questionZh,
+                "scenario.market.instrumentId": scenario.market.instrumentId,
+                "scenario.market.benchmarkId": scenario.market.benchmarkId,
+                "scenario.population.profileId": scenario.population.profileId,
+                "scenario.primaryOutcome": scenario.primaryOutcome,
+                **{
+                    f"scenario.secondaryOutcomes[{index}]": value
+                    for index, value in enumerate(scenario.secondaryOutcomes)
+                },
+            }
+        )
         service: EventPackService = request.app.state.eventPackService
         ownerUserId = _sessionId(sessionId)
         return service.validateExperiment(
@@ -3185,6 +3388,20 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         sessionId: str = Depends(requireOwner),
         idempotencyKey: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
     ) -> Response:
+        _validateFreeTextEntries(
+            {
+                "experiment.question": experiment.question,
+                "experiment.questionZh": experiment.questionZh,
+                "experiment.market.instrumentId": experiment.market.instrumentId,
+                "experiment.market.benchmarkId": experiment.market.benchmarkId,
+                "experiment.population.profileId": experiment.population.profileId,
+                "experiment.primaryOutcome": experiment.primaryOutcome,
+                **{
+                    f"experiment.secondaryOutcomes[{index}]": value
+                    for index, value in enumerate(experiment.secondaryOutcomes)
+                },
+            }
+        )
         service: ExperimentService = request.app.state.experimentService
         ownerUserId = _sessionId(sessionId)
         createdExperiment, created = service.createExperiment(
@@ -3304,6 +3521,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         request: Request,
         sessionId: str = Depends(requireOwner),
     ) -> dict[str, Any]:
+        _validateFreeTextEntries({"experiment.invalidationReason": invalidation.reason})
         service: ExperimentService = request.app.state.experimentService
         return service.invalidateExperiment(
             experimentId,
@@ -4196,12 +4414,14 @@ def _legalAcceptanceProtected(request: Request) -> bool:
 
 
 def _validateSameOrigin(request: Request) -> None:
-    """CSRF token 是主防线；若浏览器提供 Origin，再严格校验同源。"""
+    """生产写请求必须提供同源 Origin，或退而校验严格 Referer。"""
 
-    origin = request.headers.get("Origin")
-    if not origin:
+    candidate = request.headers.get("Origin") or request.headers.get("Referer")
+    if not candidate:
+        if bool(getattr(request.app.state, "production", False)):
+            raise AuthorizationError("Origin or Referer is required for write requests")
         return
-    parsed = urlsplit(origin)
+    parsed = urlsplit(candidate)
     expectedHost = request.headers.get("Host", "").lower()
     if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() != expectedHost:
         raise AuthorizationError("cross-origin write requests are not allowed")
@@ -4441,11 +4661,15 @@ async def _extractEventClaimsInBatches(
         "passiveFlow",
         "stopLoss",
     ),
-) -> tuple[list[dict[str, Any]] | None, str]:
+) -> tuple[list[dict[str, Any]], str]:
     """批量抽取仍保持一次 Event Pack 最多 ``maximumClaims`` 条候选主张。"""
 
     if not cognition.getConfig(credentialId).configured:
-        return None, "RULE_FALLBACK_NO_LLM_CONFIG"
+        raise ApiError(
+            "LLM_CREDENTIAL_NOT_CONFIGURED",
+            409,
+            "Configure and test an API key before building an Event Pack with AI.",
+        )
 
     batches = _cognitionSourceBatches(sources)
     claims: list[dict[str, Any]] = []
@@ -4480,21 +4704,70 @@ async def _extractEventClaimsInBatches(
                 claims.append(claim)
                 if len(claims) >= maximumClaims:
                     break
-    except CredentialNotConfiguredError:
-        return None, "RULE_FALLBACK_LLM_CONFIG_EXPIRED"
+    except CredentialNotConfiguredError as error:
+        raise ApiError(
+            "LLM_CREDENTIAL_NOT_CONFIGURED",
+            409,
+            (
+                "The API credential expired before extraction completed. "
+                "Configure it and retry with a new request."
+            ),
+        ) from error
     except ModelGatewayError as error:
-        # 不能把部分成功的批次伪装成完整抽取；失败时统一回退到确定性规则。
-        return None, f"RULE_FALLBACK_{error.code.value}"
+        # 不能把部分成功批次伪装成完整抽取，也不能以规则结果覆盖模型失败。
+        raise _modelGatewayApiError(error) from error
 
     if not claims:
-        label = f"{providerLabel}_{modelLabel}" if providerLabel and modelLabel else "MODEL"
-        return None, f"{label}_ABSTAINED_RULE_FALLBACK"
+        raise ApiError(
+            "EVENT_EXTRACTION_ABSTAINED",
+            422,
+            "The model chose not to extract claims from the approved sources.",
+            details={
+                "retryWithNewRequestRequired": True,
+                "completedBatches": len(batches),
+            },
+        )
     mode = f"{providerLabel}_{modelLabel}"
     if len(batches) > 1:
         mode += "_BATCHED"
     if fallbackUsed:
-        mode += "_FALLBACK"
+        raise ApiError(
+            "EVENT_EXTRACTION_RULE_FALLBACK_REJECTED",
+            502,
+            "The extraction used a deterministic fallback and was not accepted as AI output.",
+            details={"retryWithNewRequestRequired": True},
+        )
+    _validateExtractedClaimContent(claims)
     return claims, mode
+
+
+def _validateExtractedClaimContent(claims: list[dict[str, Any]]) -> None:
+    """模型抽取后再次扫描，阻止来源中的指令被固化为可信 claim。"""
+
+    for index, claim in enumerate(claims):
+        textValue = claim.get("text")
+        if not isinstance(textValue, str):
+            raise ApiError(
+                "EVENT_EXTRACTION_OUTPUT_INVALID",
+                502,
+                "An extracted claim did not contain valid plain text.",
+                details={"claimIndex": index},
+            )
+        scan = scanTextContent(textValue, field=f"claims[{index}].text", locale="en")
+        # 模型抽取结果可能合法复述来源中的公开联系方式；只有明确阻断级内容
+        # （例如提示注入或可执行载荷）才终止流程，REVIEW 级内容仍由后续人工审核承接。
+        if scan.decision is ContentPolicyDecision.BLOCK:
+            raise ApiError(
+                "EVENT_EXTRACTION_OUTPUT_UNSAFE",
+                422,
+                "An extracted claim matched the content-safety policy and was not saved.",
+                details={
+                    "claimIndex": index,
+                    "decision": scan.decision.value,
+                    "findingCodes": sorted({item.code for item in scan.findings}),
+                    "retryWithNewRequestRequired": True,
+                },
+            )
 
 
 def _safeContentFindingGuidance(
@@ -4728,14 +5001,31 @@ def _rateLimitRules(request: Request) -> list[RateLimitRule]:
     if path.startswith("/api/v1/auth/"):
         # 课堂演示时多个学生通常共用学校出口 IP，因此 IP 配额只承担异常流量
         # 兜底；单邮箱仍受 60 秒发送冷却，单验证码仍只有 5 次尝试机会。
-        rules = [RateLimitRule(key=f"auth-write:ip:{clientIp}", limit=120, windowSeconds=300)]
+        rules = [
+            RateLimitRule(
+                key=f"auth-write:ip:{clientIp}",
+                limit=120,
+                windowSeconds=300,
+                protected=True,
+            )
+        ]
         if path == "/api/v1/auth/login":
             rules.append(
-                RateLimitRule(key=f"auth-login:ip:{clientIp}", limit=30, windowSeconds=300)
+                RateLimitRule(
+                    key=f"auth-login:ip:{clientIp}",
+                    limit=30,
+                    windowSeconds=300,
+                    protected=True,
+                )
             )
         if path == "/api/v1/auth/verification-code":
             rules.append(
-                RateLimitRule(key=f"auth-code:ip:{clientIp}", limit=60, windowSeconds=3600)
+                RateLimitRule(
+                    key=f"auth-code:ip:{clientIp}",
+                    limit=60,
+                    windowSeconds=3600,
+                    protected=True,
+                )
             )
         return rules
     if path == "/api/v1/admin/llm-credential":
@@ -4910,7 +5200,7 @@ def _addSecurityHeaders(response: Response, traceId: str) -> None:
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; "
         "form-action 'self'; object-src 'none'; img-src 'self' data:; "
-        "font-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+        "font-src 'self' data:; style-src 'self'; "
         "script-src 'self'; connect-src 'self'"
     )
 

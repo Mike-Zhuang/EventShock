@@ -91,6 +91,7 @@ def test_factory_api_materializes_reviewable_pack_and_preserves_owner_boundary(
                 "asOf": "2026-07-20T13:00:00Z",
                 "instrument": "TEST",
                 "maximumClaims": 8,
+                "useLlm": False,
                 "requestedImpactChannels": ["belief", "liquidity"],
                 "acknowledgedContentReview": True,
             },

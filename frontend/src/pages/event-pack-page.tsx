@@ -38,6 +38,12 @@ function extractionModeLabel(mode: string | undefined, language: 'en' | 'zh-CN')
 
 const BULK_CONFIDENCE_THRESHOLD = 0.75;
 
+function confidenceBand(value: number, language: 'en' | 'zh-CN'): string {
+  if (value >= 0.8) return language === 'zh-CN' ? '较高' : 'Higher';
+  if (value >= 0.6) return language === 'zh-CN' ? '中等' : 'Moderate';
+  return language === 'zh-CN' ? '较低' : 'Lower';
+}
+
 function claimBulkExclusionReasons(
   claim: EventClaim,
   reviewSourceIds: Set<string>,
@@ -577,24 +583,30 @@ export function EventPackPage({ navigate }: { navigate: (view: ViewId) => void }
                       <StatusBadge status={claim.status} />
                       {claim.isRequired ? <span><ExplainedLabel label={t('pack.required')} explanation={language === 'zh-CN' ? '必需主张必须被批准或编辑后，事件包才允许冻结；不能仅拒绝。' : 'A required claim must be approved or edited before the Event Pack can freeze; rejection alone is not allowed.'} /></span> : null}
                       {claim.sourceTier ? <span>{claim.sourceTier}</span> : null}
-                      {claim.confidence !== undefined ? <span><ExplainedLabel label={`${Math.round(claim.confidence * 100)}%`} explanation={language === 'zh-CN' ? '这是候选抽取置信度，用于排序人工复核，不表示该主张为真的概率。' : 'Candidate-extraction confidence for prioritizing review; it is not the probability that the claim is true.'} /></span> : null}
+                      {claim.confidence !== undefined ? <span><ExplainedLabel label={confidenceBand(claim.confidence, language)} explanation={language === 'zh-CN' ? '这是抽取质量的复核优先级，不表示该主张为真的概率。精确技术分数收在下方详情中。' : 'This is an extraction-quality review priority, not the probability that the claim is true. Exact technical scores are available in the details below.'} /></span> : null}
                     </div>
                     <p className="claim-item__text">{language === 'zh-CN' ? claim.textZh ?? claim.text : claim.text}</p>
                     {claim.confidenceComponents ? (
-                      <dl className="claim-confidence-components" aria-label={language === 'zh-CN' ? '抽取置信度组成' : 'Extraction-confidence components'}>
-                        <div>
-                          <dt>{language === 'zh-CN' ? '文本忠实度' : 'Textual fidelity'}</dt>
-                          <dd>{Math.round((claim.confidenceComponents.textualFidelity ?? 0) * 100)}%</dd>
-                        </div>
-                        <div>
-                          <dt>{language === 'zh-CN' ? '来源层级强度' : 'Source-tier strength'}</dt>
-                          <dd>{Math.round((claim.confidenceComponents.sourceTierStrength ?? 0) * 100)}%</dd>
-                        </div>
-                        <div>
-                          <dt>{language === 'zh-CN' ? '时间边界确定性' : 'Time-boundary certainty'}</dt>
-                          <dd>{Math.round((claim.confidenceComponents.timeBoundaryCertainty ?? 0) * 100)}%</dd>
-                        </div>
-                      </dl>
+                      <details className="claim-confidence-details">
+                        <summary>{language === 'zh-CN' ? '为什么是这个复核优先级？' : 'Why this review priority?'}</summary>
+                        <p>{language === 'zh-CN'
+                          ? '文本忠实度衡量候选是否贴近来源；来源层级反映来源类型；时间边界确定性反映发布时间与可见时间是否清楚。它们只帮助安排人工复核。'
+                          : 'Textual fidelity measures closeness to the source, source tier reflects provenance, and time-boundary certainty reflects publication and visibility timing. They only prioritize human review.'}</p>
+                        <dl className="claim-confidence-components" aria-label={language === 'zh-CN' ? '抽取质量技术组成' : 'Technical extraction-quality components'}>
+                          <div>
+                            <dt>{language === 'zh-CN' ? '文本忠实度' : 'Textual fidelity'}</dt>
+                            <dd>{Math.round((claim.confidenceComponents.textualFidelity ?? 0) * 100)}%</dd>
+                          </div>
+                          <div>
+                            <dt>{language === 'zh-CN' ? '来源层级强度' : 'Source-tier strength'}</dt>
+                            <dd>{Math.round((claim.confidenceComponents.sourceTierStrength ?? 0) * 100)}%</dd>
+                          </div>
+                          <div>
+                            <dt>{language === 'zh-CN' ? '时间边界确定性' : 'Time-boundary certainty'}</dt>
+                            <dd>{Math.round((claim.confidenceComponents.timeBoundaryCertainty ?? 0) * 100)}%</dd>
+                          </div>
+                        </dl>
+                      </details>
                     ) : null}
                     {claim.impactChannels && claim.impactChannels.length > 0 ? (
                       <div

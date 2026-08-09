@@ -435,6 +435,7 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
   const primaryMetricId = results?.stoppingRule?.primaryOutcome
     ?? results?.analysisDiagnostics?.preregisteredPrimaryOutcome
     ?? results?.primaryMetricId;
+  const primaryMetric = metrics.find((metric) => metric.id === primaryMetricId);
   const primaryMetricUnit = results?.metrics.find((metric) => metric.id === primaryMetricId)?.unit;
   const registeredOutcomeIds = useMemo(() => [
     primaryMetricId,
@@ -679,6 +680,56 @@ export function ResultsPage({ navigate }: { navigate: Navigate }) {
         )}
       />
       {historySelector}
+      {results ? (
+        <section className="result-takeaway" aria-labelledby="result-takeaway-heading">
+          <div className="section-heading">
+            <h2 id="result-takeaway-heading">{isZh ? '先看这三点' : 'Start with these three points'}</h2>
+            <p>{isZh
+              ? '以下内容只引用服务器已经计算的结果，帮助你先建立方向感；完整指标仍保留在下方。'
+              : 'These points use only server-computed results to establish orientation; complete metrics remain below.'}</p>
+          </div>
+          <div className="result-takeaway__grid">
+            <article>
+              <span>01 · {isZh ? '发生了什么' : 'What changed'}</span>
+              <strong>{primaryMetric
+                ? `${resultMetricLabel(primaryMetric, language, t)}：${formatMetricValue(primaryMetric.delta, primaryMetric.unit, language, primaryMetric.id)}`
+                : t('common.unavailable')}</strong>
+              <p>{primaryMetric
+                ? isZh ? '这是预注册主要指标的配对差值中位数。' : 'This is the median paired difference for the preregistered primary metric.'
+                : isZh ? '该历史实验没有可用的主要指标摘要。' : 'This historical experiment has no available primary-metric summary.'}</p>
+            </article>
+            <article>
+              <span>02 · {isZh ? '证据有多强' : 'How strong is the evidence'}</span>
+              <strong>{primaryMetric
+                ? intervalExcludesZero(primaryMetric)
+                  ? isZh ? '当前区间未跨过零' : 'The current interval excludes zero'
+                  : isZh ? '当前区间跨零或不可用' : 'The current interval crosses zero or is unavailable'
+                : t('common.unavailable')}</strong>
+              <p>{primaryMetric
+                ? `${isZh ? '区间' : 'Interval'} ${formatInterval(primaryMetric.bootstrapCiLow ?? primaryMetric.ciLow, primaryMetric.bootstrapCiHigh ?? primaryMetric.ciHigh, primaryMetric.unit, language, primaryMetric.id)} · n=${primaryMetric.n ?? results.validSeedCount ?? t('common.unavailable')}`
+                : isZh ? '请查看下方完整指标及有效配对数量。' : 'Review the full metrics and valid-pair count below.'}</p>
+            </article>
+            <article>
+              <span>03 · {isZh ? '最重要的局限' : 'Most important limitation'}</span>
+              <strong>{isZh ? '合成情景，不是现实预测' : 'Synthetic scenario, not a real-world forecast'}</strong>
+              <p>{(isZh ? results.limitationsZh : results.limitations)[0]
+                ?? (isZh ? '结果取决于冻结证据、模型机制和参数设定。' : 'Results depend on frozen evidence, model mechanisms, and configured parameters.')}</p>
+            </article>
+          </div>
+          <Button
+            kind="tertiary"
+            renderIcon={Brain}
+            onClick={() => {
+              const target = document.getElementById('result-assistant-heading');
+              const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+              target?.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' });
+              target?.focus({ preventScroll: true });
+            }}
+          >
+            {isZh ? '用通俗语言解释' : 'Explain in plain language'}
+          </Button>
+        </section>
+      ) : null}
       {strongestFindings.length > 0 ? (
         <section className="result-section strongest-findings" aria-labelledby="strongest-findings-heading">
           <div className="section-heading">

@@ -109,6 +109,14 @@ export interface AuthSession {
   preferences?: UserPreferences;
 }
 
+export interface AccountSession {
+  id: string;
+  current: boolean;
+  createdAt: string;
+  lastSeenAt: string;
+  expiresAt: string;
+}
+
 export interface AccountDataExport {
   schemaVersion: string;
   generatedAt: string;
@@ -415,6 +423,7 @@ export interface EventPackCreateInput {
   instrument: string;
   sources: EventSourceUpload[];
   acknowledgedContentReview?: boolean;
+  useLlm?: boolean;
 }
 
 export type FactoryBuildStatus = 'DRAFT' | 'REVIEW_READY';
@@ -544,6 +553,7 @@ export interface EventPackFactoryMaterializeInput {
   summaryZh?: string;
   asOf: string;
   instrument: string;
+  useLlm?: boolean;
   maximumClaims: number;
   requestedImpactChannels: string[];
   acknowledgedContentReview: boolean;

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import re
 import secrets
 
 SCRYPT_VERSION = 1
@@ -15,14 +16,41 @@ SCRYPT_KEY_LENGTH = 32
 SCRYPT_SALT_LENGTH = 16
 MINIMUM_PASSWORD_LENGTH = 8
 MAXIMUM_PASSWORD_LENGTH = 128
+COMMON_PASSWORDS = frozenset(
+    {
+        "12345678",
+        "123456789",
+        "1234567890",
+        "admin123",
+        "iloveyou",
+        "letmein123",
+        "password",
+        "password1",
+        "password123",
+        "qwerty123",
+        "welcome1",
+    }
+)
 
 
 class PasswordPolicyError(ValueError):
     pass
 
 
-def validatePassword(password: str) -> None:
-    """不强制字符组合，但要求足够长度并拒绝异常大的输入。"""
+def _identityFragments(identity: str | None) -> frozenset[str]:
+    if not identity:
+        return frozenset()
+    localPart = identity.partition("@")[0].casefold()
+    candidates = {localPart, *re.split(r"[._+\-]+", localPart)}
+    return frozenset(
+        re.sub(r"[^a-z0-9]", "", candidate)
+        for candidate in candidates
+        if len(re.sub(r"[^a-z0-9]", "", candidate)) >= 3
+    )
+
+
+def validatePassword(password: str, *, identity: str | None = None) -> None:
+    """允许长口令短语，同时拒绝最常见、重复和顺序型弱口令。"""
 
     if not isinstance(password, str):
         raise PasswordPolicyError("password must be a string")
@@ -33,10 +61,23 @@ def validatePassword(password: str) -> None:
         )
     if len(password.encode("utf-8")) > 512:
         raise PasswordPolicyError("password UTF-8 representation is too large")
+    normalized = password.casefold().strip()
+    if normalized in COMMON_PASSWORDS:
+        raise PasswordPolicyError("password is too common; choose a less predictable password")
+    if len(set(normalized)) <= 2:
+        raise PasswordPolicyError("password contains too little variation")
+    normalizedAlphanumeric = re.sub(r"[^a-z0-9]", "", normalized)
+    if any(fragment in normalizedAlphanumeric for fragment in _identityFragments(identity)):
+        raise PasswordPolicyError("password must not contain the account email name")
+    if (
+        normalized in "0123456789abcdefghijklmnopqrstuvwxyz"
+        or normalized in ("0123456789abcdefghijklmnopqrstuvwxyz"[::-1])
+    ):
+        raise PasswordPolicyError("password must not be a simple sequence")
 
 
-def hashPassword(password: str) -> str:
-    validatePassword(password)
+def hashPassword(password: str, *, identity: str | None = None) -> str:
+    validatePassword(password, identity=identity)
     return _hashValidatedPassword(password)
 
 

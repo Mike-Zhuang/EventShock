@@ -153,6 +153,46 @@ function factoryErrorMessage(error: unknown, isZh: boolean): string {
       en: 'Reader could not authenticate. Re-enter the temporary Zhipu API key in AI configuration, test it, and retry.',
       zh: 'Reader 鉴权失败。请在“AI 配置”中重新填写本次会话的智谱 API Key，测试通过后重试。',
     },
+    EVENT_PACK_FACTORY_IDEMPOTENCY_OUTCOME_UNKNOWN: {
+      en: 'The provider may have received the previous request, so it will not be sent again automatically. Your form is preserved. Check for a recovered result first; if none exists, explicitly abandon the old request before authorizing a new potentially billed request.',
+      zh: '供应商可能已经收到上一次请求，因此系统不会自动重复发送。当前表单已完整保留。请先检查是否已经生成结果；若仍没有，再明确放弃旧请求并授权一次可能再次计费的新请求。',
+    },
+    EVENT_PACK_FACTORY_IDEMPOTENCY_IN_PROGRESS: {
+      en: 'The same request is still being processed. Keep this page open and check again shortly; do not submit another paid request yet.',
+      zh: '同一个请求仍在处理中。请保留当前页面并稍后检查，不要立即创建另一个可能计费的请求。',
+    },
+    EVENT_PACK_FACTORY_IDEMPOTENCY_CONFLICT: {
+      en: 'This request identifier is already bound to different content. The current form is preserved; review it before authorizing a new request.',
+      zh: '该请求编号已绑定其他内容。当前表单已保留，请核对内容后再明确创建新请求。',
+    },
+    EVENT_PACK_FACTORY_SEARCH_RATE_LIMITED: {
+      en: 'The search provider rate limit was reached. Your inputs are preserved; wait before trying a new paid request.',
+      zh: '联网搜索已达到供应商频率限制。输入内容已保留，请稍后再发起新的计费请求。',
+    },
+    EVENT_PACK_FACTORY_SEARCH_PROVIDER_UNAVAILABLE: {
+      en: 'The search provider is temporarily unavailable. Your inputs are preserved; retry later with a new request.',
+      zh: '联网搜索供应商暂时不可用。输入内容已保留，请稍后使用新请求重试。',
+    },
+    EVENT_PACK_FACTORY_SEARCH_RESPONSE_INVALID: {
+      en: 'The provider response could not be safely validated. No discovery result was accepted; retry with a verified model or a narrower query.',
+      zh: '供应商响应未通过安全结构校验，系统没有接受任何发现结果。请使用已验证模型或缩小检索范围后重试。',
+    },
+    EVENT_PACK_FACTORY_READER_RATE_LIMITED: {
+      en: 'Reader reached the provider rate limit. The selected source remains unchanged; retry later.',
+      zh: 'Reader 已达到供应商频率限制。所选来源没有改变，请稍后重试。',
+    },
+    EVENT_PACK_FACTORY_READER_PROVIDER_UNAVAILABLE: {
+      en: 'Reader is temporarily unavailable. The selected source remains unchanged; retry later.',
+      zh: 'Reader 暂时不可用。所选来源没有改变，请稍后重试。',
+    },
+    EVENT_PACK_FACTORY_READER_RESPONSE_INVALID: {
+      en: 'Reader returned an invalid response. No full text was accepted; verify the page directly or use manual paste.',
+      zh: 'Reader 返回的内容未通过结构校验，系统没有接受全文。请直接核对网页，或改用手动粘贴。',
+    },
+    EVENT_PACK_FACTORY_CONTENT_BLOCKED: {
+      en: 'The submitted content was blocked by the safety policy. Remove secrets, personal data, active content, or embedded instructions before resubmitting.',
+      zh: '提交内容被安全策略阻止。请移除秘密、个人信息、可执行内容或嵌入式指令后重新提交。',
+    },
     EVENT_PACK_FACTORY_BUILD_NOT_READY: {
       en: 'At least one approved pasted or Reader full-text source is required before claim extraction.',
       zh: '抽取主张前至少需要一个已批准的粘贴原文或 Reader 全文证据来源。',
@@ -287,6 +327,7 @@ function newPasteDraft(index: number): PasteDraft {
 
 function SourceCard({
   source,
+  childEvidenceSources,
   isZh,
   busy,
   readerEvidenceExists,
@@ -298,6 +339,7 @@ function SourceCard({
   onSaveRawText,
 }: {
   source: EventPackFactorySource;
+  childEvidenceSources?: EventPackFactorySource[];
   isZh: boolean;
   busy: boolean;
   readerEvidenceExists: boolean;
@@ -323,6 +365,7 @@ function SourceCard({
   const [rawDraft, setRawDraft] = useState('');
   const [rawError, setRawError] = useState<string>();
   const [rawLoading, setRawLoading] = useState(false);
+  const evidenceChild = childEvidenceSources?.[0];
 
   const loadRawText = async () => {
     if (!rawTextAvailable || rawText || rawLoading) return;
@@ -548,6 +591,60 @@ function SourceCard({
           </Button>
         ) : null}
       </div>
+      {discoveryOnly ? (
+        <section className="factory-source__lifecycle" aria-label={isZh ? '该来源的证据生命周期' : 'Evidence lifecycle for this source'}>
+          <h4>{isZh ? '从搜索线索到可用证据' : 'From search clue to usable evidence'}</h4>
+          <ol>
+            {[
+              {
+                label: isZh ? '发现线索' : 'Clue discovered',
+                complete: true,
+                detail: isZh ? '只能帮助定位原文，不能直接作证。' : 'Helps locate the source but cannot support a claim.',
+              },
+              {
+                label: isZh ? '允许读取全文' : 'Full-text retrieval allowed',
+                complete: source.reviewStatus === 'APPROVED',
+                detail: isZh ? '需要你先批准这次外部读取。' : 'Requires your approval before the external read.',
+              },
+              {
+                label: isZh ? 'Reader 全文已导入' : 'Reader full text imported',
+                complete: Boolean(evidenceChild),
+                detail: isZh ? '全文会作为同一条来源链中的独立证据修订。' : 'The full text becomes a separate evidence revision in this source chain.',
+              },
+              {
+                label: isZh ? '证据已人工批准' : 'Evidence approved by a person',
+                complete: evidenceChild?.reviewStatus === 'APPROVED',
+                detail: isZh ? '只有完成这一步，全文才能支持候选主张。' : 'Only this completed step permits the full text to support candidate claims.',
+              },
+            ].map((step, index) => (
+              <li key={step.label} className={step.complete ? 'is-complete' : 'is-pending'}>
+                <span aria-hidden="true">{step.complete ? '✓' : index + 1}</span>
+                <div><strong>{step.label}</strong><small>{step.detail}</small></div>
+              </li>
+            ))}
+          </ol>
+        </section>
+      ) : null}
+      {childEvidenceSources && childEvidenceSources.length > 0 ? (
+        <section className="factory-source__children" aria-label={isZh ? '由该线索读取的全文证据' : 'Full-text evidence read from this clue'}>
+          <h4>{isZh ? '同一来源链中的全文证据' : 'Full-text evidence in this source chain'}</h4>
+          {childEvidenceSources.map((childSource) => (
+            <SourceCard
+              key={childSource.id}
+              source={childSource}
+              isZh={isZh}
+              busy={busy}
+              readerEvidenceExists={false}
+              onReview={onReview}
+              onSelection={onSelection}
+              onPermanentDelete={onPermanentDelete}
+              onReader={onReader}
+              onLoadRawText={onLoadRawText}
+              onSaveRawText={onSaveRawText}
+            />
+          ))}
+        </section>
+      ) : null}
     </article>
   );
 }
@@ -622,6 +719,17 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
     if (idempotentAttempts.current.get(operation)?.clientRequestId === clientRequestId) {
       idempotentAttempts.current.delete(operation);
     }
+  };
+
+  const abandonMaterializeAttempt = () => {
+    if (!idempotentAttempts.current.has('materialize')) return;
+    const confirmed = window.confirm(isZh
+      ? '确认放弃旧请求的自动恢复，并为下一次提交生成全新的请求编号？旧请求可能已经产生费用；再次提交也可能产生新费用。当前表单不会丢失。'
+      : 'Abandon automatic recovery of the previous request and create a new request identifier for the next submission? The old request may already have been billed, and a new submission may incur another charge. Your form will be preserved.');
+    if (!confirmed) return;
+    idempotentAttempts.current.delete('materialize');
+    setError(undefined);
+    setActionError(undefined);
   };
 
   const selectedEngine = engines.find((item) => item.engine === searchEngine);
@@ -1124,8 +1232,8 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
     });
   };
 
-  const materialize = async (event: FormEvent) => {
-    event.preventDefault();
+  const materialize = async (event?: FormEvent) => {
+    event?.preventDefault();
     if (!snapshot) return;
     const validationErrors: MaterializeValidationErrors = {};
     if (approvedEvidence.length === 0) {
@@ -1209,6 +1317,7 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
       summaryZh: summaryZh.trim() || undefined,
       asOf: new Date(asOf).toISOString(),
       instrument: instrument.trim().toUpperCase(),
+      useLlm: true,
       maximumClaims,
       requestedImpactChannels: impactChannels,
       acknowledgedContentReview: true,
@@ -1307,6 +1416,10 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
     }
     return source.evidenceRole === 'EVIDENCE' && source.reviewStatus === 'APPROVED';
   }) ?? [];
+  const sourceIds = new Set(snapshot?.sources.map((source) => source.id) ?? []);
+  const displayedSources = sourceFilter === 'ALL'
+    ? filteredSources.filter((source) => !source.parentSourceId || !sourceIds.has(source.parentSourceId))
+    : filteredSources;
   const activeEvidenceCount = snapshot?.sources.filter(
     (source) => source.evidenceRole === 'EVIDENCE' && source.reviewStatus !== 'REJECTED',
   ).length ?? 0;
@@ -1374,6 +1487,16 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
             {isZh ? '前往 AI 配置' : 'Open AI configuration'}
           </Button>
         ) : null}
+        {actionError.code === 'EVENT_PACK_FACTORY_IDEMPOTENCY_OUTCOME_UNKNOWN' ? (
+          <div className="factory-action-error__recovery">
+            <Button kind="tertiary" size="sm" disabled={Boolean(busyAction)} onClick={() => void materialize()}>
+              {isZh ? '检查是否已生成' : 'Check for a recovered result'}
+            </Button>
+            <Button kind="danger--tertiary" size="sm" disabled={Boolean(busyAction)} onClick={abandonMaterializeAttempt}>
+              {isZh ? '放弃旧请求并准备新请求' : 'Abandon old request and prepare a new one'}
+            </Button>
+          </div>
+        ) : null}
       </div>
     ) : null
   );
@@ -1384,6 +1507,11 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
   if (state === 'error') {
     return <div className="page"><PageHeader title={isZh ? '添加新案例' : 'Add a case'} subtitle={isZh ? '从原始网页文字构建可审核事件包。' : 'Build reviewable Event Packs from raw webpage text.'} /><ErrorPanel detail={error} onRetry={() => void load()} /></div>;
   }
+
+  const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local browser time';
+  const asOfUtc = asOf && Number.isFinite(new Date(asOf).getTime())
+    ? new Date(asOf).toISOString()
+    : undefined;
 
   return (
     <div className="page page--factory">
@@ -1808,10 +1936,13 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
                   <EmptyState title={isZh ? '还没有来源' : 'No sources yet'} body={isZh ? '从上方粘贴原文或执行一次联网搜索。' : 'Paste source text or run a web search above.'} />
                 ) : (
                   <div className="factory-source-list">
-                    {filteredSources.map((source) => (
+                    {displayedSources.map((source) => (
                       <SourceCard
                         key={source.id}
                         source={source}
+                        childEvidenceSources={sourceFilter === 'ALL'
+                          ? snapshot.sources.filter((candidate) => candidate.parentSourceId === source.id)
+                          : undefined}
                         isZh={isZh}
                         busy={Boolean(busyAction)}
                         readerEvidenceExists={snapshot.sources.some(
@@ -1890,6 +2021,15 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
                         if (value.trim().length >= 3) clearMaterializeError('title');
                       }}
                     />
+                    <div className="factory-asof-explanation" aria-live="polite">
+                      <strong>{isZh ? '时间解释' : 'Time interpretation'}</strong>
+                      <span>{isZh
+                        ? `输入按浏览器时区 ${browserTimeZone} 解释。`
+                        : `The input is interpreted in the browser time zone: ${browserTimeZone}.`}</span>
+                      <code>{asOfUtc
+                        ? isZh ? `对应 UTC：${asOfUtc}` : `Equivalent UTC: ${asOfUtc}`
+                        : isZh ? '填写有效时间后显示对应 UTC。' : 'Enter a valid time to see the UTC equivalent.'}</code>
+                    </div>
                     <TextInput id="factory-pack-title-zh" labelText={isZh ? '中文标题（可选）' : 'Chinese title (optional)'} value={materializeTitleZh} maxLength={200} onChange={(event) => setMaterializeTitleZh(event.target.value)} />
                     <TextArea
                       id="factory-pack-summary"
@@ -2003,15 +2143,20 @@ export function EventPackFactoryPage({ navigate }: { navigate: Navigate }) {
                       </p>
                     ) : null}
                   </div>
-                  <Button
-                    type="submit"
-                    renderIcon={ArrowRight}
-                    disabled={Boolean(busyAction)}
-                  >
-                    {busyAction === 'materialize'
-                      ? isZh ? '正在抽取候选主张' : 'Extracting candidate claims'
-                      : isZh ? '生成并进入人工主张审核' : 'Generate and open human claim review'}
-                  </Button>
+                  <div className="factory-materialize-action-bar">
+                    <span>{isZh
+                      ? '生成后仍需逐条人工审核；不会自动批准或冻结。'
+                      : 'Generation still requires claim-by-claim human review; nothing is auto-approved or frozen.'}</span>
+                    <Button
+                      type="submit"
+                      renderIcon={ArrowRight}
+                      disabled={Boolean(busyAction)}
+                    >
+                      {busyAction === 'materialize'
+                        ? isZh ? '正在抽取候选主张' : 'Extracting candidate claims'
+                        : isZh ? '生成并进入人工主张审核' : 'Generate and open human claim review'}
+                    </Button>
+                  </div>
                 </form>
               </section>
             </>
