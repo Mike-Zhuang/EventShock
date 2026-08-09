@@ -13,7 +13,9 @@
 		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		Permissions-Policy "camera=(), microphone=(), geolocation=()"
-		Content-Security-Policy "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; img-src 'self' data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'"
+		# 与应用层安全头保持一致。前端样式全部由同源静态 CSS 提供，禁止内联样式，
+		# 避免边缘代理重新放宽后端已经收紧的 CSP。
+		Content-Security-Policy "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; img-src 'self' data:; font-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'"
 	}
 
 	# 默认直连应用；启用宝塔真实流量统计后改为 host.docker.internal:18080。
