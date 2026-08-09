@@ -73,6 +73,7 @@ def test_health_and_synthetic_case(tmp_path: Path) -> None:
         "service": "eventshock-api",
         "version": "0.1.0",
         "database": "ok",
+        "releaseCommit": "development",
     }
     assert healthResponse.headers["X-Trace-ID"].startswith("http-")
     assert casesResponse.json()["items"][0]["synthetic"] is True

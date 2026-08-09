@@ -927,6 +927,9 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             "service": "eventshock-api",
             "version": "0.1.0",
             "database": "ok",
+            # 自动部署与回滚门禁必须核对公网实例确实运行目标提交。
+            # 这里只公开不可变的提交哈希，不恢复用户量、队列或模型遥测等敏感信息。
+            "releaseCommit": settings.releaseCommit,
         }
 
     @appInstance.get("/.well-known/security.txt", response_class=PlainTextResponse)
