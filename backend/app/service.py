@@ -233,9 +233,7 @@ def _extractionQualityMetadata(
 ) -> dict[str, Any]:
     """把抽取质量与批量审核权限写入不可含糊的服务端契约。"""
 
-    ruleFallback = "RULE_FALLBACK" in extractionMode or extractionMode.startswith(
-        "RULE_ONLY"
-    )
+    ruleFallback = "RULE_FALLBACK" in extractionMode or extractionMode.startswith("RULE_ONLY")
     bulkApprovalAllowed = not ruleFallback and all(
         claim.get("bulkApprovalEligible", True) is not False for claim in claims
     )
@@ -372,9 +370,7 @@ class EventPackService:
         # ``None`` 表示调用方明确选择了人工规则抽取；空列表则是模型主动
         # abstain 的有效状态，绝不能被 truthy 回退悄悄替换成句子切分结果。
         extractedClaims = (
-            self.extractCandidateClaims(requestData, maximumClaims=16)
-            if claims is None
-            else claims
+            self.extractCandidateClaims(requestData, maximumClaims=16) if claims is None else claims
         )
         extractionQuality = _extractionQualityMetadata(extractionMode, extractedClaims)
         manifest = {
@@ -1676,9 +1672,7 @@ class ExperimentService:
                 409,
                 "Rule continuation is available only while hybrid cognition is preparing.",
             )
-        if not bool(
-            experiment["request"].get("llmPolicy", {}).get("fallbackToRules", False)
-        ):
+        if not bool(experiment["request"].get("llmPolicy", {}).get("fallbackToRules", False)):
             raise ApiError(
                 "COGNITION_RULE_CONTINUATION_DISABLED",
                 409,

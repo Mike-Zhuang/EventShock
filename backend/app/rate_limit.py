@@ -51,9 +51,7 @@ class SlidingWindowRateLimiter:
                 rule for rule in rules if rule.protected and self.persistencePath is not None
             ]
             memoryRules = [
-                rule
-                for rule in rules
-                if not (rule.protected and self.persistencePath is not None)
+                rule for rule in rules if not (rule.protected and self.persistencePath is not None)
             ]
             for rule in memoryRules:
                 if rule.protected:

@@ -69,8 +69,9 @@ def validatePassword(password: str, *, identity: str | None = None) -> None:
     normalizedAlphanumeric = re.sub(r"[^a-z0-9]", "", normalized)
     if any(fragment in normalizedAlphanumeric for fragment in _identityFragments(identity)):
         raise PasswordPolicyError("password must not contain the account email name")
-    if normalized in "0123456789abcdefghijklmnopqrstuvwxyz" or normalized in (
-        "0123456789abcdefghijklmnopqrstuvwxyz"[::-1]
+    if (
+        normalized in "0123456789abcdefghijklmnopqrstuvwxyz"
+        or normalized in ("0123456789abcdefghijklmnopqrstuvwxyz"[::-1])
     ):
         raise PasswordPolicyError("password must not be a simple sequence")
 

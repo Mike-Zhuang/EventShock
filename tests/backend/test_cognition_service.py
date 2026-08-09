@@ -502,9 +502,7 @@ def test_guided_event_time_boundary_uses_injected_server_clock(
     assert payload["serverTimeUtc"] == fixedNow.isoformat()
     assert proposal.proposedEventMetadata is not None
     assert proposal.proposedEventMetadata.asOfPrecision == precision
-    assert (
-        "FUTURE_EVENT_REQUIRES_HUMAN_CONFIRMATION" in proposal.blockedReasons
-    ) is expectFuture
+    assert ("FUTURE_EVENT_REQUIRES_HUMAN_CONFIRMATION" in proposal.blockedReasons) is expectFuture
 
 
 def test_guided_prompt_requires_exact_day_when_only_month_is_known() -> None:

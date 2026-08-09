@@ -1055,9 +1055,7 @@ class CognitionService:
                     terminalAnswerResult = semanticRepairResult
                     semanticStatus = "REPAIRED"
                 else:
-                    violationValues = sorted(
-                        {code.value for code in semanticViolationCodes}
-                    )
+                    violationValues = sorted({code.value for code in semanticViolationCodes})
                     raise ModelGatewayError(
                         FailureCode.MODEL_RESPONSE_INVALID,
                         "result interpretation failed semantic validation after one repair",

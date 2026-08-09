@@ -600,9 +600,7 @@ def _scanEncodedPromptInjection(text: str, field: str) -> list[_RawFinding]:
     """仅在解码结果命中高风险指令时告警，避免把普通编码资料一概拒绝。"""
 
     candidates: list[tuple[int, int, str]] = []
-    base64Pattern = re.compile(
-        r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{24,4096}={0,2}(?![A-Za-z0-9+/])"
-    )
+    base64Pattern = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{24,4096}={0,2}(?![A-Za-z0-9+/])")
     for match in base64Pattern.finditer(text):
         try:
             decoded = base64.b64decode(match.group(0), validate=True).decode("utf-8")
