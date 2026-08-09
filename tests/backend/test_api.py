@@ -63,6 +63,7 @@ def approveAndFreeze(client: TestClient, sessionId: str) -> None:
 def test_health_and_synthetic_case(tmp_path: Path) -> None:
     with TestClient(createApp(tmp_path)) as client:
         healthResponse = client.get("/api/health")
+        securityContactResponse = client.get("/.well-known/security.txt")
         casesResponse = client.get("/api/v1/cases")
         metricsResponse = client.get("/api/v1/system/metrics")
 
@@ -76,6 +77,16 @@ def test_health_and_synthetic_case(tmp_path: Path) -> None:
         "releaseCommit": "development",
     }
     assert healthResponse.headers["X-Trace-ID"].startswith("http-")
+    assert securityContactResponse.status_code == 200
+    assert (
+        "Contact: https://github.com/Mike-Zhuang/EventShock/issues/new/choose"
+        in securityContactResponse.text
+    )
+    assert (
+        "Policy: https://github.com/Mike-Zhuang/EventShock/blob/main/docs/governance/security.md"
+        in securityContactResponse.text
+    )
+    assert "EventShock-Lab" not in securityContactResponse.text
     assert casesResponse.json()["items"][0]["synthetic"] is True
     assert casesResponse.json()["items"][0]["titleZh"]
     assert metricsResponse.status_code == 422

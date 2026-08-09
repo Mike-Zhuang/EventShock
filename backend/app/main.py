@@ -935,10 +935,10 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     @appInstance.get("/.well-known/security.txt", response_class=PlainTextResponse)
     async def getSecurityContact() -> str:
         return (
-            "Contact: https://github.com/Mike-Zhuang/EventShock-Lab/issues/new/choose\n"
+            "Contact: https://github.com/Mike-Zhuang/EventShock/issues/new/choose\n"
             "Preferred-Languages: en, zh\n"
             "Canonical: https://eventshock.mikezhuang.cn/.well-known/security.txt\n"
-            "Policy: https://github.com/Mike-Zhuang/EventShock-Lab/security/policy\n"
+            "Policy: https://github.com/Mike-Zhuang/EventShock/blob/main/docs/governance/security.md\n"
             "Expires: 2027-08-08T23:59:59Z\n"
         )
 
