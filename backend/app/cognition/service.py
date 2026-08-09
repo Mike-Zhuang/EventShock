@@ -78,7 +78,7 @@ from backend.app.cognition.result_interpreter import (
     toolResultsPayload,
 )
 from backend.app.cognition.result_semantics import (
-    deterministicInterpretationFallback,
+    buildResultFactCatalog,
     semanticRepairInstruction,
     validateInterpretationSemantics,
 )
@@ -93,7 +93,11 @@ from backend.app.guided_workflow.models import (
     GuidedWorkflowProposal,
     GuidedWorkflowView,
 )
-from backend.app.security import UnsafeModelOutputError
+from backend.app.security import (
+    ContentPolicyDecision,
+    UnsafeModelOutputError,
+    scanTextContent,
+)
 
 SourceType = Literal["OFFICIAL", "REPORTING", "ESTIMATE", "USER_PROVIDED"]
 STRUCTURED_SUCCESS_RELEASE_THRESHOLD = 0.95
@@ -319,6 +323,7 @@ class CognitionService:
         gatewayFactory: GatewayFactory | None = None,
         modelPolicy: ModelPolicy | None = None,
         clock: Callable[[], float] = time.perf_counter,
+        utcNow: Callable[[], datetime] | None = None,
         telemetryLoader: TelemetryLoader | None = None,
         telemetryRecorder: TelemetryRecorder | None = None,
     ) -> None:
@@ -327,6 +332,7 @@ class CognitionService:
         self._gatewayFactory = gatewayFactory or _defaultGatewayFactory
         self._modelPolicy = modelPolicy or ModelPolicy()
         self._clock = clock
+        self._utcNow = utcNow or (lambda: datetime.now(UTC))
         persistedTelemetry = telemetryLoader() if telemetryLoader is not None else None
         self._telemetry = _TelemetryState(persistedTelemetry)
         self._telemetryLock = threading.RLock()
@@ -622,7 +628,7 @@ class CognitionService:
             }
             for message in workflow.messages[-6:]
         ]
-        serverTimeUtc = datetime.now(UTC)
+        serverTimeUtc = self._utcNow().astimezone(UTC)
         payload = {
             "serverTimeUtc": serverTimeUtc.isoformat(),
             "current_stage": workflow.stage.value,
@@ -989,6 +995,7 @@ class CognitionService:
                     answerResult.data,
                     semanticReport,
                     language=language,
+                    catalog=buildResultFactCatalog(result),
                 ),
             }
             semanticRepairRequest = self._buildRequest(
@@ -1048,33 +1055,32 @@ class CognitionService:
                     terminalAnswerResult = semanticRepairResult
                     semanticStatus = "REPAIRED"
                 else:
-                    deterministicFallbackUsed = True
-                    semanticStatus = "DETERMINISTIC_FALLBACK"
-                    terminalAnswerResult = replace(
-                        semanticRepairResult,
-                        data=deterministicInterpretationFallback(
-                            result,
-                            language=language,
-                            includeAnalysisSummary=includeAnalysisSummary,
-                        ),
+                    violationValues = sorted(
+                        {code.value for code in semanticViolationCodes}
+                    )
+                    raise ModelGatewayError(
+                        FailureCode.MODEL_RESPONSE_INVALID,
+                        "result interpretation failed semantic validation after one repair",
+                        attempts=transportAttempts,
+                        uncertainBillableAttempts=uncertainBillableAttempts,
+                        repairUsed=True,
+                        safeDiagnostics={
+                            "failureStage": "SEMANTIC_REPAIR",
+                            "violationCodes": ",".join(violationValues)[:512],
+                        },
                     )
             except ModelGatewayError as error:
-                # 语义修复失败不能放行初始候选，也不能触发第二次语义修复。
-                cacheHit = False
-                repairUsed = error.repairUsed or repairUsed
-                transportAttempts += max(0, error.attempts)
-                uncertainBillableAttempts += max(0, error.uncertainBillableAttempts)
-                failureCodes.append(error.code)
-                deterministicFallbackUsed = True
-                semanticStatus = "DETERMINISTIC_FALLBACK"
-                terminalAnswerResult = replace(
-                    answerResult,
-                    data=deterministicInterpretationFallback(
-                        result,
-                        language=language,
-                        includeAnalysisSummary=includeAnalysisSummary,
-                    ),
-                )
+                # 严格解释模式中，语义修复失败必须成为显式失败事件。不得把
+                # 固定服务器模板保存成 AI 回答，也不得盲目再次请求而重复计费。
+                error.repairUsed = True
+                if not error.safeDiagnostics:
+                    error.safeDiagnostics = {
+                        "failureStage": "SEMANTIC_REPAIR",
+                        "violationCodes": ",".join(
+                            sorted({code.value for code in semanticViolationCodes})
+                        )[:512],
+                    }
+                raise
 
         # 同一代码可能同时出现在初始候选与修复候选中；历史只保留稳定去重集合。
         semanticViolationCodeValues = tuple(sorted({code.value for code in semanticViolationCodes}))
@@ -1259,6 +1265,7 @@ class CognitionService:
                         "model output failed deterministic disclosure safety validation",
                         safeDiagnostics=error.auditMetadata(),
                     ) from error
+                self._validateModelGeneratedText(result.data)
                 if resultValidator is not None:
                     resultValidator(result)
                 if (
@@ -1284,6 +1291,55 @@ class CognitionService:
 
         self._recordResult(result)
         return result
+
+    @staticmethod
+    def _validateModelGeneratedText(data: BaseModel) -> None:
+        """模型自由文本在展示或持久化前必须再次通过确定性内容扫描。"""
+
+        textFieldNames = {
+            "analysis_summary",
+            "answer",
+            "assistantMessage",
+            "blockedReasons",
+            "event_pack_claims",
+            "follow_up_suggestions",
+            "impact_channel_rationale",
+            "nextQuestionOptions",
+            "public_message",
+            "summary",
+            "text",
+            "text_zh",
+        }
+
+        def walk(value: object, path: str = "modelOutput") -> None:
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    childPath = f"{path}.{key}"
+                    if key in textFieldNames:
+                        walk(child, childPath)
+                    elif isinstance(child, (dict, list, tuple)):
+                        walk(child, childPath)
+                return
+            if isinstance(value, (list, tuple)):
+                for index, child in enumerate(value):
+                    walk(child, f"{path}[{index}]")
+                return
+            if not isinstance(value, str) or not value:
+                return
+            scan = scanTextContent(value, field=path)
+            if scan.decision is not ContentPolicyDecision.ALLOW:
+                raise ModelGatewayError(
+                    FailureCode.PROMPT_DISCLOSURE_BLOCKED,
+                    "model-generated text failed deterministic content safety validation",
+                    safeDiagnostics={
+                        "failureStage": "OUTPUT_CONTENT_SCAN",
+                        "violationCodes": ",".join(
+                            sorted({finding.code for finding in scan.findings})
+                        )[:512],
+                    },
+                )
+
+        walk(data.model_dump(mode="python"))
 
     def _buildRequest(
         self,

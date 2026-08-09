@@ -85,6 +85,18 @@ class PublicUser(BaseModel):
     lastLoginAt: datetime | None = None
 
 
+class SessionView(BaseModel):
+    """只暴露会话治理所需元数据，不返回令牌或 CSRF 摘要。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    current: bool
+    createdAt: datetime
+    lastSeenAt: datetime
+    expiresAt: datetime
+
+
 class AdminUserView(PublicUser):
     experimentCount: int = Field(default=0, ge=0)
     activityCount: int = Field(default=0, ge=0)

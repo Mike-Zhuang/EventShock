@@ -16,7 +16,7 @@ from backend.app.legal import legalDocument
 from backend.app.main import createApp
 
 ADMIN_EMAIL = "admin@example.com"
-ADMIN_PASSWORD = "Administrator password!"
+ADMIN_PASSWORD = "Correct Horse Battery 47!"
 AUTH_SECRET = "integration-auth-secret-with-at-least-thirty-two-bytes"
 
 
@@ -538,7 +538,7 @@ def test_email_registration_reset_and_user_data_isolation(
     monkeypatch.setattr(mainModule, "SmtpVerificationMailer", CapturingMailer)
     bootstrapTestAdmin(tmp_path)
     userEmail = "analyst@example.com"
-    userPassword = "Analyst password 123!"
+    userPassword = "Correct Horse Battery 73!"
     replacementPassword = "Replacement password 456!"
 
     with TestClient(createApp(tmp_path), base_url="https://testserver") as client:
@@ -616,7 +616,7 @@ def test_authenticated_user_can_export_and_delete_account_data(
     monkeypatch.setattr(mainModule, "SmtpVerificationMailer", CapturingMailer)
     bootstrapTestAdmin(tmp_path)
     userEmail = "privacy-user@example.com"
-    userPassword = "Privacy password 123!"
+    userPassword = "Correct Horse Battery 83!"
 
     with TestClient(createApp(tmp_path), base_url="https://testserver") as client:
         sent = client.post(
@@ -766,7 +766,7 @@ def test_authenticated_users_on_same_nat_have_independent_interpretation_quota(
     monkeypatch.setattr(mainModule, "SmtpVerificationMailer", CapturingMailer)
     bootstrapTestAdmin(tmp_path)
     userEmail = "shared-nat-analyst@example.com"
-    userPassword = "Analyst password 123!"
+    userPassword = "Correct Horse Battery 93!"
     url = "/api/v1/experiments/missing-experiment/interpretation-chat/stream"
     sharedIp = "203.0.113.82"
 

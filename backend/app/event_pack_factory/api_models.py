@@ -137,6 +137,7 @@ class FactoryMaterializeRequest(StrictFactoryModel):
     summaryZh: str | None = Field(default=None, max_length=1_000)
     asOf: datetime
     instrument: str = Field(default="CUSTOM", min_length=1, max_length=32)
+    useLlm: StrictBool = True
     maximumClaims: int = Field(default=16, ge=1, le=50)
     requestedImpactChannels: tuple[str, ...] = Field(
         default=("belief", "liquidity", "passiveFlow", "stopLoss"),

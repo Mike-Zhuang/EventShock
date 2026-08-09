@@ -245,7 +245,7 @@ describe('移动主导航', () => {
       firstGoal: 'RESEARCH_NEW_EVENT',
       workspaceMode: 'EXPERT',
     }));
-    await waitFor(() => expect(window.location.hash).toBe('#/study'));
+    await waitFor(() => expect(window.location.hash).toBe('#/guided'));
   });
 
   it('用户要求减少动态效果时以无动画方式定位目标', async () => {
@@ -637,7 +637,7 @@ describe('移动主导航', () => {
     });
 
     const researchSections = Array.from(document.querySelectorAll<HTMLElement>('.navigation-section'))
-      .filter((section) => section.getAttribute('aria-label') === 'Research tools');
+      .filter((section) => section.getAttribute('aria-label') === 'Advanced research tools');
     expect(researchSections).toHaveLength(2);
     researchSections.forEach((section) => {
       expect(within(section).getByRole('button', { name: 'Study Workbench', hidden: true })).toBeInTheDocument();
@@ -887,7 +887,7 @@ describe('移动主导航', () => {
       assistancePreference: 'DIRECT_CONTROL',
       firstGoal: 'DESIGN_FULL_EXPERIMENT',
     }));
-    await waitFor(() => expect(window.location.hash).toBe('#/study'));
+    await waitFor(() => expect(window.location.hash).toBe('#/guided'));
   });
 
   it('收到全局 401 会话失效事件后卸载工作流并返回登录页', async () => {

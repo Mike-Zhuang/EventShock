@@ -762,7 +762,7 @@ export function ResultInterpretationAssistant({
     <header className="result-assistant__header">
       <div>
         <span className="eyebrow"><Brain size={18} weight="duotone" aria-hidden="true" />{t('results.assistantEyebrow')}</span>
-        <h2 id="result-assistant-heading">{t('results.assistantTitle')}</h2>
+        <h2 id="result-assistant-heading" tabIndex={-1}>{t('results.assistantTitle')}</h2>
         <p>{t('results.assistantSubtitle')}</p>
       </div>
       {config?.configured ? (
@@ -813,6 +813,11 @@ export function ResultInterpretationAssistant({
         className="result-assistant__history"
         aria-labelledby={`result-assistant-history-${experimentId}`}
       >
+        <details>
+          <summary>
+            {t('results.assistantHistoryTitle')}
+            <small>{historyItems.length > 0 ? ` (${historyItems.length})` : ''}</small>
+          </summary>
         <header>
           <div>
             <h3 id={`result-assistant-history-${experimentId}`}>
@@ -911,6 +916,7 @@ export function ResultInterpretationAssistant({
             subtitle={historyDetailError ?? t('results.assistantHistoryErrorBody')}
           />
         ) : null}
+        </details>
       </section>
 
       {configState === 'loading' ? (

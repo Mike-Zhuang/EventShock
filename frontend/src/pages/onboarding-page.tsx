@@ -123,7 +123,9 @@ export function OnboardingPage({
         assistancePreference,
         firstGoal,
       });
-      window.history.replaceState(null, '', workspaceMode === 'GUIDED' ? '#/guided' : '#/study');
+      // 研究工作台是高级验证工具，不应成为首次登录后的默认入口。
+      // 专家仍可从侧栏直接进入，但登录后先恢复/开始完整实验主流程。
+      window.history.replaceState(null, '', '#/guided');
     } catch {
       setError(t('onboarding.saveFailed'));
     } finally {

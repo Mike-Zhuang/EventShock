@@ -34,7 +34,11 @@ from backend.app.cognition import (
     PersistentCredentialUnavailableError,
     SessionConfigStore,
 )
-from backend.app.cognition.prompts import UNTRUSTED_DATA_END, UNTRUSTED_DATA_START
+from backend.app.cognition.prompts import (
+    GUIDED_WORKFLOW_PROMPT,
+    UNTRUSTED_DATA_END,
+    UNTRUSTED_DATA_START,
+)
 from backend.app.database import Database
 from backend.app.guided_workflow.models import (
     GuidedStage,
@@ -242,9 +246,13 @@ def configuredService(
     outcomes: list[FakeOutcome],
     *,
     thinkingEnabled: bool = False,
+    utcNow: datetime | None = None,
 ) -> tuple[CognitionService, GatewayHarness]:
     harness = GatewayHarness(outcomes)
-    service = CognitionService(gatewayFactory=harness)
+    service = CognitionService(
+        gatewayFactory=harness,
+        utcNow=(lambda: utcNow) if utcNow is not None else None,
+    )
     service.setConfig(
         sessionId=SESSION_ID,
         apiKey=API_KEY,
@@ -431,6 +439,81 @@ def test_guided_future_event_is_warned_but_not_rejected() -> None:
     assert proposal.proposedEventMetadata.asOfPrecision == "DAY"
     assert "FUTURE_EVENT_REQUIRES_HUMAN_CONFIRMATION" in proposal.blockedReasons
     assert "planned future-event scenario" in proposal.assistantMessage
+
+
+@pytest.mark.parametrize(
+    ("asOf", "precision", "expectFuture"),
+    (
+        ("2026-08-08T23:59:59-07:00", "SECOND", False),
+        ("2026-08-09T12:00:00Z", "SECOND", False),
+        ("2026-08-09T05:00:00-07:00", "DAY", False),
+        ("2026-08-09T05:00:01-07:00", "SECOND", True),
+        ("2026-08-10T00:00:00+09:00", "DAY", True),
+    ),
+    ids=("past-offset", "equal-utc", "same-instant-day", "future-by-second", "future-timezone"),
+)
+def test_guided_event_time_boundary_uses_injected_server_clock(
+    asOf: str,
+    precision: str,
+    expectFuture: bool,
+) -> None:
+    fixedNow = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
+    proposalResult = GuidedWorkflowProposal(
+        stage=GuidedStage.EVENT_GOAL,
+        assistantMessage="Review the bounded event time before applying it.",
+        clarificationRequired=False,
+        proposedEventMetadata={
+            "title": "Time-boundary case",
+            "summary": "A test of server-authoritative time comparison.",
+            "instrument": "TEST",
+            "asOf": asOf,
+            "asOfPrecision": precision,
+            "researchQuestion": "How does one bounded intervention change liquidity?",
+        },
+        readyForHumanReview=True,
+    )
+    service, harness = configuredService([FakeOutcome(proposalResult)], utcNow=fixedNow)
+    workflow = GuidedWorkflowView(
+        id=f"guided-time-boundary-{precision.lower()}-001",
+        stage=GuidedStage.EVENT_GOAL,
+        status=GuidedWorkflowStatus.ACTIVE,
+        version=1,
+        language="en",
+        draft=GuidedWorkflowDraft(),
+        messages=(),
+        createdAt=KNOWN_AT,
+        updatedAt=KNOWN_AT,
+    )
+
+    proposal = asyncio.run(
+        service.proposeGuidedWorkflow(
+            sessionId=SESSION_ID,
+            workflow=workflow,
+            latestUserMessage="Use the supplied event time.",
+            language="en",
+        )
+    )
+    payload = json.loads(
+        harness.requests[0]
+        .userContent.split(f"{UNTRUSTED_DATA_START}\n", maxsplit=1)[1]
+        .split(f"\n{UNTRUSTED_DATA_END}", maxsplit=1)[0]
+    )
+
+    assert payload["serverTimeUtc"] == fixedNow.isoformat()
+    assert proposal.proposedEventMetadata is not None
+    assert proposal.proposedEventMetadata.asOfPrecision == precision
+    assert (
+        "FUTURE_EVENT_REQUIRES_HUMAN_CONFIRMATION" in proposal.blockedReasons
+    ) is expectFuture
+
+
+def test_guided_prompt_requires_exact_day_when_only_month_is_known() -> None:
+    prompt = CognitionService.getPromptRegistry()
+    guided = next(item for item in prompt if item.name == "guided_workflow")
+
+    assert guided.version.startswith("guided_workflow_v")
+    assert "only a month" in GUIDED_WORKFLOW_PROMPT.systemPrompt
+    assert "do not invent a day" in GUIDED_WORKFLOW_PROMPT.systemPrompt
 
 
 def test_service_propagates_non_zhipu_provider_to_request_and_result() -> None:

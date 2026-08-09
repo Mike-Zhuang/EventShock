@@ -386,6 +386,18 @@ describe('Event Pack Factory page', () => {
     expect(await screen.findByRole('button', {
       name: 'Full page imported; separate review pending',
     })).toBeDisabled();
+    expect(screen.getByRole('region', {
+      name: 'Evidence lifecycle for this source',
+    })).toHaveTextContent('Clue discovered');
+    expect(screen.getByRole('region', {
+      name: 'Evidence lifecycle for this source',
+    })).toHaveTextContent('Reader full text imported');
+    const sourceChain = screen.getByRole('region', {
+      name: 'Full-text evidence read from this clue',
+    });
+    expect(within(sourceChain).getByText('Reader full text pending independent human review.'))
+      .toBeInTheDocument();
+    expect(screen.getAllByText('Official index notice')).toHaveLength(2);
   });
 
   it('fetches raw text on demand and requires confirmation before resetting review', async () => {
@@ -836,8 +848,7 @@ describe('guided workflow page', () => {
       .toBeInTheDocument();
     expect(composer).toHaveValue('Keep this provider-failure input.');
 
-    const historySummary = screen.getByText(/Model call and recovery history/);
-    await user.click(historySummary);
+    await user.click(screen.getByText('History and technical records'));
     expect(screen.getByText(/Call 1 · Outcome requires a decision/)).toBeVisible();
     expect(screen.queryByText(/Call 1 · Request in progress/)).not.toBeInTheDocument();
   });
@@ -931,7 +942,7 @@ describe('guided workflow page', () => {
     rawRequestIds.forEach((item) => expect(item).not.toBeVisible());
     const operationHistory = screen.getByText(/Model call and recovery history/).closest('details');
     if (!operationHistory) throw new Error('模型调用历史未渲染。');
-    await user.click(within(operationHistory).getByText(/Model call and recovery history/));
+    await user.click(within(operationHistory).getByText('History and technical records'));
     const historyTechnical = within(operationHistory).getByText('Technical details');
     await user.click(historyTechnical);
     expect(within(operationHistory).getByText(unknownGuidedOperation.clientRequestId)).toBeVisible();

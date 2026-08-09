@@ -183,6 +183,7 @@ export function EventPackUploadModal({
       instrument: instrument.trim(),
       sources: normalizedSources,
       acknowledgedContentReview,
+      useLlm,
     };
     try {
       if (isReextract) {
@@ -247,7 +248,11 @@ export function EventPackUploadModal({
           <TextArea id="upload-pack-summary-zh" labelText={isZh ? '中文研究摘要（可选）' : 'Chinese research summary (optional)'} value={summaryZh} maxCount={1_000} enableCounter onChange={(event) => setSummaryZh(event.target.value)} />
           <TextInput id="upload-instrument" labelText={isZh ? '证券代码' : 'Instrument symbol'} value={instrument} maxLength={32} onChange={(event) => setInstrument(event.target.value.toUpperCase())} />
           <TextInput id="upload-as-of" type="datetime-local" labelText={isZh ? '事件包截止时间 (asOf)' : 'Event Pack cutoff (asOf)'} value={asOf} onChange={(event) => setAsOf(event.target.value)} />
+          <Toggle id="create-use-llm" labelText={isZh ? '候选主张抽取方式' : 'Candidate-claim extraction mode'} labelA={isZh ? '显式规则模式' : 'Explicit rules'} labelB={isZh ? '结构化 AI' : 'Structured AI'} toggled={useLlm} onToggle={setUseLlm} />
         </div>
+        <p className="modal-help">{useLlm
+          ? isZh ? '结构化 AI 失败时会明确报错，不会静默回退到规则结果。' : 'A structured-AI failure is reported explicitly and never silently replaced with rule output.'
+          : isZh ? '你已明确选择确定性规则抽取；结果会标记为规则模式并仍需人工审核。' : 'You explicitly selected deterministic rule extraction; results are labeled as rule mode and still require human review.'}</p>
       </section> : (
         <section className="upload-pack-fields" aria-labelledby="reextract-settings-heading">
           <h3 id="reextract-settings-heading">{isZh ? '抽取设置' : 'Extraction settings'}</h3>

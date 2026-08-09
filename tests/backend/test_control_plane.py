@@ -338,6 +338,7 @@ def test_uploaded_source_text_is_hashed_but_not_retained(tmp_path: Path) -> None
                 "summary": "A source-bound event used to verify the upload and review workflow.",
                 "asOf": "2026-07-10T15:00:00Z",
                 "instrument": "TEST",
+                "useLlm": False,
                 "sources": [
                     {
                         "sourceId": "official-upload-001",
@@ -393,6 +394,7 @@ def test_frozen_event_pack_cannot_be_reopened_by_concurrent_reextraction(
                 "summary": "A source-backed event for frozen-state concurrency testing.",
                 "asOf": "2026-07-10T15:00:00Z",
                 "instrument": "TEST",
+                "useLlm": False,
                 "sources": [sourcePayload],
             },
         )
@@ -524,6 +526,7 @@ def test_review_acknowledgement_redacts_pii_and_reextract_scans_first(tmp_path: 
         "summary": "A source event that exercises the explicit review workflow.",
         "asOf": "2026-07-10T15:00:00Z",
         "instrument": "TEST",
+        "useLlm": False,
         "sources": [
             {
                 "sourceId": "review-source-001",
@@ -683,7 +686,10 @@ def test_governance_endpoints_do_not_fabricate_release_evidence(tmp_path: Path) 
     with TestClient(createApp(tmp_path)) as client:
         components = client.get("/api/v1/governance/components")
         redTeam = client.get("/api/v1/governance/red-team")
-        releaseGate = client.get("/api/v1/governance/release-gate")
+        releaseGate = client.get(
+            "/api/v1/governance/release-gate",
+            headers={"X-Session-ID": SESSION_ID},
+        )
         ladder = client.get("/api/v1/validation/ladder")
 
     assert components.status_code == 200
@@ -705,7 +711,7 @@ def test_cognition_eval_distinguishes_grader_self_test_from_live_model(tmp_path:
             headers={"X-Session-ID": SESSION_ID},
             json={"mode": "CODE_GRADER_SELF_TEST", "maximumCases": 3},
         )
-        summary = client.get("/api/v1/evals")
+        summary = client.get("/api/v1/evals", headers={"X-Session-ID": SESSION_ID})
         liveWithoutCredential = client.post(
             "/api/v1/evals/run",
             headers={"X-Session-ID": SESSION_ID},

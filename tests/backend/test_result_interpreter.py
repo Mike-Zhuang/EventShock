@@ -444,34 +444,30 @@ def test_semantically_invalid_answer_is_repaired_once_before_return() -> None:
     assert harness.requests[1].allowedEvidenceIds == harness.requests[0].allowedEvidenceIds
 
 
-def test_semantic_repair_failure_returns_deterministic_fallback_only() -> None:
+def test_semantic_repair_failure_fails_closed_without_ai_fallback() -> None:
     rejectedAnswer = metricAnswer("The maxSpreadBps paired median decreased by 1.5.")
     service, harness = configuredService([FakeOutcome(rejectedAnswer), FakeOutcome(rejectedAnswer)])
 
-    run = asyncio.run(
-        service.interpretExperimentResult(
-            sessionId=SESSION_ID,
-            result=sampleResult(),
-            messages=({"role": "user", "content": "Explain the primary result."},),
-            language="en",
-            initial=True,
-            includeAnalysisSummary=True,
+    with pytest.raises(ModelGatewayError) as captured:
+        asyncio.run(
+            service.interpretExperimentResult(
+                sessionId=SESSION_ID,
+                result=sampleResult(),
+                messages=({"role": "user", "content": "Explain the primary result."},),
+                language="en",
+                initial=True,
+                includeAnalysisSummary=True,
+            )
         )
-    )
 
-    assert run.semantic_validation_status == "DETERMINISTIC_FALLBACK"
-    assert run.deterministic_fallback_used is True
-    assert run.semantic_violation_codes == (SemanticViolationCode.DIRECTION_MISMATCH.value,)
-    assert rejectedAnswer.answer not in run.interpretation.answer
-    assert "## Server-verified results" in run.interpretation.answer
-    assert set(run.interpretation.grounding_references) <= {
-        activity.evidence_id for activity in run.tool_activity
-    }
-    assert run.model_calls == 2
+    assert captured.value.code is FailureCode.MODEL_RESPONSE_INVALID
+    assert captured.value.repairUsed is True
+    assert captured.value.safeDiagnostics["failureStage"] == "SEMANTIC_REPAIR"
+    assert "DIRECTION_MISMATCH" in captured.value.safeDiagnostics["violationCodes"]
     assert len(harness.requests) == 2
 
 
-def test_semantic_repair_gateway_error_also_uses_deterministic_fallback() -> None:
+def test_semantic_repair_gateway_error_is_returned_without_ai_fallback() -> None:
     rejectedAnswer = metricAnswer("The maxSpreadBps paired median decreased by 1.5.")
     service, _harness = configuredService(
         [
@@ -488,23 +484,21 @@ def test_semantic_repair_gateway_error_also_uses_deterministic_fallback() -> Non
         ]
     )
 
-    run = asyncio.run(
-        service.interpretExperimentResult(
-            sessionId=SESSION_ID,
-            result=sampleResult(),
-            messages=({"role": "user", "content": "Explain the primary result."},),
-            language="en",
-            initial=True,
-            includeAnalysisSummary=False,
+    with pytest.raises(ModelGatewayError) as captured:
+        asyncio.run(
+            service.interpretExperimentResult(
+                sessionId=SESSION_ID,
+                result=sampleResult(),
+                messages=({"role": "user", "content": "Explain the primary result."},),
+                language="en",
+                initial=True,
+                includeAnalysisSummary=False,
+            )
         )
-    )
 
-    assert run.semantic_validation_status == "DETERMINISTIC_FALLBACK"
-    assert run.deterministic_fallback_used is True
-    assert run.failure_codes == (FailureCode.MODEL_TIMEOUT.value,)
-    assert run.transport_attempts == 2
-    assert run.uncertain_billable_attempts == 1
-    assert rejectedAnswer.answer not in run.interpretation.answer
+    assert captured.value.code is FailureCode.MODEL_TIMEOUT
+    assert captured.value.repairUsed is True
+    assert captured.value.safeDiagnostics["failureStage"] == "SEMANTIC_REPAIR"
 
 
 def test_follow_up_plans_tools_and_keeps_mandatory_boundary_slices() -> None:

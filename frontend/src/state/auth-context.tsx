@@ -104,7 +104,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         window.history.replaceState(
           null,
           '',
-          session.preferences.workspaceMode === 'GUIDED' ? '#/guided' : '#/study',
+          '#/guided',
         );
       }
     } catch (sessionError) {
@@ -148,7 +148,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       window.history.replaceState(
         null,
         '',
-        session.preferences.workspaceMode === 'GUIDED' ? '#/guided' : '#/study',
+        '#/guided',
       );
     }
   }, [applyAuthenticatedSession]);

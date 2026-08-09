@@ -13,13 +13,13 @@ import {
   Trash,
   WarningCircle,
 } from '@phosphor-icons/react';
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import {
   api,
   ApiError,
   AUTH_SESSION_EXPIRED_EVENT,
 } from '../api/client';
-import type { AccountDataExport } from '../api/types';
+import type { AccountDataExport, AccountSession } from '../api/types';
 import { PageHeader } from '../components/common';
 import { useI18n } from '../i18n';
 import { useAuth } from '../state/auth-context';
@@ -49,11 +49,46 @@ export function AccountPrivacyPage() {
   const [deleteConfirmation, setDeleteConfirmation] = useState('');
   const [exportBusy, setExportBusy] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [sessions, setSessions] = useState<AccountSession[]>([]);
+  const [sessionsBusy, setSessionsBusy] = useState(true);
+  const [sessionError, setSessionError] = useState<string>();
   const [exportNotice, setExportNotice] = useState<
     { kind: 'success' | 'error'; message: string } | undefined
   >();
   const [deleteError, setDeleteError] = useState<string>();
   const anyRequestBusy = exportBusy || deleteBusy;
+
+  const loadSessions = async () => {
+    setSessionsBusy(true);
+    setSessionError(undefined);
+    try {
+      setSessions(await api.listAccountSessions());
+    } catch {
+      setSessionError(t('account.sessionsError'));
+    } finally {
+      setSessionsBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadSessions();
+  }, []);
+
+  const revokeSession = async (session: AccountSession) => {
+    setSessionsBusy(true);
+    setSessionError(undefined);
+    try {
+      await api.revokeAccountSession(session.id);
+      if (session.current) {
+        window.dispatchEvent(new Event(AUTH_SESSION_EXPIRED_EVENT));
+        return;
+      }
+      await loadSessions();
+    } catch {
+      setSessionError(t('account.sessionsRevokeError'));
+      setSessionsBusy(false);
+    }
+  };
   const deletionConfirmed = deleteConfirmation === 'DELETE';
   const confirmationInvalid = deleteConfirmation.length > 0 && !deletionConfirmed;
   const memberSince = user?.createdAt && Number.isFinite(Date.parse(user.createdAt))
@@ -156,6 +191,58 @@ export function AccountPrivacyPage() {
             <dd>{memberSince}</dd>
           </div>
         </dl>
+      </section>
+
+      <section
+        className="account-sessions account-privacy-section"
+        aria-labelledby="account-sessions-heading"
+      >
+        <div className="account-section-copy">
+          <div className="account-section-heading">
+            <SignOut size={27} weight="duotone" aria-hidden="true" />
+            <div>
+              <h2 id="account-sessions-heading">{t('account.sessionsHeading')}</h2>
+              <p>{t('account.sessionsBody')}</p>
+            </div>
+          </div>
+        </div>
+        <div className="account-session-list" aria-live="polite">
+          {sessionError ? (
+            <InlineNotification
+              kind="error"
+              lowContrast
+              hideCloseButton
+              title={t('account.errorTitle')}
+              subtitle={sessionError}
+            />
+          ) : null}
+          {sessionsBusy && sessions.length === 0 ? <p>{t('account.sessionsLoading')}</p> : null}
+          {sessions.map((session) => (
+            <article className="account-session-row" key={session.id}>
+              <div>
+                <strong>
+                  {session.current ? t('account.sessionsCurrent') : t('account.sessionsOther')}
+                </strong>
+                <span>
+                  {t('account.sessionsLastSeen')}: {new Date(session.lastSeenAt).toLocaleString()}
+                </span>
+                <span>
+                  {t('account.sessionsExpires')}: {new Date(session.expiresAt).toLocaleString()}
+                </span>
+              </div>
+              {!session.current ? (
+                <Button
+                  kind="danger--tertiary"
+                  size="sm"
+                  disabled={sessionsBusy}
+                  onClick={() => void revokeSession(session)}
+                >
+                  {t('account.sessionsRevoke')}
+                </Button>
+              ) : null}
+            </article>
+          ))}
+        </div>
       </section>
 
       <section

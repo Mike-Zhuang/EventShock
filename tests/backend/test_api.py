@@ -68,15 +68,17 @@ def test_health_and_synthetic_case(tmp_path: Path) -> None:
 
     assert healthResponse.status_code == 200
     assert healthResponse.json()["status"] == "ok"
-    assert healthResponse.json()["releaseCommit"] == "development"
+    assert healthResponse.json() == {
+        "status": "ok",
+        "service": "eventshock-api",
+        "version": "0.1.0",
+        "database": "ok",
+    }
     assert healthResponse.headers["X-Trace-ID"].startswith("http-")
     assert casesResponse.json()["items"][0]["synthetic"] is True
     assert casesResponse.json()["items"][0]["titleZh"]
-    metrics = metricsResponse.json()
-    assert metrics["runtime"]["requestCount"] >= 2
-    assert metrics["runtime"]["privacyBoundary"] == "NO_PATH_BODY_SESSION_OR_CREDENTIAL_LABELS"
-    assert metrics["experiments"]["workerConcurrency"] == 1
-    assert metrics["sloTargets"]["status"] == "TARGETS_NOT_PRODUCTION_EVIDENCE"
+    assert metricsResponse.status_code == 422
+    assert metricsResponse.json()["error"]["code"] == "SESSION_ID_REQUIRED"
 
 
 def test_case_list_exposes_session_scoped_event_pack_review_state(tmp_path: Path) -> None:
@@ -163,6 +165,7 @@ def test_hybrid_cognition_can_continue_with_rules_without_cancelling_experiment(
         "mode": "HYBRID_LLM",
         "provider": "zhipu",
         "modelId": "glm-5.2",
+        "fallbackToRules": True,
     }
     with TestClient(createApp(tmp_path)) as client:
         database = client.app.state.database

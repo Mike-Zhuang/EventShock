@@ -209,6 +209,17 @@ def test_scrypt_password_hash_is_versioned_salted_and_non_reversible() -> None:
         hashPassword("Short7")
 
 
+def test_password_policy_rejects_account_email_name() -> None:
+    with pytest.raises(PasswordPolicyError, match="account email name"):
+        hashPassword("Mike-Strong-2026!", identity="mike@example.com")
+
+    passwordHash = hashPassword(
+        "Unrelated-Strong-2026!",
+        identity="mike@example.com",
+    )
+    assert verifyPassword("Unrelated-Strong-2026!", passwordHash)
+
+
 def test_registration_login_csrf_logout_and_password_reset_are_isolated(
     tmp_path: Path,
 ) -> None:
@@ -496,7 +507,7 @@ def test_bootstrap_claims_legacy_rows_without_rewriting_session_id(tmp_path: Pat
     adminId, created, claimed = bootstrapAdmin(
         database=database,
         adminEmail="owner@example.com",
-        password="Administrator password!",
+        password="Correct Horse Battery 47!",
     )
 
     assert created is True

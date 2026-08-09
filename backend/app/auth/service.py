@@ -24,6 +24,7 @@ from backend.app.auth.models import (
     IssuedSession,
     LegalAcceptanceStatus,
     PublicUser,
+    SessionView,
     UserPreferences,
     UserRole,
     UserStatus,
@@ -32,6 +33,7 @@ from backend.app.auth.models import (
 from backend.app.auth.passwords import hashPassword, verifyPassword
 from backend.app.auth.repository import (
     AuthRepository,
+    ChallengeCooldownError,
     ChallengeVerificationError,
 )
 from backend.app.legal import validateCurrentAcceptance
@@ -62,6 +64,7 @@ class AuthService:
         challengeLifetime: timedelta = timedelta(minutes=10),
         resendCooldown: timedelta = timedelta(seconds=60),
         sessionLifetime: timedelta = timedelta(days=7),
+        sessionIdleTimeout: timedelta = timedelta(hours=24),
         maximumCodeAttempts: int = 5,
     ) -> None:
         secretBytes = authSecret.encode("utf-8")
@@ -73,6 +76,8 @@ class AuthService:
             raise ValueError("resend cooldown must be between 30 seconds and 10 minutes")
         if not timedelta(hours=1) <= sessionLifetime <= timedelta(days=30):
             raise ValueError("session lifetime must be between 1 hour and 30 days")
+        if not timedelta(minutes=30) <= sessionIdleTimeout <= sessionLifetime:
+            raise ValueError("session idle timeout must be between 30 minutes and session lifetime")
         if not 3 <= maximumCodeAttempts <= 10:
             raise ValueError("maximum code attempts must be between 3 and 10")
         self.repository = repository
@@ -82,6 +87,7 @@ class AuthService:
         self.challengeLifetime = challengeLifetime
         self.resendCooldown = resendCooldown
         self.sessionLifetime = sessionLifetime
+        self.sessionIdleTimeout = sessionIdleTimeout
         self.maximumCodeAttempts = maximumCodeAttempts
         # 不存在的邮箱也执行同成本哈希，降低登录账号枚举的时序差异。
         self._dummyPasswordHash = hashPassword(secrets.token_urlsafe(24))
@@ -100,6 +106,7 @@ class AuthService:
             email=normalized,
             purpose=ChallengePurpose.REGISTER,
             locale=locale,
+            sendMail=self.repository.getUserByEmail(normalized) is None,
         )
 
     async def register(
@@ -126,10 +133,10 @@ class AuthService:
             confirmedMinimumAge=confirmedMinimumAge,
             acknowledgedAiBoundary=acknowledgedAiBoundary,
         )
-        passwordHash = hashPassword(password)
         challenge = self.repository.getChallenge(challengeId)
         if challenge is None or challenge.purpose is not ChallengePurpose.REGISTER:
             raise ChallengeVerificationError("verification code is invalid or expired")
+        passwordHash = hashPassword(password, identity=challenge.email)
         codeHash = self._codeHash(challenge.id, challenge.email, challenge.purpose, code)
         user = self.repository.consumeRegistrationChallengeAndCreateUser(
             challengeId=challenge.id,
@@ -281,6 +288,7 @@ class AuthService:
             email=normalized,
             purpose=ChallengePurpose.RESET_PASSWORD,
             locale=locale,
+            sendMail=self.repository.getUserByEmail(normalized) is not None,
         )
 
     async def resetPassword(
@@ -292,10 +300,10 @@ class AuthService:
     ) -> None:
         now = self._now()
         # 与注册路径一致，策略错误不能提前消费有效验证码。
-        passwordHash = hashPassword(newPassword)
         challenge = self.repository.getChallenge(challengeId)
         if challenge is None or challenge.purpose is not ChallengePurpose.RESET_PASSWORD:
             raise ChallengeVerificationError("verification code is invalid or expired")
+        passwordHash = hashPassword(newPassword, identity=challenge.email)
         codeHash = self._codeHash(challenge.id, challenge.email, challenge.purpose, code)
         verified = self.repository.consumeChallenge(
             challengeId=challenge.id,
@@ -396,7 +404,11 @@ class AuthService:
         if not token:
             raise AuthenticationError("authentication is required")
         now = self._now()
-        session = self.repository.getActiveSession(_tokenHash(token), now)
+        session = self.repository.getActiveSession(
+            _tokenHash(token),
+            now,
+            now - self.sessionIdleTimeout,
+        )
         if session is None:
             raise AuthenticationError("authentication session is invalid or expired")
         if requireCsrf:
@@ -435,6 +447,28 @@ class AuthService:
         if userId is not None:
             self.repository.recordActivity(userId=userId, action="LOGOUT")
         return userId
+
+    def listSessions(self, requester: AuthContext) -> list[SessionView]:
+        now = self._now()
+        return self.repository.listActiveSessions(
+            userId=requester.userId,
+            currentSessionId=requester.authSessionId,
+            now=now,
+            idleCutoff=now - self.sessionIdleTimeout,
+        )
+
+    def revokeSession(self, requester: AuthContext, *, sessionId: str) -> bool:
+        revoked = self.repository.revokeUserSession(
+            userId=requester.userId,
+            sessionId=sessionId,
+        )
+        if revoked:
+            self.repository.recordActivity(
+                userId=requester.userId,
+                action="AUTH_SESSION_REVOKED",
+                metadata={"currentSession": sessionId == requester.authSessionId},
+            )
+        return revoked
 
     def listUsers(
         self,
@@ -492,8 +526,16 @@ class AuthService:
         email: str,
         purpose: ChallengePurpose,
         locale: AuthLocale,
+        sendMail: bool,
     ) -> ChallengeDispatch:
         now = self._now()
+        recentCount = self.repository.countRecentChallenges(
+            email=email,
+            purpose=purpose,
+            since=now - timedelta(hours=1),
+        )
+        if recentCount >= 5:
+            raise ChallengeCooldownError(3_600)
         challengeId = f"challenge-{uuid.uuid4().hex}"
         code = f"{secrets.randbelow(1_000_000):06d}"
         expiresAt = now + self.challengeLifetime
@@ -511,17 +553,18 @@ class AuthService:
         )
         # 无论账号是否存在都走同一 SMTP 路径，避免响应时间和 503/202
         # 差异成为账号枚举旁路；验证码本身仍受后续账号状态约束。
-        try:
-            await self.mailer.sendVerificationCode(
-                recipient=email,
-                code=code,
-                purpose=purpose,
-                locale=locale,
-                expiresMinutes=max(1, int(self.challengeLifetime.total_seconds() // 60)),
-            )
-        except Exception:
-            self.repository.invalidateChallenge(challenge.id)
-            raise
+        if sendMail:
+            try:
+                await self.mailer.sendVerificationCode(
+                    recipient=email,
+                    code=code,
+                    purpose=purpose,
+                    locale=locale,
+                    expiresMinutes=max(1, int(self.challengeLifetime.total_seconds() // 60)),
+                )
+            except Exception:
+                self.repository.invalidateChallenge(challenge.id)
+                raise
         return ChallengeDispatch(
             challengeId=challenge.id,
             expiresAt=challenge.expiresAt,

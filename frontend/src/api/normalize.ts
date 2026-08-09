@@ -1,5 +1,6 @@
 import type {
   AccountDataExport,
+  AccountSession,
   AccountDeletionReceipt,
   AdminActivity,
   AdminActivityPage,
@@ -951,6 +952,31 @@ export function normalizeAuthSession(value: unknown): AuthSession {
   };
 }
 
+export function normalizeAccountSessions(value: unknown): AccountSession[] {
+  if (!isRecord(value) || !Array.isArray(read(value, 'items'))) {
+    throw new TypeError('Account session list is invalid.');
+  }
+  return (read(value, 'items') as unknown[]).map((item, index) => {
+    if (!isRecord(item)) throw new TypeError(`Account session ${index} is invalid.`);
+    return {
+      id: requiredString(read(item, 'id'), `accountSession[${index}].id`),
+      current: asBoolean(read(item, 'current')) ?? false,
+      createdAt: requiredString(
+        read(item, 'createdAt', 'created_at'),
+        `accountSession[${index}].createdAt`,
+      ),
+      lastSeenAt: requiredString(
+        read(item, 'lastSeenAt', 'last_seen_at'),
+        `accountSession[${index}].lastSeenAt`,
+      ),
+      expiresAt: requiredString(
+        read(item, 'expiresAt', 'expires_at'),
+        `accountSession[${index}].expiresAt`,
+      ),
+    };
+  });
+}
+
 export function normalizeAccountDataExport(value: unknown): AccountDataExport {
   if (!isRecord(value)) throw new TypeError('Account data export is not an object.');
   const rawData = read(value, 'data');
@@ -1189,7 +1215,7 @@ function normalizeLlmPolicy(value: unknown): ScenarioDraft['llmPolicy'] | undefi
     decisionIntervalSteps,
     callBudget,
     maxCostUsd,
-    fallbackToRules: asBoolean(read(value, 'fallbackToRules', 'fallback_to_rules')) ?? true,
+    fallbackToRules: asBoolean(read(value, 'fallbackToRules', 'fallback_to_rules')) ?? false,
   };
 }
 

@@ -22,6 +22,7 @@ from backend.app.auth.models import (
     FirstGoal,
     LegalAcceptanceStatus,
     PublicUser,
+    SessionView,
     UserPreferences,
     UserRole,
     UserStatus,
@@ -681,6 +682,25 @@ class AuthRepository:
             ).fetchone()
         return _challenge(row) if row is not None else None
 
+    def countRecentChallenges(
+        self,
+        *,
+        email: str,
+        purpose: ChallengePurpose,
+        since: datetime,
+    ) -> int:
+        """按邮箱和用途统计发送意图，避免轮换 IP 绕过邮件配额。"""
+
+        with self.database.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS total FROM auth_challenges
+                WHERE email_normalized=? AND purpose=? AND created_at>=?
+                """,
+                (email, purpose.value, since.isoformat()),
+            ).fetchone()
+        return int(row["total"]) if row is not None else 0
+
     def getLatestChallenge(
         self,
         *,
@@ -772,7 +792,12 @@ class AuthRepository:
                 ),
             )
 
-    def getActiveSession(self, tokenHash: str, now: datetime) -> ActiveSessionRecord | None:
+    def getActiveSession(
+        self,
+        tokenHash: str,
+        now: datetime,
+        idleCutoff: datetime,
+    ) -> ActiveSessionRecord | None:
         with self.database.connection() as connection:
             row = connection.execute(
                 """
@@ -781,9 +806,10 @@ class AuthRepository:
                 FROM auth_sessions s
                 JOIN auth_users u ON u.id=s.user_id
                 WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.expires_at>?
+                  AND s.last_seen_at>?
                   AND u.status='ACTIVE'
                 """,
-                (tokenHash, now.isoformat()),
+                (tokenHash, now.isoformat(), idleCutoff.isoformat()),
             ).fetchone()
         if row is None:
             return None
@@ -831,6 +857,46 @@ class AuthRepository:
                 "UPDATE auth_sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL",
                 (utcNow(), userId),
             )
+
+    def listActiveSessions(
+        self,
+        *,
+        userId: str,
+        currentSessionId: str,
+        now: datetime,
+        idleCutoff: datetime,
+    ) -> list[SessionView]:
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, created_at, last_seen_at, expires_at
+                FROM auth_sessions
+                WHERE user_id=? AND revoked_at IS NULL AND expires_at>? AND last_seen_at>?
+                ORDER BY last_seen_at DESC
+                """,
+                (userId, now.isoformat(), idleCutoff.isoformat()),
+            ).fetchall()
+        return [
+            SessionView(
+                id=str(row["id"]),
+                current=str(row["id"]) == currentSessionId,
+                createdAt=_datetime(row["created_at"]),
+                lastSeenAt=_datetime(row["last_seen_at"]),
+                expiresAt=_datetime(row["expires_at"]),
+            )
+            for row in rows
+        ]
+
+    def revokeUserSession(self, *, userId: str, sessionId: str) -> bool:
+        with self.database.writeLock, self.database.connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE auth_sessions SET revoked_at=?
+                WHERE id=? AND user_id=? AND revoked_at IS NULL
+                """,
+                (utcNow(), sessionId, userId),
+            )
+        return cursor.rowcount == 1
 
     def setUserStatus(self, userId: str, status: UserStatus) -> PublicUser:
         now = utcNow()

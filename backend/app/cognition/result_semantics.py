@@ -381,7 +381,13 @@ def validateInterpretationSemantics(
                     violations.add(SemanticViolationCode.DIRECTION_MISMATCH)
                 if pairedDifference < 0 and _INCREASE_PATTERN.search(sentence):
                     violations.add(SemanticViolationCode.DIRECTION_MISMATCH)
-            _validateMetricNumbers(sentence, metric, catalog, violations)
+            _validateMetricNumbers(
+                sentence,
+                metric,
+                catalog,
+                violations,
+                siblingMetrics=sentenceMetrics,
+            )
         _validateStoppingSentence(sentence, catalog, violations)
         _validateDiagnosticSentence(sentence, violations)
         _validateCognitionSentence(sentence, catalog, violations)
@@ -501,6 +507,7 @@ def semanticRepairInstruction(
     report: SemanticValidationReport,
     *,
     language: ResultLanguage,
+    catalog: ResultFactCatalog | None = None,
 ) -> str:
     """构造一次受限语义修复输入，不包含隐藏提示词或额外权限。"""
 
@@ -518,10 +525,33 @@ def semanticRepairInstruction(
             "result_tool_outputs. Do not guess numbers, omit inline evidence markers, or emit "
             "raw HTML. Fix these codes:"
         )
+    catalogSummary: list[dict[str, object]] = []
+    if catalog is not None:
+        requiredMetricIds = set(report.strongest_metric_ids)
+        if catalog.primary_metric_id:
+            requiredMetricIds.add(catalog.primary_metric_id)
+        for fact in catalog.metrics:
+            if fact.metric_id not in requiredMetricIds:
+                continue
+            catalogSummary.append(
+                {
+                    "metricId": fact.metric_id,
+                    "isPrimary": fact.preregistered_primary,
+                    "pairedDifferenceMedian": fact.paired_difference_median,
+                    "interval": [fact.interval_lower, fact.interval_upper],
+                    "containsZero": fact.contains_zero,
+                    "directionConsistency": fact.direction_consistency,
+                    "validPairs": fact.valid_n,
+                }
+            )
+    # 修复轮只看到有界候选片段和必须使用的服务器事实。这样既能给模型具体
+    # 纠错信息，也不会把整段潜在恶意输出再次注入上下文。
+    rejectedCandidate = answer.model_dump_json(exclude_none=True)[:4_000]
     return (
         f"{instruction}\n{codes}\n\n"
-        "REJECTED_CANDIDATE_JSON:\n"
-        f"{answer.model_dump_json(exclude_none=True)}"
+        f"REQUIRED_SERVER_FACTS:\n{catalogSummary}\n\n"
+        "REJECTED_CANDIDATE_JSON_PREFIX:\n"
+        f"{rejectedCandidate}"
     )
 
 
@@ -530,14 +560,25 @@ def _validateMetricNumbers(
     metric: MetricFact,
     catalog: ResultFactCatalog,
     violations: set[SemanticViolationCode],
+    *,
+    siblingMetrics: Sequence[MetricFact] = (),
 ) -> None:
     supported = list(metric.supportedNumbers())
+    # 一个 Markdown 列表项可能在同一句比较多个指标。此时数字属于同一句中
+    # 明确点名的任一指标都是合法的，不能拿另一指标的允许集误杀。
+    for sibling in siblingMetrics:
+        supported.extend(sibling.supportedNumbers())
     if catalog.valid_paired_seeds is not None:
         supported.append(float(catalog.valid_paired_seeds))
     # 0、1、95 和 100 是解释区间、比例及零值边界时允许使用的通用常数。
     supported.extend((0.0, 1.0, 95.0, 100.0))
-    for rawNumber, percentSuffix in _NUMBER_PATTERN.findall(sentence):
+    # 有序列表编号是版式，不是统计事实；引用编号已在上游移除。
+    reviewableSentence = re.sub(r"^\s*\d{1,3}[.)、]\s*", "", sentence)
+    for rawNumber, percentSuffix in _NUMBER_PATTERN.findall(reviewableSentence):
         value = float(rawNumber.replace(",", "").replace("−", "-"))
+        # 四位年份只表达时间边界，不属于指标数值。
+        if not percentSuffix and value.is_integer() and 1900 <= value <= 2100:
+            continue
         candidates = [value]
         if percentSuffix:
             candidates.append(value / 100.0)

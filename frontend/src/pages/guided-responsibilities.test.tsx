@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../api/client';
 import type { GuidedWorkflow } from '../api/types';
@@ -67,6 +68,7 @@ describe('GuidedWorkflowPage 职责地图与返回续接', () => {
   });
 
   it('完整说明证据、主张、冻结和启动必须由人负责的原因', async () => {
+    const user = userEvent.setup();
     vi.mocked(api.getGuidedWorkflows).mockResolvedValue([]);
 
     render(
@@ -75,9 +77,10 @@ describe('GuidedWorkflowPage 职责地图与返回续接', () => {
       </I18nProvider>,
     );
 
-    expect(await screen.findByRole('heading', {
-      name: 'End-to-end AI and human responsibilities',
-    })).toBeInTheDocument();
+    const responsibilitySummary = await screen.findByText(
+      'View end-to-end AI and human responsibilities',
+    );
+    await user.click(responsibilitySummary);
     expect(screen.getByText(/source authorization require a human decision/i))
       .toBeInTheDocument();
     expect(screen.getByText(/AI cannot replace the accountable evidence judgment/i))

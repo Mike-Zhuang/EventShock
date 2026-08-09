@@ -326,7 +326,8 @@ export function RunCenterPage({ navigate }: { navigate: Navigate }) {
                           : 'The in-flight request may still complete and be billed. Validated frozen decisions are preserved; deterministic rules complete the remainder.'}
                       />
                     ) : liveState?.phase === 'COGNITION'
-                      && activeExperiment.scenario?.llmPolicy?.mode === 'HYBRID_LLM' ? (
+                      && activeExperiment.scenario?.llmPolicy?.mode === 'HYBRID_LLM'
+                      && activeExperiment.scenario?.llmPolicy?.fallbackToRules ? (
                         <Button
                           kind="tertiary"
                           size="sm"
@@ -337,6 +338,22 @@ export function RunCenterPage({ navigate }: { navigate: Navigate }) {
                             : 'Stop future LLM calls and finish with rules'}
                         </Button>
                       ) : null}
+                  {liveState?.phase === 'COGNITION'
+                    && activeExperiment.scenario?.llmPolicy?.mode === 'HYBRID_LLM'
+                    && !activeExperiment.scenario?.llmPolicy?.fallbackToRules
+                    && ['FAILED_CLOSED', 'FAILED'].includes(cognitionProgress.status ?? '') ? (
+                      <InlineNotification
+                        kind="error"
+                        lowContrast
+                        hideCloseButton
+                        title={language === 'zh-CN'
+                          ? '严格 LLM 模式已停止认知准备'
+                          : 'Strict LLM cognition stopped'}
+                        subtitle={language === 'zh-CN'
+                          ? '无效模型结果没有进入实验，也不会自动改用规则。请取消本实验并在检查配置后新建实验；若确实接受规则回退，请在启动前明确开启弹性混合模式。'
+                          : 'Invalid model output was not accepted and rules were not substituted. Cancel this experiment and create a new run after reviewing the configuration; enable elastic hybrid mode before launch only if rule fallback is acceptable.'}
+                      />
+                    ) : null}
                 </section>
               ) : null}
 

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import re
 import unicodedata
@@ -13,7 +14,9 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
+
+from backend.app.security.unicode_skeleton import confusableSkeleton
 
 SupportedLocale = Literal["en", "zh", "zh-CN", "zh-cn"]
 
@@ -208,32 +211,6 @@ _ACTION_TEXT: dict[str, dict[str, str]] = {
 }
 
 
-_CONFUSABLE_TRANSLATION = str.maketrans(
-    {
-        "а": "a",
-        "е": "e",
-        "і": "i",
-        "ј": "j",
-        "ο": "o",
-        "р": "p",
-        "с": "c",
-        "х": "x",
-        "у": "y",
-        "Α": "a",
-        "Β": "b",
-        "Ε": "e",
-        "Ι": "i",
-        "Κ": "k",
-        "Μ": "m",
-        "Ν": "n",
-        "Ο": "o",
-        "Ρ": "p",
-        "Τ": "t",
-        "Χ": "x",
-    }
-)
-
-
 _SENSITIVE_PATTERNS = (
     _PatternSpec(
         "PRIVATE_KEY_MATERIAL",
@@ -381,7 +358,12 @@ _PROMPT_INJECTION_PATTERNS = (
             r"(?:instructions?|rules?|prompts?)|"
             r"(?:忽略|无视|忘记|覆盖)(?:你|模型|助手)?"
             r"(?:(?:所有)?(?:之前|以上|上面|此前|先前|前面)|所有)?"
-            r"(?:收到|获得)?(?:的)?(?:所有)?(?:指令|提示词|提示|规则|要求)",
+            r"(?:收到|获得)?(?:的)?(?:所有)?(?:指令|提示词|提示|规则|要求)|"
+            r"(?:無視|忘記|覆蓋)(?:之前|以上|先前)(?:的)?(?:指令|提示詞|規則)|"
+            r"(?:предыдущ|системн).{0,24}(?:игнор|забуд)|"
+            r"(?:前の|以前の).{0,16}(?:指示|命令).{0,8}(?:無視|忘れ)|"
+            r"(?:تجاهل|تخط).{0,24}(?:التعليمات|الأوامر)|"
+            r"(?:이전|앞선).{0,16}(?:지시|명령).{0,8}(?:무시|잊)",
             re.IGNORECASE,
         ),
         "promptInjection",
@@ -393,7 +375,12 @@ _PROMPT_INJECTION_PATTERNS = (
         re.compile(
             r"(?:reveal|print|show|expose|return)(?:the)?"
             r"(?:systemprompt|developerprompt|developermessage|hiddeninstructions?|apikey|secrets?)|"
-            r"(?:泄露|显示|输出|返回)(?:系统提示词|开发者消息|隐藏指令|密钥|秘密)",
+            r"(?:泄露|显示|输出|返回)(?:系统提示词|开发者消息|隐藏指令|密钥|秘密)|"
+            r"(?:顯示|輸出|洩露)(?:系統提示詞|隱藏指令|密鑰)|"
+            r"(?:покажи|раскрой|выведи).{0,20}(?:системн|скрыт).{0,12}(?:промпт|инструкц)|"
+            r"(?:システム|開発者).{0,12}(?:プロンプト|指示).{0,8}(?:表示|公開)|"
+            r"(?:اعرض|اكشف).{0,20}(?:موجه النظام|التعليمات المخفية)|"
+            r"(?:시스템|개발자).{0,12}(?:프롬프트|지시).{0,8}(?:공개|출력)",
             re.IGNORECASE,
         ),
         "promptInjection",
@@ -605,7 +592,48 @@ def _scanValue(value: object, field: str) -> list[_RawFinding]:
     for spec in (*_SENSITIVE_PATTERNS, *_ACTIVE_CONTENT_PATTERNS, *_PROMPT_INJECTION_PATTERNS):
         findings.extend(_findPattern(spec, view, field))
     findings.extend(_findPaymentCards(view, field))
+    findings.extend(_scanEncodedPromptInjection(text, field))
     return _deduplicateRawFindings(findings)
+
+
+def _scanEncodedPromptInjection(text: str, field: str) -> list[_RawFinding]:
+    """仅在解码结果命中高风险指令时告警，避免把普通编码资料一概拒绝。"""
+
+    candidates: list[tuple[int, int, str]] = []
+    base64Pattern = re.compile(
+        r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{24,4096}={0,2}(?![A-Za-z0-9+/])"
+    )
+    for match in base64Pattern.finditer(text):
+        try:
+            decoded = base64.b64decode(match.group(0), validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            continue
+        candidates.append((match.start(), match.end(), decoded))
+    for match in re.finditer(r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{2}){12,2048}(?![0-9A-Fa-f])", text):
+        try:
+            decoded = bytes.fromhex(match.group(0)).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            continue
+        candidates.append((match.start(), match.end(), decoded))
+    for match in re.finditer(r"(?:%[0-9A-Fa-f]{2}){6,1024}", text):
+        decoded = unquote(match.group(0))
+        candidates.append((match.start(), match.end(), decoded))
+
+    findings: list[_RawFinding] = []
+    for start, end, decoded in candidates[:32]:
+        view = _buildTextView(decoded[:8_000])
+        if any(_findPattern(spec, view, field) for spec in _PROMPT_INJECTION_PATTERNS):
+            findings.append(
+                _RawFinding(
+                    code="ENCODED_PROMPT_INJECTION",
+                    severity=FindingSeverity.HIGH,
+                    field=field,
+                    start=start,
+                    end=end,
+                    actionKey="promptInjection",
+                )
+            )
+    return findings
 
 
 def _scanBinarySignatures(value: bytes, field: str) -> list[_RawFinding]:
@@ -688,7 +716,8 @@ def _buildTextView(text: str) -> _TextView:
     normalizedCharacters: list[str] = []
     normalizedOffsets: list[int] = []
     for offset, char in enumerate(text):
-        expanded = unicodedata.normalize("NFKC", char).casefold().translate(_CONFUSABLE_TRANSLATION)
+        # 每个原字符独立生成骨架，才能在匹配后安全地映射回原始字段偏移。
+        expanded = confusableSkeleton(char)
         for normalizedChar in expanded:
             if normalizedChar.isdigit():
                 try:
