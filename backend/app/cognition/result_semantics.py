@@ -78,9 +78,27 @@ class ResultFactCatalog:
 
 @dataclass(frozen=True, slots=True)
 class SemanticValidationReport:
+    # valid 只表示“没有确定的事实冲突”。覆盖不足、无法可靠归属的数字等
+    # 启发式命中属于复核提示，不能再让一段已经通过结构与安全校验的回答消失。
     valid: bool
     violation_codes: tuple[SemanticViolationCode, ...]
+    blocking_violation_codes: tuple[SemanticViolationCode, ...]
+    advisory_violation_codes: tuple[SemanticViolationCode, ...]
     strongest_metric_ids: tuple[str, ...]
+
+
+# 这些规则依赖自然语言正则或产品希望的“完整覆盖范围”，存在正常回答被
+# 误判的可能。它们仍进入审计和前端提示，但不触发额外计费或整段失败。
+ADVISORY_SEMANTIC_VIOLATIONS = frozenset(
+    {
+        SemanticViolationCode.METRIC_NUMBER_UNSUPPORTED,
+        SemanticViolationCode.REQUIRED_PRIMARY_FINDING_OMITTED,
+        SemanticViolationCode.REQUIRED_STRONGEST_FINDING_OMITTED,
+        SemanticViolationCode.DIAGNOSTIC_TYPE_CONFLATED,
+        SemanticViolationCode.COGNITION_EFFECT_UNSUPPORTED,
+        SemanticViolationCode.COGNITION_ZERO_EFFECT_CAUSE_UNSUPPORTED,
+    }
+)
 
 
 METRIC_ALIASES: dict[str, tuple[str, ...]] = {
@@ -405,9 +423,17 @@ def validateInterpretationSemantics(
             violations.add(SemanticViolationCode.REQUIRED_STRONGEST_FINDING_OMITTED)
 
     orderedViolations = tuple(sorted(violations, key=lambda item: item.value))
+    advisoryViolations = tuple(
+        item for item in orderedViolations if item in ADVISORY_SEMANTIC_VIOLATIONS
+    )
+    blockingViolations = tuple(
+        item for item in orderedViolations if item not in ADVISORY_SEMANTIC_VIOLATIONS
+    )
     return SemanticValidationReport(
-        valid=not orderedViolations,
+        valid=not blockingViolations,
         violation_codes=orderedViolations,
+        blocking_violation_codes=blockingViolations,
+        advisory_violation_codes=advisoryViolations,
         strongest_metric_ids=strongest,
     )
 

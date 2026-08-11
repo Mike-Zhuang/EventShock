@@ -76,6 +76,18 @@ describe('结果解释响应归一化', () => {
     });
   });
 
+  it('接受可用但带自动复核提示的模型解释状态', () => {
+    const response = normalizeResultInterpretationChatResponse({
+      ...VALID_RESPONSE,
+      message: {
+        ...VALID_RESPONSE.message,
+        semantic_validation_status: 'COMPLETED_WITH_WARNINGS',
+      },
+    });
+
+    expect(response.message.semanticValidationStatus).toBe('COMPLETED_WITH_WARNINGS');
+  });
+
   it('只保留固定流式阶段与安全计数，不保留服务端自由文本', () => {
     const progress = normalizeResultInterpretationStreamProgress({
       schema_version: '1.0.0',

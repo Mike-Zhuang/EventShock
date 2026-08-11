@@ -20,6 +20,7 @@ ResultSemanticValidationStatus = Literal[
     "NOT_RECORDED",
     "PASSED",
     "REPAIRED",
+    "COMPLETED_WITH_WARNINGS",
     "DETERMINISTIC_FALLBACK",
 ]
 # 11 个工具全部启用时仍需为外层 evidence 元数据预留空间，避免单项均合法但
@@ -88,7 +89,8 @@ class ResultInterpretationRun(StrictFrozenModel):
     prompt_version: str
     planner_fallback_used: bool = False
     # 默认值只用于兼容旧测试夹具和未携带该元数据的历史记录；生产解释路径
-    # 会显式写入 PASSED、REPAIRED 或 DETERMINISTIC_FALLBACK。
+    # 会显式写入 PASSED、REPAIRED、COMPLETED_WITH_WARNINGS 或
+    # DETERMINISTIC_FALLBACK。
     semantic_validation_status: ResultSemanticValidationStatus = "NOT_RECORDED"
     deterministic_fallback_used: bool = False
     semantic_violation_codes: tuple[str, ...] = ()

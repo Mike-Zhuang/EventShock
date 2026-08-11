@@ -387,6 +387,11 @@ def test_strict_structured_workflows_force_thinking_off_but_report_preference() 
         .split(f"\n{UNTRUSTED_DATA_END}", maxsplit=1)[0]
     )
     assert guidedPayload["current_stage"] == "EVENT_GOAL"
+    assert guidedPayload["event_goal_authoring_policy"] == {
+        "assistantAuthoredFields": ["title", "summary", "researchQuestion"],
+        "doNotAskUserToWriteAssistantAuthoredFields": True,
+        "draftTheseWhenEventInstrumentAndDateAreKnown": True,
+    }
     assert datetime.fromisoformat(guidedPayload["serverTimeUtc"]).tzinfo is not None
     assert connection.thinking_preference_enabled is True
     assert connection.thinking_enabled is False
@@ -512,6 +517,17 @@ def test_guided_prompt_requires_exact_day_when_only_month_is_known() -> None:
     assert guided.version.startswith("guided_workflow_v")
     assert "only a month" in GUIDED_WORKFLOW_PROMPT.systemPrompt
     assert "do not invent a day" in GUIDED_WORKFLOW_PROMPT.systemPrompt
+
+
+def test_guided_prompt_requires_assistant_to_draft_event_framing_fields() -> None:
+    prompt = " ".join(GUIDED_WORKFLOW_PROMPT.systemPrompt.split())
+
+    assert GUIDED_WORKFLOW_PROMPT.version == "guided_workflow_v1.4.0"
+    assert "actively draft the title" in prompt
+    assert "Never ask the user to write the title, summary, or research question" in prompt
+    assert (
+        "especially when they ask you to provide, suggest, draft, write, or improve one" in prompt
+    )
 
 
 def test_service_propagates_non_zhipu_provider_to_request_and_result() -> None:

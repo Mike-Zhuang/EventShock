@@ -2461,6 +2461,7 @@ export function normalizeResultInterpretationAssistantMessage(
   const semanticValidationStatuses = [
     'PASSED',
     'REPAIRED',
+    'COMPLETED_WITH_WARNINGS',
     'DETERMINISTIC_FALLBACK',
     'NOT_RECORDED',
   ] as const;

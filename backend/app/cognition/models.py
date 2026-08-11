@@ -339,10 +339,67 @@ class ResultInterpretationAnswer(StrictFrozenModel):
     schema_version: Literal["result_interpretation_v1.0.0"] = "result_interpretation_v1.0.0"
     answer: str = Field(min_length=1, max_length=12_000)
     analysis_summary: str | None = Field(default=None, min_length=1, max_length=2_000)
-    grounding_references: tuple[str, ...] = Field(min_length=1, max_length=20)
+    grounding_references: tuple[str, ...] = Field(default=(), max_length=20)
     follow_up_suggestions: tuple[str, ...] = Field(default=(), max_length=3)
     scenario_not_forecast: Literal[True] = True
     investment_advice_provided: Literal[False] = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalizeRecoverableProviderShape(cls, value: object) -> object:
+        """修复常见且无歧义的 JSON 形状偏差，避免正常解释因格式细节消失。"""
+
+        if not isinstance(value, dict):
+            return value
+        aliasMap = {
+            "schemaVersion": "schema_version",
+            "analysisSummary": "analysis_summary",
+            "groundingReferences": "grounding_references",
+            "followUpSuggestions": "follow_up_suggestions",
+            "scenarioNotForecast": "scenario_not_forecast",
+            "investmentAdviceProvided": "investment_advice_provided",
+        }
+        normalized = {aliasMap.get(key, key): item for key, item in value.items()}
+        allowedFields = {
+            "schema_version",
+            "answer",
+            "analysis_summary",
+            "grounding_references",
+            "follow_up_suggestions",
+            "scenario_not_forecast",
+            "investment_advice_provided",
+        }
+        normalized = {key: item for key, item in normalized.items() if key in allowedFields}
+
+        # 这两个值是产品边界而不是由模型自由判断的内容；正文仍会独立扫描
+        # 投资建议，因此固定布尔值不会掩盖违规文本。
+        normalized["schema_version"] = "result_interpretation_v1.0.0"
+        normalized["scenario_not_forecast"] = True
+        normalized["investment_advice_provided"] = False
+
+        if normalized.get("analysis_summary") == "":
+            normalized["analysis_summary"] = None
+        references = normalized.get("grounding_references")
+        if isinstance(references, str):
+            normalized["grounding_references"] = (references,)
+        elif isinstance(references, list):
+            normalized["grounding_references"] = tuple(
+                item for item in references if isinstance(item, str)
+            )
+
+        suggestions = normalized.get("follow_up_suggestions")
+        if isinstance(suggestions, str):
+            suggestions = (suggestions,)
+        if isinstance(suggestions, (list, tuple)):
+            cleanedSuggestions: list[str] = []
+            for suggestion in suggestions:
+                if not isinstance(suggestion, str):
+                    continue
+                cleaned = INLINE_RESULT_REFERENCE_PATTERN.sub("", suggestion).strip()
+                if cleaned:
+                    cleanedSuggestions.append(cleaned[:400])
+            normalized["follow_up_suggestions"] = tuple(cleanedSuggestions[:3])
+        return normalized
 
     @model_validator(mode="after")
     def validateReviewableAnswer(self) -> ResultInterpretationAnswer:
@@ -358,24 +415,19 @@ class ResultInterpretationAnswer(StrictFrozenModel):
         citedReferencesInOrder = tuple(
             dict.fromkeys(INLINE_RESULT_REFERENCE_PATTERN.findall(reviewableText))
         )
-        if not citedReferencesInOrder:
-            raise ValueError("result interpretation must contain at least one inline reference")
         if any(
             VALID_RESULT_REFERENCE_PATTERN.fullmatch(reference) is None
             for reference in citedReferencesInOrder
         ):
             raise ValueError("result interpretation contains an invalid inline evidence ID")
 
-        # 只清理模型清单中没有实际出现在正文或可核验摘要里的合法冗余项。
-        # 绝不根据正文自动补写清单，否则缺失引用的坏响应会被静默接受。
-        citedReferenceSet = set(citedReferencesInOrder)
-        normalizedReferences = tuple(
-            reference for reference in reportedReferences if reference in citedReferenceSet
-        )
-        if citedReferenceSet != set(normalizedReferences):
-            raise ValueError("inline result references must exactly match grounding_references")
+        # 引用清单只是供界面生成证据卡的冗余索引。模型漏抄清单、顺序不同或
+        # 只在清单中给出合法引用时，服务端可以无损规范化，没必要再次计费或
+        # 丢弃正文。未知 ID 仍通过 evidenceIds() 的并集进入网关 allowlist 硬校验。
+        allReportedReferences = tuple(dict.fromkeys((*reportedReferences, *citedReferencesInOrder)))
+        normalizedReferences = citedReferencesInOrder or reportedReferences
 
-        object.__setattr__(self, "_reported_grounding_references", reportedReferences)
+        object.__setattr__(self, "_reported_grounding_references", allReportedReferences)
         object.__setattr__(self, "grounding_references", normalizedReferences)
         if any(
             pattern.search(reviewableText)
