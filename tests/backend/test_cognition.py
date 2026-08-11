@@ -340,16 +340,15 @@ def test_result_interpretation_prompt_requests_safe_gfm_and_prose_citations() ->
     prompt = RESULT_INTERPRETATION_PROMPT.systemPrompt
     normalizedPrompt = " ".join(prompt.split())
 
-    assert RESULT_INTERPRETATION_PROMPT.version == "result_interpretation_v1.5.0"
-    assert "never copy raw exception names" in RESULT_INTERPRETATION_PROMPT.systemPrompt
+    assert RESULT_INTERPRETATION_PROMPT.version == "result_interpretation_v1.6.0"
+    assert "raw uppercase status codes" in RESULT_INTERPRETATION_PROMPT.systemPrompt
     assert RESULT_INTERPRETATION_PROMPT.schemaVersion == "result_interpretation_v1.0.0"
-    assert "GitHub Flavored Markdown" in prompt
-    assert "Never emit raw HTML or an image" in prompt
-    assert "Put that boundary before findings" in normalizedPrompt
-    assert "outside backticks and code fences" in prompt
-    assert "standalone technical reference-ID" in normalizedPrompt
-    assert "follow_up_suggestions must" in normalizedPrompt
-    assert "any [result:*] evidence marker" in normalizedPrompt
+    assert "concise GFM" in prompt
+    assert "Do not emit raw HTML" in prompt
+    assert "Start with a brief statement" in normalizedPrompt
+    assert "ordinary prose" in prompt
+    assert "server will harmlessly normalize" in normalizedPrompt
+    assert "Suggestions must be short plain-text questions" in normalizedPrompt
     assert sha256Text(prompt) == RESULT_INTERPRETATION_PROMPT.promptHash
 
 

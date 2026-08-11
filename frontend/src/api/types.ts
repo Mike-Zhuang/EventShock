@@ -923,7 +923,7 @@ export interface ResultInterpretationAssistantMessage {
   cacheHit: boolean;
   repairUsed: boolean;
   plannerUsed: boolean;
-  semanticValidationStatus?: 'PASSED' | 'REPAIRED' | 'DETERMINISTIC_FALLBACK' | 'NOT_RECORDED';
+  semanticValidationStatus?: 'PASSED' | 'REPAIRED' | 'COMPLETED_WITH_WARNINGS' | 'DETERMINISTIC_FALLBACK' | 'NOT_RECORDED';
   deterministicFallbackUsed?: boolean;
   promptVersion: string;
   latencyMs: number;

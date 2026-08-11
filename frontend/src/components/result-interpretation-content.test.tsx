@@ -81,6 +81,22 @@ describe('ResultInterpretationContent 技术审计', () => {
     );
     expect(screen.getByText('Repaired and validated model interpretation')).toBeInTheDocument();
     expect(screen.queryByText('Server deterministic fallback text')).not.toBeInTheDocument();
+
+    rerender(
+      <I18nProvider>
+        <ResultInterpretationContent
+          experimentId="exp-audit"
+          message={{
+            ...MESSAGE,
+            semanticValidationStatus: 'COMPLETED_WITH_WARNINGS',
+            deterministicFallbackUsed: false,
+          }}
+          navigate={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+    expect(screen.getByText('Model interpretation returned with review notes')).toBeInTheDocument();
+    expect(screen.getByText(/Heuristic review notes no longer hide the answer/i)).toBeInTheDocument();
   });
 
   it('正文只显示技术状态的人类解释，原始枚举保留在折叠审计层', async () => {

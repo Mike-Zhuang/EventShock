@@ -444,30 +444,29 @@ def test_semantically_invalid_answer_is_repaired_once_before_return() -> None:
     assert harness.requests[1].allowedEvidenceIds == harness.requests[0].allowedEvidenceIds
 
 
-def test_semantic_repair_failure_fails_closed_without_ai_fallback() -> None:
+def test_semantic_repair_failure_returns_server_verified_fallback() -> None:
     rejectedAnswer = metricAnswer("The maxSpreadBps paired median decreased by 1.5.")
     service, harness = configuredService([FakeOutcome(rejectedAnswer), FakeOutcome(rejectedAnswer)])
 
-    with pytest.raises(ModelGatewayError) as captured:
-        asyncio.run(
-            service.interpretExperimentResult(
-                sessionId=SESSION_ID,
-                result=sampleResult(),
-                messages=({"role": "user", "content": "Explain the primary result."},),
-                language="en",
-                initial=True,
-                includeAnalysisSummary=True,
-            )
+    run = asyncio.run(
+        service.interpretExperimentResult(
+            sessionId=SESSION_ID,
+            result=sampleResult(),
+            messages=({"role": "user", "content": "Explain the primary result."},),
+            language="en",
+            initial=True,
+            includeAnalysisSummary=True,
         )
+    )
 
-    assert captured.value.code is FailureCode.MODEL_RESPONSE_INVALID
-    assert captured.value.repairUsed is True
-    assert captured.value.safeDiagnostics["failureStage"] == "SEMANTIC_REPAIR"
-    assert "DIRECTION_MISMATCH" in captured.value.safeDiagnostics["violationCodes"]
+    assert run.semantic_validation_status == "DETERMINISTIC_FALLBACK"
+    assert run.deterministic_fallback_used is True
+    assert "Server-verified results" in run.interpretation.answer
+    assert SemanticViolationCode.DIRECTION_MISMATCH.value in run.semantic_violation_codes
     assert len(harness.requests) == 2
 
 
-def test_semantic_repair_gateway_error_is_returned_without_ai_fallback() -> None:
+def test_semantic_repair_gateway_error_returns_server_verified_fallback() -> None:
     rejectedAnswer = metricAnswer("The maxSpreadBps paired median decreased by 1.5.")
     service, _harness = configuredService(
         [
@@ -484,21 +483,45 @@ def test_semantic_repair_gateway_error_is_returned_without_ai_fallback() -> None
         ]
     )
 
-    with pytest.raises(ModelGatewayError) as captured:
-        asyncio.run(
-            service.interpretExperimentResult(
-                sessionId=SESSION_ID,
-                result=sampleResult(),
-                messages=({"role": "user", "content": "Explain the primary result."},),
-                language="en",
-                initial=True,
-                includeAnalysisSummary=False,
-            )
+    run = asyncio.run(
+        service.interpretExperimentResult(
+            sessionId=SESSION_ID,
+            result=sampleResult(),
+            messages=({"role": "user", "content": "Explain the primary result."},),
+            language="en",
+            initial=True,
+            includeAnalysisSummary=False,
         )
+    )
 
-    assert captured.value.code is FailureCode.MODEL_TIMEOUT
-    assert captured.value.repairUsed is True
-    assert captured.value.safeDiagnostics["failureStage"] == "SEMANTIC_REPAIR"
+    assert run.semantic_validation_status == "DETERMINISTIC_FALLBACK"
+    assert run.deterministic_fallback_used is True
+    assert run.repair_used is True
+    assert FailureCode.MODEL_TIMEOUT.value in run.failure_codes
+
+
+def test_advisory_semantic_findings_do_not_hide_a_usable_model_answer() -> None:
+    answer = metricAnswer(
+        "The maxSpreadBps paired median increased by 1.5 across 42 reported observations."
+    )
+    service, harness = configuredService([FakeOutcome(answer)])
+
+    run = asyncio.run(
+        service.interpretExperimentResult(
+            sessionId=SESSION_ID,
+            result=sampleResult(),
+            messages=({"role": "user", "content": "Explain the primary result."},),
+            language="en",
+            initial=True,
+            includeAnalysisSummary=False,
+        )
+    )
+
+    assert run.semantic_validation_status == "COMPLETED_WITH_WARNINGS"
+    assert run.deterministic_fallback_used is False
+    assert run.interpretation.answer.endswith(answer.answer)
+    assert SemanticViolationCode.METRIC_NUMBER_UNSUPPORTED.value in run.semantic_violation_codes
+    assert len(harness.requests) == 1
 
 
 def test_follow_up_plans_tools_and_keeps_mandatory_boundary_slices() -> None:
@@ -636,30 +659,34 @@ def test_interpretation_rejects_unknown_grounding_reference() -> None:
     answer = answerWithReferences(("result:not-a-real-tool",), includeSummary=False)
     service, _harness = configuredService([FakeOutcome(answer)])
 
-    with pytest.raises(ModelGatewayError) as error:
-        asyncio.run(
-            service.interpretExperimentResult(
-                sessionId=SESSION_ID,
-                result=sampleResult(),
-                messages=({"role": "user", "content": "Explain this result."},),
-                language="en",
-                initial=True,
-                includeAnalysisSummary=False,
-            )
+    run = asyncio.run(
+        service.interpretExperimentResult(
+            sessionId=SESSION_ID,
+            result=sampleResult(),
+            messages=({"role": "user", "content": "Explain this result."},),
+            language="en",
+            initial=True,
+            includeAnalysisSummary=False,
         )
+    )
 
-    assert error.value.code is FailureCode.EVIDENCE_ID_UNKNOWN
+    assert run.semantic_validation_status == "DETERMINISTIC_FALLBACK"
+    assert run.deterministic_fallback_used is True
+    assert FailureCode.EVIDENCE_ID_UNKNOWN.value in run.failure_codes
+    assert "result:not-a-real-tool" not in run.interpretation.evidenceIds()
 
 
-def test_interpretation_answer_rejects_unlisted_inline_reference() -> None:
-    with pytest.raises(ValueError, match="exactly match"):
-        ResultInterpretationAnswer(
-            answer=(
-                "This is scenario evidence, not a forecast or investment advice. [result:overview]"
-            ),
-            analysis_summary="An invented slice was also checked. [result:not-supplied]",
-            grounding_references=("result:overview",),
-        )
+def test_interpretation_answer_collects_unlisted_inline_reference_for_gateway_validation() -> None:
+    answer = ResultInterpretationAnswer(
+        answer=(
+            "This is scenario evidence, not a forecast or investment advice. [result:overview]"
+        ),
+        analysis_summary="An invented slice was also checked. [result:not-supplied]",
+        grounding_references=("result:overview",),
+    )
+
+    assert answer.grounding_references == ("result:overview", "result:not-supplied")
+    assert answer.evidenceIds() == {"result:overview", "result:not-supplied"}
 
 
 def test_interpretation_answer_normalizes_duplicate_and_uncited_legal_references() -> None:
@@ -698,15 +725,16 @@ def test_interpretation_answer_normalizes_duplicate_and_uncited_legal_references
     }
 
 
-def test_interpretation_answer_does_not_auto_add_inline_reference() -> None:
-    with pytest.raises(ValueError, match="exactly match"):
-        ResultInterpretationAnswer(
-            answer=(
-                "The overview and paired delta were checked. "
-                "[result:overview] [result:paired-deltas]"
-            ),
-            grounding_references=("result:overview",),
-        )
+def test_interpretation_answer_auto_indexes_inline_references() -> None:
+    answer = ResultInterpretationAnswer(
+        answer=(
+            "The overview and paired delta were checked. "
+            "[result:overview] [result:paired-deltas]"
+        ),
+        grounding_references=("result:overview",),
+    )
+
+    assert answer.grounding_references == ("result:overview", "result:paired-deltas")
 
 
 def test_interpretation_answer_does_not_hide_uncited_unknown_reference() -> None:
@@ -741,13 +769,35 @@ def test_interpretation_rejects_investment_recommendations_even_with_safe_flag()
         )
 
 
-def test_interpretation_limits_each_follow_up_suggestion() -> None:
-    with pytest.raises(ValueError, match="must not exceed 400"):
-        ResultInterpretationAnswer(
-            answer="Bounded scenario explanation. [result:overview]",
-            grounding_references=("result:overview",),
-            follow_up_suggestions=("x" * 401,),
-        )
+def test_interpretation_normalizes_recoverable_provider_shape() -> None:
+    answer = ResultInterpretationAnswer.model_validate(
+        {
+            "schemaVersion": "unexpected-but-recoverable",
+            "answer": "Bounded scenario explanation. [result:overview]",
+            "analysisSummary": "",
+            "groundingReferences": [],
+            "followUpSuggestions": [
+                f"{'x' * 401} [result:overview]",
+                "",
+                "What is uncertain?",
+                "A fourth suggestion is ignored.",
+            ],
+            "scenarioNotForecast": False,
+            "investmentAdviceProvided": True,
+            "harmlessExtraField": "ignored",
+        }
+    )
+
+    assert answer.schema_version == "result_interpretation_v1.0.0"
+    assert answer.analysis_summary is None
+    assert answer.grounding_references == ("result:overview",)
+    assert answer.follow_up_suggestions == (
+        "x" * 400,
+        "What is uncertain?",
+        "A fourth suggestion is ignored.",
+    )
+    assert answer.scenario_not_forecast is True
+    assert answer.investment_advice_provided is False
 
 
 @pytest.mark.parametrize(
@@ -758,18 +808,17 @@ def test_interpretation_limits_each_follow_up_suggestion() -> None:
         "What does the empty marker [result:] mean?",
     ),
 )
-def test_interpretation_rejects_result_references_in_follow_up_suggestions(
+def test_interpretation_strips_result_references_from_follow_up_suggestions(
     suggestion: str,
 ) -> None:
-    with pytest.raises(
-        ValueError,
-        match="follow_up_suggestions must not contain result evidence references",
-    ):
-        ResultInterpretationAnswer(
-            answer="Bounded scenario explanation. [result:overview]",
-            grounding_references=("result:overview",),
-            follow_up_suggestions=(suggestion,),
-        )
+    answer = ResultInterpretationAnswer(
+        answer="Bounded scenario explanation. [result:overview]",
+        grounding_references=("result:overview",),
+        follow_up_suggestions=(suggestion,),
+    )
+
+    assert answer.follow_up_suggestions
+    assert "[result:" not in answer.follow_up_suggestions[0]
 
 
 def test_public_chat_request_requires_bounded_alternating_history() -> None:

@@ -79,6 +79,7 @@ from backend.app.cognition.result_interpreter import (
 )
 from backend.app.cognition.result_semantics import (
     buildResultFactCatalog,
+    deterministicInterpretationFallback,
     semanticRepairInstruction,
     validateInterpretationSemantics,
 )
@@ -636,6 +637,11 @@ class CognitionService:
             "current_draft": workflow.draft.model_dump(mode="json"),
             "recent_messages": recentMessages,
             "latest_user_message": latestUserMessage,
+            "event_goal_authoring_policy": {
+                "assistantAuthoredFields": ("title", "summary", "researchQuestion"),
+                "draftTheseWhenEventInstrumentAndDateAreKnown": True,
+                "doNotAskUserToWriteAssistantAuthoredFields": True,
+            },
         }
         request = self._buildRequest(
             runtime=runtime,
@@ -945,13 +951,67 @@ class CognitionService:
             progressObserver,
             ModelStreamProgress(stage=ModelStreamStage.GENERATING),
         )
-        answerResult = await self._execute(
-            request=answerRequest,
-            schema=ResultInterpretationAnswer,
-            policy=self._interpretationPolicy(stage="answer"),
-            resultValidator=validateInterpretation,
-            useDecisionCache=False,
-        )
+        try:
+            answerResult = await self._execute(
+                request=answerRequest,
+                schema=ResultInterpretationAnswer,
+                policy=self._interpretationPolicy(stage="answer"),
+                resultValidator=validateInterpretation,
+                useDecisionCache=False,
+            )
+        except ModelGatewayError as error:
+            # 解释助手是阅读层，不应因为供应商超时、JSON 形状偏差或一次结构
+            # 修复失败而完全不可用。服务器已经持有经过计算和版本化的结果，
+            # 因此始终可以返回明确标注的确定性摘要；错误仍进入审计元数据。
+            plannerUsage = plannerResult.usage if plannerResult is not None else ModelUsage()
+            plannerLatency = plannerResult.latencyMs if plannerResult is not None else 0.0
+            plannerAttempts = plannerResult.transportAttempts if plannerResult is not None else 0
+            plannerUncertainAttempts = (
+                plannerResult.uncertainBillableAttempts if plannerResult is not None else 0
+            )
+            failureCodes = (
+                *((code.value for code in plannerResult.failureCodes) if plannerResult else ()),
+                *((plannerError.code.value,) if plannerError else ()),
+                error.code.value,
+            )
+            await emitModelStreamProgress(
+                progressObserver,
+                ModelStreamProgress(
+                    stage=ModelStreamStage.COMPLETED,
+                    elapsedMs=plannerLatency,
+                    chunkCount=0,
+                ),
+            )
+            return ResultInterpretationRun(
+                interpretation=deterministicInterpretationFallback(
+                    result,
+                    language=language,
+                    includeAnalysisSummary=includeAnalysisSummary,
+                ),
+                result_hash=resultHash,
+                provider=runtime.provider,
+                model=runtime.model,
+                tool_activity=toolActivities(toolResults, language),
+                usage=plannerUsage,
+                latency_ms=plannerLatency,
+                model_calls=min(6, max(1, plannerAttempts + max(1, error.attempts))),
+                cache_hit=False,
+                repair_used=error.repairUsed,
+                planner_used=not initial,
+                prompt_version=RESULT_INTERPRETATION_PROMPT.version,
+                planner_fallback_used=plannerError is not None,
+                semantic_validation_status="DETERMINISTIC_FALLBACK",
+                deterministic_fallback_used=True,
+                semantic_violation_codes=(),
+                thinking_preference_enabled=runtime.thinkingEnabled,
+                thinking_enabled=answerRequest.samplingConfig.thinking_enabled,
+                streamed=True,
+                transport_attempts=plannerAttempts + max(0, error.attempts),
+                uncertain_billable_attempts=(
+                    plannerUncertainAttempts + max(0, error.uncertainBillableAttempts)
+                ),
+                failure_codes=tuple(dict.fromkeys(failureCodes)),
+            )
         answerResult = replace(
             answerResult,
             data=self._normalizeInterpretationAnswer(
@@ -971,6 +1031,7 @@ class CognitionService:
         semanticStatus: Literal[
             "PASSED",
             "REPAIRED",
+            "COMPLETED_WITH_WARNINGS",
             "DETERMINISTIC_FALLBACK",
         ] = "PASSED"
         deterministicFallbackUsed = False
@@ -980,6 +1041,12 @@ class CognitionService:
             requirePrimaryFinding=initial,
         )
         semanticViolationCodes = list(semanticReport.violation_codes)
+
+        # 覆盖不足或启发式数字扫描命中只进入复核提示。它们不能让已经通过
+        # JSON、引用 allowlist、内容安全和投资建议边界的正常回答消失，也不应
+        # 为了满足正则再向供应商计费一次。
+        if semanticReport.valid and semanticReport.advisory_violation_codes:
+            semanticStatus = "COMPLETED_WITH_WARNINGS"
 
         if not semanticReport.valid:
             # 结构合格但语义不合格的候选只保留在当前内存中。这里最多发起一次
@@ -1053,32 +1120,42 @@ class CognitionService:
                 semanticViolationCodes.extend(repairedSemanticReport.violation_codes)
                 if repairedSemanticReport.valid:
                     terminalAnswerResult = semanticRepairResult
-                    semanticStatus = "REPAIRED"
+                    semanticStatus = (
+                        "COMPLETED_WITH_WARNINGS"
+                        if repairedSemanticReport.advisory_violation_codes
+                        else "REPAIRED"
+                    )
                 else:
-                    violationValues = sorted({code.value for code in semanticViolationCodes})
-                    raise ModelGatewayError(
-                        FailureCode.MODEL_RESPONSE_INVALID,
-                        "result interpretation failed semantic validation after one repair",
-                        attempts=transportAttempts,
-                        uncertainBillableAttempts=uncertainBillableAttempts,
-                        repairUsed=True,
-                        safeDiagnostics={
-                            "failureStage": "SEMANTIC_REPAIR",
-                            "violationCodes": ",".join(violationValues)[:512],
-                        },
+                    # 修复候选仍存在确定事实冲突时，只替换为服务器可核验摘要，
+                    # 不再把整个已计费请求变成空白错误页。
+                    deterministicFallbackUsed = True
+                    semanticStatus = "DETERMINISTIC_FALLBACK"
+                    terminalAnswerResult = replace(
+                        semanticRepairResult,
+                        data=deterministicInterpretationFallback(
+                            result,
+                            language=language,
+                            includeAnalysisSummary=includeAnalysisSummary,
+                        ),
                     )
             except ModelGatewayError as error:
-                # 严格解释模式中，语义修复失败必须成为显式失败事件。不得把
-                # 固定服务器模板保存成 AI 回答，也不得盲目再次请求而重复计费。
-                error.repairUsed = True
-                if not error.safeDiagnostics:
-                    error.safeDiagnostics = {
-                        "failureStage": "SEMANTIC_REPAIR",
-                        "violationCodes": ",".join(
-                            sorted({code.value for code in semanticViolationCodes})
-                        )[:512],
-                    }
-                raise
+                # 初次结构化候选已经可读时，后续语义修复的网关故障不应抹掉
+                # 整轮结果。返回服务器核验摘要并透明记录修复失败。
+                cacheHit = False
+                repairUsed = error.repairUsed or repairUsed
+                transportAttempts += max(0, error.attempts)
+                uncertainBillableAttempts += max(0, error.uncertainBillableAttempts)
+                failureCodes.append(error.code)
+                deterministicFallbackUsed = True
+                semanticStatus = "DETERMINISTIC_FALLBACK"
+                terminalAnswerResult = replace(
+                    answerResult,
+                    data=deterministicInterpretationFallback(
+                        result,
+                        language=language,
+                        includeAnalysisSummary=includeAnalysisSummary,
+                    ),
+                )
 
         # 同一代码可能同时出现在初始候选与修复候选中；历史只保留稳定去重集合。
         semanticViolationCodeValues = tuple(sorted({code.value for code in semanticViolationCodes}))

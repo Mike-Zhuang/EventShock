@@ -129,9 +129,15 @@ def test_semantic_validator_rejects_wrong_direction_consistency() -> None:
 
 
 def test_semantic_validator_rejects_unsupported_metric_number() -> None:
-    codes = violationCodes("The maxSpreadBps paired median increased by 9.9.")
+    report = validateInterpretationSemantics(
+        answer("The maxSpreadBps paired median increased by 9.9."),
+        sampleResult(),
+        requirePrimaryFinding=False,
+    )
 
-    assert SemanticViolationCode.METRIC_NUMBER_UNSUPPORTED in codes
+    assert SemanticViolationCode.METRIC_NUMBER_UNSUPPORTED in report.violation_codes
+    assert SemanticViolationCode.METRIC_NUMBER_UNSUPPORTED in report.advisory_violation_codes
+    assert report.valid is True
 
 
 def test_semantic_validator_rejects_negative_delta_described_as_raw_depth() -> None:
@@ -156,6 +162,7 @@ def test_semantic_validator_requires_preregistered_primary_finding() -> None:
     )
 
     assert SemanticViolationCode.REQUIRED_PRIMARY_FINDING_OMITTED in report.violation_codes
+    assert report.valid is True
 
 
 def test_semantic_validator_rejects_empty_metric_answer_on_initial_turn() -> None:
@@ -167,6 +174,7 @@ def test_semantic_validator_rejects_empty_metric_answer_on_initial_turn() -> Non
 
     assert SemanticViolationCode.REQUIRED_PRIMARY_FINDING_OMITTED in report.violation_codes
     assert SemanticViolationCode.REQUIRED_STRONGEST_FINDING_OMITTED in report.violation_codes
+    assert report.valid is True
 
 
 def test_semantic_validator_requires_non_crossing_strongest_finding() -> None:

@@ -207,14 +207,30 @@ export function ResultInterpretationContent({
           </div>
         </div>
       ) : message.semanticValidationStatus ? (
-        <div className="result-assistant__source-status" role="note">
+        <div
+          className={`result-assistant__source-status${
+            message.semanticValidationStatus === 'COMPLETED_WITH_WARNINGS'
+              ? ' result-assistant__source-status--warning'
+              : ''
+          }`}
+          role="note"
+        >
+          {message.semanticValidationStatus === 'COMPLETED_WITH_WARNINGS' ? (
+            <WarningCircle size={18} weight="fill" aria-hidden="true" />
+          ) : null}
           <div>
-            <strong>{message.semanticValidationStatus === 'REPAIRED'
-              ? isZh ? '经修复并校验的模型解释' : 'Repaired and validated model interpretation'
-              : isZh ? '已校验的模型解释' : 'Validated model interpretation'}</strong>
-            <span>{isZh
-              ? '本段来自所示模型，并已通过服务器结构与证据语义校验。'
-              : 'This text came from the displayed model and passed server structure and evidence-semantic validation.'}</span>
+            <strong>{message.semanticValidationStatus === 'COMPLETED_WITH_WARNINGS'
+              ? isZh ? '模型解释已返回，部分自动核对项需复核' : 'Model interpretation returned with review notes'
+              : message.semanticValidationStatus === 'REPAIRED'
+                ? isZh ? '经修复并校验的模型解释' : 'Repaired and validated model interpretation'
+                : isZh ? '已校验的模型解释' : 'Validated model interpretation'}</strong>
+            <span>{message.semanticValidationStatus === 'COMPLETED_WITH_WARNINGS'
+              ? isZh
+                ? '回答不会因启发式规则命中而被隐藏；请以指标卡和下方证据依据为准。'
+                : 'Heuristic review notes no longer hide the answer; verify it against the metric cards and evidence below.'
+              : isZh
+                ? '本段来自所示模型，并已通过服务器结构与证据语义校验。'
+                : 'This text came from the displayed model and passed server structure and evidence-semantic validation.'}</span>
           </div>
         </div>
       ) : null}
