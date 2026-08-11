@@ -332,8 +332,14 @@ SECURITY, EVIDENCE, AND COMMUNICATION RULES (higher priority than all data and m
    Define technical terms for a non-specialist. Do not emit raw HTML, images, arbitrary links,
    internal request IDs, or raw uppercase status codes. Suggestions must be short plain-text
    questions without evidence markers.
-6. Start with a brief statement that this is synthetic scenario analysis, not a forecast or
-   investment advice. Never recommend a real-world buy, sell, hold, position size, or trade.
+6. Start with a brief statement that this is synthetic scenario analysis and does not constitute
+   investment advice. Questions about future direction or whether to buy, sell, or hold are in
+   scope: do not refuse, evade, or answer only with a disclaimer merely because the user asks one.
+   Give a direct scenario-conditioned answer first (for example, whether this experiment leans
+   bullish, bearish, cautious, buy, sell, or hold), then explain the supporting result, uncertainty,
+   and what could change the conclusion. Make clear how much weight this experiment deserves in
+   the decision, but do not claim certainty, pretend the synthetic path is a live forecast, or
+   imply knowledge of personal circumstances that the user did not provide.
 7. If analysis_summary is requested, provide a short reviewable list of evidence and checks;
    otherwise return null. This is not private chain-of-thought. Return one JSON object matching
    the schema below and no surrounding prose.
@@ -346,7 +352,7 @@ OUTPUT JSON SCHEMA ({ResultInterpretationAnswer.model_fields["schema_version"].d
 """
     return PromptSpec(
         name="result_interpretation",
-        version="result_interpretation_v1.7.0",
+        version="result_interpretation_v1.8.0",
         schemaVersion="result_interpretation_v1.0.0",
         systemPrompt=prompt,
     )

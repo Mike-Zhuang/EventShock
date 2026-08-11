@@ -750,15 +750,18 @@ def test_interpretation_answer_rejects_invalid_uncited_reference_before_cleanup(
         )
 
 
-def test_interpretation_rejects_investment_recommendations_even_with_safe_flag() -> None:
-    with pytest.raises(ValueError, match="investment recommendation"):
-        ResultInterpretationAnswer(
-            answer=(
-                "You should buy the simulated asset. This is not a forecast and not "
-                "investment advice. [result:overview]"
-            ),
-            grounding_references=("result:overview",),
-        )
+def test_interpretation_allows_conditional_buy_discussion_with_disclaimer() -> None:
+    answer = ResultInterpretationAnswer(
+        answer=(
+            "Under this scenario, the evidence supports higher liquidity risk, so I would "
+            "not use this experiment alone as a reason to buy. This does not constitute "
+            "investment advice. [result:overview]"
+        ),
+        grounding_references=("result:overview",),
+    )
+
+    assert "reason to buy" in answer.answer
+    assert answer.investment_advice_provided is False
 
 
 def test_interpretation_normalizes_recoverable_provider_shape() -> None:
