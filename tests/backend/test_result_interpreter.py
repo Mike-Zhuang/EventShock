@@ -728,8 +728,7 @@ def test_interpretation_answer_normalizes_duplicate_and_uncited_legal_references
 def test_interpretation_answer_auto_indexes_inline_references() -> None:
     answer = ResultInterpretationAnswer(
         answer=(
-            "The overview and paired delta were checked. "
-            "[result:overview] [result:paired-deltas]"
+            "The overview and paired delta were checked. [result:overview] [result:paired-deltas]"
         ),
         grounding_references=("result:overview",),
     )

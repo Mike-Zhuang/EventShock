@@ -424,9 +424,7 @@ class ResultInterpretationAnswer(StrictFrozenModel):
         # 引用清单只是供界面生成证据卡的冗余索引。模型漏抄清单、顺序不同或
         # 只在清单中给出合法引用时，服务端可以无损规范化，没必要再次计费或
         # 丢弃正文。未知 ID 仍通过 evidenceIds() 的并集进入网关 allowlist 硬校验。
-        allReportedReferences = tuple(
-            dict.fromkeys((*reportedReferences, *citedReferencesInOrder))
-        )
+        allReportedReferences = tuple(dict.fromkeys((*reportedReferences, *citedReferencesInOrder)))
         normalizedReferences = citedReferencesInOrder or reportedReferences
 
         object.__setattr__(self, "_reported_grounding_references", allReportedReferences)
