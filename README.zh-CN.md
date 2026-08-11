@@ -6,217 +6,224 @@
 
 # EventShock Lab
 
-**改一个条件，看同一场冲击会不会更糟。** EventShock Lab 让市场事件风险分析人员、机构研究团队和教学人员比较同一事件的两个模拟版本：一个基准情景和一个只改变单一条件的干预情景。它的主要用途是机构事件风险研究与教学，不服务于个人投资决策。
+<p align="center">
+  <strong>只改变一个条件，观察同一场模拟冲击是否变得更严重。</strong>
+</p>
 
-正式地址：[https://eventshock.mikezhuang.cn](https://eventshock.mikezhuang.cn)
+<p align="center">
+  <a href="https://github.com/Mike-Zhuang/EventShock/actions/workflows/ci.yml"><img alt="CI 状态" src="https://github.com/Mike-Zhuang/EventShock/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <img alt="Python 3.12.13" src="https://img.shields.io/badge/Python-3.12.13-3776AB?logo=python&logoColor=white">
+  <img alt="React 与 TypeScript" src="https://img.shields.io/badge/React%20%2B%20TypeScript-Production%20UI-0F62FE?logo=react&logoColor=white">
+  <a href="LICENSE"><img alt="PolyForm Strict 1.0.0 源码可用许可证" src="https://img.shields.io/badge/License-PolyForm%20Strict%201.0.0-FFB000"></a>
+</p>
 
-> 本项目不会告诉任何人应该买入还是卖出、何时交易、目标价格是多少、现实世界一定会发生什么，也不保证任何投资收益。SpaceX 旗舰案例中的公司、监管与指数事件事实来自可追溯来源；价格路径、订单簿、资金流、智能体行为和反事实效果均为明确标记的合成研究数据。
+<p align="center">
+  <a href="https://eventshock.mikezhuang.cn"><strong>打开在线产品</strong></a>
+  · <a href="#两分钟体验流程">体验流程</a>
+  · <a href="#在本地运行">本地运行</a>
+  · <a href="https://github.com/Mike-Zhuang/EventShock/issues/new/choose">提交问题</a>
+</p>
 
-当前证据状态有明确边界：历史案例是可运行的机制研究案例，不是经过独立校准或外部验证的预测模型。目标用户访谈和独立领域审查仍属于待完成的人类证据，本仓库不声称这些工作已经完成。
+EventShock Lab 是一个已经部署的研究原型，面向**市场事件风险分析人员、机构研究团队和行为金融教学人员**。它比较一组基准模拟和一组只改变单一已声明条件的配对模拟，帮助人研究风险传播机制，而不是用预测代替人的判断。
 
-## 核心流程
+> [!IMPORTANT]
+> 所有价格路径、订单簿、资金流、智能体行为和反事实效果都是合成的。结果只在选定证据、模型与假设下成立，不是预测，也不构成投资建议。
 
-EventShock 只回答一个受控问题：**如果只改变一个已声明的条件，同一场模拟冲击会变得更好、更糟，还是出现实质差异？** 这个答案只在系统明确写出的模型和假设范围内成立。
+## 为什么做这个项目
 
-```text
-选择来源可追溯或完全合成的 Event Pack
-  -> 人工批准、编辑或拒绝候选声明
-  -> 冻结本次会话的证据集
-  -> 配置规则或有限 LLM 认知节点
-  -> 选择且只选择一个反事实干预
-  -> 运行 10、25 或 50 组 matched seeds
-  -> 比较分布、配对差异和市场路径
-  -> 查看事件到成交的 Trace
-  -> 导出含 JSON、CSV、Markdown 与 Parquet 的可复现实验 ZIP
+传统压力测试常从主观叙事和固定冲击参数出发，不容易系统检查证据如何改变信念、信念如何通过网络传播、订单如何与有限流动性相互作用，以及级联从哪里开始。EventShock 把这类定性故事变成可检查、可重放的实验，同时把重要判断留给人。
+
+项目刻意只回答一个窄问题：
+
+> **冻结事件证据并保持其他设置不变时，改变一个条件会让模拟冲击变得更好、更糟，还是产生实质差异？**
+
+## Human in the loop：人在闭环中
+
+AI 可以降低信息整理和解释成本，但不能替人拥有研究结论。产品把 AI 与人的交接点直接做进流程。
+
+| 阶段 | AI 可以协助 | 人必须完成 | 确定性系统负责 |
+| --- | --- | --- | --- |
+| 定义研究 | 提议事件标题、摘要、目标标的和研究问题 | 编辑并明确应用候选内容 | 保存人接受的版本和审计轨迹 |
+| 收集证据 | 提议搜索式、发现候选网页、抽取候选主张 | 打开原始来源；逐条批准、修改或拒绝；确认时间和再分发边界 | 保存来源哈希，审核未完成时禁止冻结 |
+| 设计实验 | 解释参数，并提议一个干预 | 选择基准、唯一干预、指标、随机种子数和费用上限 | 拒绝未声明的差异与未来信息泄漏 |
+| 模拟行为 | 可选地为代表性 Agent 生成受证据约束的信念与行动偏好 | 决定是否启用 LLM 认知，并查看修复或回退状态 | 将定价、风控、账本、订单和撮合置于 LLM 权限之外 |
+| 解释结果 | 解释服务器计算的指标，并依据证据回答追问 | 阅读区间和局限、查看机制链路并判断结果意味着什么 | 保持原始指标、版本、来源和导出包不可变 |
+
+这套分工就是产品的核心：**AI 提议；人批准并解释；确定性机制执行并记录。**
+
+## 两分钟体验流程
+
+1. 打开[在线产品](https://eventshock.mikezhuang.cn)，登录后选择 **AI 引导**或专家流程。
+2. 描述事件和研究问题。助手会生成可编辑的元数据候选，但不会自动应用。
+3. 粘贴来源正文或使用受限联网发现。人工审核每个来源和候选主张；只有全部项目都有明确的人类决定后，才能冻结 Event Pack。
+4. 选择一个干预，例如降低做市商容量，然后运行使用相同随机种子的基准组和干预组。可选 LLM Agent 只能影响受限认知，不能直接定价或提交订单。
+5. 比较配对差异和结果分布、查看机制链路、向结果解释助手追问，并导出可复现实验包。
+
+默认的 `RULE_ONLY` 路径不需要模型 Key。`HYBRID_LLM` 和结果解释助手使用用户提供的 Key；智谱是已测试的默认供应商，其他供应商会标记为社区预览。
+
+## 已实现内容
+
+- 已部署的双语、账号制 Web 应用。
+- AI 引导和专家两套流程，覆盖事件定义、来源审核、Event Pack 冻结、情景设计、运行前复核、实验运行和结果解释。
+- 手动文本/文件导入和受限联网发现；搜索摘要只能用于发现来源，不能直接作为证据。
+- 使用价格—时间优先订单簿、风险控制、信息网络、十一类 Agent 和七种单变量干预的配对基准/干预模拟。
+- 以分布为先的结果、配对差异、不确定性区间、机制链路、研究诊断、结果作废、持久历史和可复现 ZIP 导出。
+- 可选的多供应商结构化 LLM 认知，以及带证据引用和多轮追问的双语结果解释。
+
+完整产品与研究规范见[端到端蓝图](EventShock_Lab_End_to_End_Blueprint_ENGIN170E_CN.md)。
+
+## 我们如何使用 AI 构建项目——诚实版本
+
+我们使用 Codex、Claude 和模型供应商来阅读仓库、起草实现与测试、分析日志、提议事件元数据、抽取候选主张和解释模拟结果。团队仍然负责决定产品范围、研究边界、证据取舍、验收标准，以及一次发布是否可以上线。AI 生成的代码只有经过人工检查、自动测试、CI、部署健康检查和生产版本核对后，才会进入 `main`。
+
+下面是几次真正改变我们使用 AI 方式的经历：
+
+| 发生了什么 | AI 做错了什么 | 人如何处理 |
+| --- | --- | --- |
+| 把 FAA 紧急适航指令转成 Event Pack | 模型把完整句子切成碎片，并给主张分配了过于宽泛的影响通道 | 我们对照原文逐条检查，要求每条主张都有明确的人类决定，改进结构化抽取，并禁止批量批准低质量规则回退候选 |
+| 测试者使用 AI 引导流程 | 助手重复询问用户已经提供的字段，有时在应该推进工作流时只给了一段回答 | 我们复现会话、拆清阶段、在生成期间保留用户消息和候选，并要求每次转换都由用户审核和应用 |
+| 测试者询问结果助手正常的未来走势或买卖问题 | 过严的语义守卫把本可基于证据回答的问题直接拒绝 | 我们移除关键词式拒绝，保留“不构成投资建议”的边界，并要求先直接给出情景条件下的回答，再说明证据与不确定性 |
+
+我们明确不让 AI：
+
+- 批准证据、冻结 Event Pack、选择最终干预或决定生产发布；
+- 编造缺失来源、价格、置信区间或现实确定性；
+- 设置市场价格、绕过风控、访问未声明的实时数据或直接下单；
+- 把不可核验的私有思维链当成结论依据。
+
+人机分工中，我们自己编写并维护人工决策门、研究边界、测试要求和发布标准，因为这些是关于责任的判断，不是文字补全任务。
+
+## 在本地运行
+
+### 环境要求
+
+- Git
+- Conda 与 **CPython 3.12.13**
+- Node.js 22–26 和 npm
+
+Docker 对本地开发不是必需项。不要把依赖安装进系统 Python、Conda `base` 或其他项目的环境。
+
+### 1. 克隆并准备 Python 环境
+
+```bash
+git clone https://github.com/Mike-Zhuang/EventShock.git
+cd EventShock
+conda env list
 ```
 
-价格由整数 tick、价格-时间优先的限价订单簿撮合产生，不由 LLM 直接生成。相同配置和随机种子可以确定性重放；基准与干预只允许一个已声明参数不同。
-
-## 已实现功能
-
-- 英文和简体中文完整界面，默认英文；语言和明暗主题在浏览器中持久化。
-- 邮箱注册、双语验证码、登录、退出与密码重置；研究数据按已验证账号永久归属，管理员可在独立面板查看用户状态、实验数量及经过隐私最小化的操作记录。
-- SpaceX 2026 IPO 与 Nasdaq-100 快速纳入旗舰包：真实事件事实、官方来源链接和 PIT 时间边界，与合成行情及机制假设严格分层。
-- CrowdStrike 2024 故障与 GameStop 2021 社交级联历史案例包：均可审核、冻结和运行，但状态明确为“案例可用、真实历史研究待执行”，不能冒充已校准验证。
-- 按账号隔离的 Event Pack Factory：支持批量粘贴多份来源，也支持用智谱 Web Search 发现候选网页、经服务端 Reader 读取完整正文、逐份人工审核，再物化为待审核 Event Pack。搜索摘要只用于发现，不能支撑主张或冻结。
-- 专家模式保留完整手动参数；AI 引导模式把事件目标、来源、主张、事件包、单一干预和运行前检查拆成有界阶段并按账号保存。注册后的推荐只依据用户自报的经验和协助偏好，不考试、不评级，用户仍可自行选择模式。
-- Event Pack 文本/文件导入、确定性或外部模型结构化候选主张抽取、人工审核、双语编辑、拒绝和冻结；所有上传正文与来源元数据在抽取或调用外部模型前先经过确定性内容安全扫描，高风险内容直接阻断，可复核内容必须人工确认并脱敏，安全摘要不包含命中原文。
-- 七类单变量干预：做市商容量、社交放大、止损敏感度、澄清延迟、流动性深度、被动资金流和信息延迟。
-- Scenario 创建、保存、克隆、冻结与 diff；市场、人口、网络、LLM、结果指标和停止规则均有类型化配置与启动前检查。
-- 后台实验队列、SSE 状态更新、真实进度、取消、历史记录，以及按完整 matched pair 持久化的校验断点；服务重启后可从 `FAILED_RETRYABLE` 重新启动并复用已验证的完整配对与冻结认知序列，不复用半完成配对。
-- 十一类规则智能体：噪声、价值、动量、均值回归、做市、被动资金、机构执行、止损、去杠杆、强制平仓与套利。
-- Provider-neutral 认知网关与 BYOK：默认智谱，并接入 OpenAI、Anthropic、Google Gemini、DeepSeek、阿里云百炼/Qwen 和 Moonshot/Kimi；按供应商使用原生 JSON Schema 或 JSON Object，再统一执行严格本地 Schema/Evidence/Action 校验、一次修复和确定性回退。
-- 限价单、部分成交、IOC、价格保护、自成交防护、做市库存偏移、离散事件队列、借券/保证金/强平账本和确定性事件追踪。
-- 六类信息网络、`publishedAt`/`knownAt`/`scheduledAt`/仿真时间隔离、谣言与澄清传播，以及未来信息防泄漏。
-- 17 项风险、流动性、网络、Agent 经济结果、强平和 LLM 指标；同时报告经验区间、配对 bootstrap、效应量、方向一致率与尾部概率。
-- 结果页提供显式触发的 BYOK AI 解释助手：后端按当前用户读取权威结果快照，通过白名单只读工具生成带 `result:*` 引用的中英文解释，并支持多轮追问、折叠的可核验分析摘要、工具活动和来源引用；POST SSE 只展示固定安全阶段与聚合计数，使用心跳驱动的无活动超时并严格限制缓冲区，结构校验通过后才展示最终回答，不返回私有思维链。中断后的首次恢复复用原请求标识，只有明确终态失败后的新请求才要求费用二次确认。通过结构与证据校验的最终问答按账号和实验保存到 SQLite，用户可跨浏览器恢复或主动删除；API Key、供应商私有推理、未验证流片段与问答正文都不进入审计日志。
-- 可执行的顺序停止规则，以及预注册主指标的负对照、参数恢复 knockout、两水平局部敏感性、精确 sign test 和 Holm 多重比较诊断；这些仍是模型内部诊断，不是外部因果证明。
-- Study Workbench 提供 7 个预注册模板、全因子与有界 Latin hypercube 设计、common seeds、2–4 个主指标、8 类负对照、10 类消融、family-level Holm 校正、探索性 rank-correlation 敏感性和不可变运行历史。Study 只执行受限规模的合成模型内部研究；认知臂使用冻结证据绑定 tape，若干消融是明确标注的最近可执行代理，所有结果都固定返回 `historicalValidityEstablished=false`。
-- Executive Risk Cards、Market Dynamics、Trace Explorer、验证梯度、模型清单、红队定义、发布门与哈希链审计。
-- 已完成实验可在当前账号内按原因码和说明标记为 `INVALIDATED`；底层结果与审计哈希保留，但结果、runs、metrics、traces 与导出接口会拒绝把它继续作为有效研究使用。按模型、版本或时间窗口批量失效仍未实现。
-- 实验历史按已验证账号隔离：每个账号最多保留 30 条，终态实验最多保留 90 天，全站最多保留 500 条并滚动淘汰；需要长期保存的研究工件必须在到期或淘汰前导出。升级前已有的匿名记录由一次性管理员引导安全认领，不改写原审计链。
-- 可复现 ZIP 含 Manifest、事件包、场景、结果、认知决策、Trace、双语报告、CSV，以及六张固定 Schema Parquet 表。
-- 参数上限、单仿真 worker、有限队列、请求体限制、稳定错误码和生产环境 API 文档关闭。
-
-默认运行仍是无需密钥、可确定性重放的 `RULE_ONLY`。普通用户可在当前登录会话中临时选择供应商、填写对应 API Key 并启用 `HYBRID_LLM`；默认选择仍为智谱 `glm-5.2`。普通用户的 Key 按登录会话隔离，只保存在服务器进程内存中，退出、过期、切换供应商或服务重启后必须重新填写。部署指定的唯一管理员有一项明确例外：该账号可主动选择把一份供应商凭据以认证加密密文持久保存到服务器，并可随时替换或删除。明文 Key 不会返回浏览器持久存储、日志、审计详情、账户导出、实验导出或其他用户；但这只是静态加密而不是端到端加密，主机 root、Docker 管理员及运行中的应用进程仍属于信任边界，因为应用调用供应商时必须短暂解密。LLM 只能提出候选事实或有限的信念与行动偏好，不能设置价格、绕过风险控制或直接提交订单，最终订单必须经过固定策略、账本风控与确定性撮合层。若部分结构化输出失败并按用户策略安全回退，结果会明确标记为 `HYBRID_LLM_PARTIAL_RULE_FALLBACK`，逐条保留修复、回退与失败原因；关闭 `fallbackToRules` 后任何规则回退都会使实验失败关闭。
-
-混合模式按 `decisionIntervalSteps` 和 `callBudget` 生成时点安全的认知决策序列，并将同一冻结序列复用于基准/干预及 matched seeds。模型能看到届时已知的证据、受限社交摘要和自身上轮记忆；确定性策略会响应当前模拟订单簿，但模型不会在每个随机种子中重新观察内生价格。高级配置只开放供应商明确支持的 `temperature`、`topP`、`presencePenalty`、`frequencyPenalty`、`seed` 与 `timeoutSeconds` 子集，并执行服务端范围校验；不允许自定义 Base URL、请求头、工具、系统提示词或任意 JSON 请求体。
-
-系统提示词在本源码可用仓库中可见，因此安全设计不依赖“藏住提示词”。外部来源和历史对话只会进入明确分隔的不可信数据区；模型结果还要经过确定性泄漏/注入检测、严格 Schema、证据 ID、时间和动作白名单校验，失败时只有限修复并默认关闭。该组合只能降低、不能消除提示词注入风险，人工审核仍是必要门禁。AI 页面同时提供不计费的 code-grader 自检和显式触发的已配置真实模型 golden/攻击集，两者在结果中严格区分。除智谱外的供应商当前标记为仅通过自动化契约测试的社区预览；供应商能力、价格口径、真实接入验证状态、结果解释助手、固定端点与隐私边界见 [AI 供应商接入说明](usage_documents/ai-providers.md)。Factory 的存储、删除和人工审核流程见 [Event Pack Factory 与 AI 引导说明](usage_documents/event-pack-factory.md)。
-
-## 架构
-
-```text
-Browser
-  -> Caddy (HTTPS, security headers, compression)
-  -> BaoTa Nginx (private :18080 reverse proxy and real traffic accounting)
-  -> EventShock app (FastAPI API + built React/TypeScript/Carbon assets)
-       -> SQLite account ownership, Factory, guided workflow, scenario, audit, experiment, validated AI chat and Study state
-       -> SMTP SSL bilingual verification mail (registration and password reset only)
-       -> allowlisted multi-provider structured cognition gateways (optional, BYOK)
-       -> deterministic event queue, information network, ledger and order-book core
-```
-
-生产环境由两个轻量容器和宿主机宝塔 Nginx 组成：Caddy 独占公网 80/443 并处理 TLS，宝塔 Nginx 只在 Docker 私网地址的 18080 端口做真实反向代理与流量记账，单体应用只映射到宿主机回环地址 `127.0.0.1:18000`。启用 UFW 时，只允许动态识别出的 Caddy Docker bridge 与其 subnet 访问 host-gateway 的 18080，禁止对 `Anywhere`、`0.0.0.0/0` 或其他公网来源放行该端口。首次引导或故障诊断可以让 Caddy 暂时直连容器内应用；这不会产生宝塔站点流量数据。SQLite、证书和配置保存在独立持久卷中。
-
-## 开发环境
-
-项目的开发、测试、容器和部署运行时统一使用 **CPython 3.12.13**。除非你能够自行保证版本、隔离和依赖一致性，否则使用项目默认的 Conda 环境，不要把依赖安装到系统 Python 或 Conda `base`。
-
-首次创建环境：
+如果列表里没有 `eventshock`，只创建一次：
 
 ```bash
 conda env create --file environment.yml
-conda activate eventshock
-python -c "import sys; print(sys.executable); assert sys.version_info[:3] == (3, 12, 13)"
 ```
 
-如果 `eventshock` 已存在，不要重复创建；先按[开发环境安装说明](usage_documents/install.md)核对版本，再在明确了解影响后更新依赖。
-
-### 本地运行
-
-终端一启动 API：
+不依赖 shell 激活，直接确认实际解释器：
 
 ```bash
-conda activate eventshock
-python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
+conda run -n eventshock python -c "import sys; print(sys.executable); assert sys.version_info[:3] == (3, 12, 13), sys.version"
 ```
 
-终端二启动前端；Vite 会把 `/api` 代理到 `127.0.0.1:8000`：
+### 2. 安装前端依赖
 
 ```bash
 cd frontend
 npm ci
-npm run dev
-```
-
-打开 `http://127.0.0.1:5173`。
-
-本地开发默认关闭邮箱登录，以继续使用隔离的 `X-Session-ID` 测试数据；生产环境会强制开启账号认证与 Secure Cookie，缺少认证密钥或 SMTP 配置时启动失败关闭。生产密钥只能按[自有服务器部署指南](usage_documents/server-deploy.md)写入服务器受限文件，禁止加入 `.env`、Git 或日志。
-
-### 生产式本地构建
-
-```bash
-cd frontend
-npm ci
-npm run build
 cd ..
-python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 ```
 
-构建完成后，FastAPI 会直接提供 `frontend/dist` 中的单页应用。
+### 3. 分别启动两个开发进程
 
-### 重放导出的实验
-
-实验 ZIP 包含完整场景、Event Pack、matched seeds、认知决策和逐次事件日志哈希。在相同代码版本与 CPython 3.12.13 环境中执行：
+终端一——API：
 
 ```bash
-conda activate eventshock
-python scripts/replay-bundle.py /path/to/eventshock-experiment.zip
+conda run -n eventshock python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 ```
 
-命令会实际重跑每一对基准/干预情景，并逐项核对配置哈希、Event Pack 哈希、事件日志哈希和 run-level 指标；这证明模型内部的确定性重放，不等同于外部历史有效性。
-
-## 测试与检查
+终端二——前端：
 
 ```bash
-conda activate eventshock
-python -m ruff check backend tests
-python -m ruff format --check backend tests
-python -m pytest
+cd frontend
+npm run dev -- --host 127.0.0.1
+```
 
+打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)。本地开发默认关闭邮箱认证，因此不需要 SMTP 凭据。
+
+确认 API 和 Vite 代理都正常：
+
+```bash
+curl http://127.0.0.1:8000/api/health
+curl http://127.0.0.1:5173/api/health
+```
+
+两个命令都应返回包含 `"status":"ok"` 的 JSON。Conda 安装和排障见[安装说明](usage_documents/install.md)。
+
+## 测试
+
+后端：
+
+```bash
+conda run -n eventshock python -m ruff check backend tests
+conda run -n eventshock python -m ruff format --check backend tests
+conda run -n eventshock python -m pytest
+```
+
+前端：
+
+```bash
 cd frontend
 npm run typecheck
 npm test
 npm run build
 ```
 
-后端测试覆盖价格—时间优先、部分成交、价格保护、开盘竞价、研究级波动停牌、PIT 信息隔离、六类网络、借券/保证金、内容安全策略、认知 Schema 与安全回退、确定性重放、baseline-vs-baseline 零差异、配对统计、Study 编排、账号隔离、邮箱验证码、Cookie/CSRF、历史数据认领、哈希链审计、断点恢复、单实验 invalidation、SSE 状态流、完整实验生命周期和 ZIP/Parquet 导出。
+每个 Pull Request 和 `main` 更新都会在 CI 中重复后端、前端、生产镜像构建和容器冒烟测试。
 
-## Docker 与服务器部署
-
-本地生产式容器可在完成前端构建后启动：
-
-```bash
-cd frontend
-npm ci
-npm run build
-cd ..
-cp .env.example .env
-docker compose up --detach --build
-```
-
-服务器内存较小，因此生产镜像直接复制已经通过本地与 CI 验证的 `frontend/dist`，服务器只构建 Python 运行层，不会在主机上运行 Node。`frontend/dist` 是受 Git 跟踪的发布工件：修改前端后必须执行 `npm run build`，并把源码和对应的 `dist` 一起提交。
-
-正式更新采用 GitHub 拉取式链路。开发者在个人 `codex/*` 功能分支完成测试、commit 和 push，通过 Pull Request 合入 `main`；服务器只有在 `main` 上的 `Backend / Python 3.12.13`、`Frontend / Node 22` 与 `Production container` 三项 GitHub CI 全绿后才接受该 SHA。宝塔原生计划任务每 10 分钟调用 `/opt/eventshock/bin/baota-eventshock-task.sh`，每轮先核对当前运行时并尝试自愈 Caddy→宝塔 Nginx→应用链路，再匿名 fetch 公有仓库、拒绝非快进更新，并从目标 commit 的 `git archive` 构建带唯一镜像标签的发布版本。容器与公网健康检查必须返回目标 commit SHA，失败时自动恢复上一发布版本。
-
-默认公网链路由 Caddy 独占 80/443 并处理 TLS，应用只额外映射到 `127.0.0.1:18000`。宝塔任务的原生输出可在面板“计划任务”的日志中查看，稳定审计日志写入 `/opt/eventshock/shared/logs/github-sync.log`。正式监测链路必须采用 `Caddy -> Nginx:18080 -> app:18000` 的真实转发路径，并用仅覆盖 Caddy bridge/subnet 的精确 UFW 规则连接容器与宿主机；Caddy 直连应用只用于引导或故障诊断。不能通过公网放行 18080 或伪造宝塔“PHP 项目”数据库记录来制造监控数据。
-
-正式服务器的 DNS、首次安装、宝塔任务注册、Caddy、HTTPS、发布门禁、日志和排障步骤见[自有服务器部署指南](usage_documents/server-deploy.md)。正式域名使用以下解析：
+## 架构
 
 ```text
-A  eventshock  47.251.41.145  TTL 600
+Browser
+  -> FastAPI API + React/TypeScript 界面
+       ├─ 人工审核的 Event Pack 与账号所属的研究历史
+       ├─ 可选的结构化输出 LLM 网关
+       ├─ 确定性事件队列、信息网络、账本与订单簿
+       └─ SQLite 持久化、审计记录、导出和实验检查点
 ```
 
-当前没有稳定公网 IPv6，因此不创建 `AAAA` 记录。
+生产环境额外使用 Caddy HTTPS 和宝塔 Nginx 反向代理。运维细节放在[自有服务器部署指南](usage_documents/server-deploy.md)，不在 README 展开。
 
 ## 目录结构
 
 ```text
-backend/                       FastAPI、SQLite、实验服务和仿真内核
-event-packs/                   来源可追溯事件包与完全合成测试包
-frontend/                      React、TypeScript、Carbon UI 与双语界面
-tests/backend/                 订单簿、仿真和 API 测试
-usage_documents/               安装、Git、Agent 与服务器部署说明
-.github/workflows/ci.yml       Python 3.12.13、前端与容器 CI
-Dockerfile                     React 构建与 Python 3.12.13 运行镜像
-compose.yml                    Caddy、应用和持久卷
-Caddyfile                      自动 HTTPS 与反向代理
-requirements*.lock             已验证的生产与开发 Python 依赖锁
+backend/             FastAPI 服务、持久化、认知网关和模拟器
+event-packs/         来源可追溯与完全合成的 Event Pack
+frontend/            React、TypeScript、Carbon UI 与双语产品界面
+tests/backend/       后端、模拟、安全与生命周期测试
+usage_documents/     安装、AI 供应商、工作流、Git 与部署说明
+.github/             CI 与结构化 Issue 模板
 ```
 
-完整产品、科学、验证、安全和课程交付蓝图见 [EventShock_Lab_End_to_End_Blueprint_ENGIN170E_CN.md](EventShock_Lab_End_to_End_Blueprint_ENGIN170E_CN.md)。多来源事件包构建、智谱 Search/Reader、原文保留/删除和引导模式见 [Event Pack Factory 与 AI 引导说明](usage_documents/event-pack-factory.md)。
+## 文档
 
-## 协作规范
+- [English README](README.md)
+- [端到端蓝图](EventShock_Lab_End_to_End_Blueprint_ENGIN170E_CN.md)
+- [安装说明](usage_documents/install.md)
+- [Event Pack Factory 与 AI 引导说明](usage_documents/event-pack-factory.md)
+- [AI 供应商接入说明](usage_documents/ai-providers.md)
+- [Git 协作说明](usage_documents/git_use.md)
+- [自有服务器部署说明](usage_documents/server-deploy.md)
 
-1. 禁止任何人直接向 `main` 分支提交，包括直接 `push`、`merge` 或 `rebase` 后推送。
-2. 所有改动必须在个人功能分支完成。
-3. 所有改动必须通过 Pull Request 合并，并包含清晰的变更、测试和风险说明。
-4. 仓库所有者可在所有必需 CI 检查通过后合并本人发起的改动；其他贡献者的改动仍需团队 Review。任何人都不得绕过 CI、部署或生产健康检查门禁。
+## 项目状态与局限
 
-具体流程见 [Git 使用说明](usage_documents/git_use.md)。
+EventShock Lab 是仍在接受测试的**课程研究原型**，不是经过外部校准的预测产品。历史案例用于展示流程和内部机制，不代表已经证明现实预测能力。10 对随机种子适合课堂演示，不足以支持生产风险结论。用户仍需核对来源权利、保护私人数据，并在已声明模型假设内解释结果。
 
-## 数据、责任 AI 与限制
+## 贡献与支持
 
-- SpaceX 案例的事件事实来自所列 SEC、Nasdaq 等来源，但市场路径、深度、订单流、Agent 行为与反事实效果均为合成模型输出，不代表 SpaceX、Nasdaq 或任何真实证券的历史或未来表现。
-- 当前模型是单标的简化现货订单簿，包含受限借券、保证金和强平代理，但不包含完整期权市场、跨场所路由、清算会员制度或完整交易所规则。
-- 配对差异只描述所选模型假设下的内部机制，不构成现实世界因果效应。
-- 10 个 seeds 仅适合课程 Demo；界面会显示区间、有效样本数和限制，不能把单条路径当作统计结论。
-- 生产环境只收集账号访问所必需的邮箱地址，不收集姓名、身份证件、支付信息、券商凭据、IP 行为画像或与功能无关的私人通信；管理员才能查看邮箱与最小化活动摘要。用户主动提交给结果解释助手且通过安全校验的最终问答会保存到当前账号，供跨浏览器恢复和删除，因此不得在问题中输入秘密或个人身份信息；删除会移除问答正文，仅保留不含正文的会话标识哈希以阻止旧请求复活。密码采用带随机盐的 scrypt 摘要，验证码和会话令牌只保存不可逆摘要。普通用户的供应商 API Key 不进入账号数据库；部署指定管理员主动启用持久保存时，数据库只保存该凭据的认证加密密文与有限元数据，不保存明文。
-- Event Pack Factory 会把 `PASTE` 与 Reader 来源正文保存到按账号隔离的内部 SQLite payload 表，并从最近一次实质修改起暂存 7 天；普通来源/快照接口、日志、审计详情和导出不返回原文，owner 只能通过 no-store 专用接口按需展开。修订正文会创建新 revision、重新安全扫描并把审核重置为 `PENDING`。拒绝来源或删除/到期清理构建会删除对应 Factory 数据并尝试截断 SQLite WAL，但不会删除已经物化出的 Event Pack。Search、Reader 和物化使用持久化的 `clientRequestId + payload hash` 幂等边界，成功请求可恢复且不会重复调度。搜索摘要仍只保存为发现元数据，必须先批准候选记录、由 Reader 获取完整 HTTPS 正文，再单独审核所得证据来源。用户只能提交自己有权保存并发送给所选供应商的内容。确定性扫描器不是反病毒沙箱、完整附件解析器或完整隐私合规系统。
+请使用范围清晰的功能分支和 Pull Request；发布前必须通过所需 CI 与生产健康门禁。可以通过结构化模板[报告 Bug、提出功能建议或反馈已脱敏的供应商兼容性问题](https://github.com/Mike-Zhuang/EventShock/issues/new/choose)。
+
+请勿在公开 Issue 中提交 API Key、授权请求头、账号标识、邮箱地址、来源全文或其他个人与机密信息。
 
 ## 许可证
 
-本仓库采用 [PolyForm Strict License 1.0.0](LICENSE)。源码公开可见不等同于开放源代码软件；本项目属于源码可用（source-available）项目。
+本仓库依据 [PolyForm Strict License 1.0.0](LICENSE) **源码可用，但不是开源软件**。除许可证明确写出的范围外，它不授予分发、修改软件或创作衍生作品的权利。最终应以许可证原文为准。
 
-该许可证不授权分发软件，也不授权修改软件或基于软件创作新作品。其余使用仅在许可证规定的非商业用途等范围内获得授权；超出范围时，必须另行取得许可。以上仅为便于阅读的摘要，不替代或修改 `LICENSE` 中的英文许可证原文。
+本项目由 UC Berkeley ENGIN 170E 第 9 组维护。
