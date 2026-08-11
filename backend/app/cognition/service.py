@@ -78,9 +78,7 @@ from backend.app.cognition.result_interpreter import (
     toolResultsPayload,
 )
 from backend.app.cognition.result_semantics import (
-    buildResultFactCatalog,
     deterministicInterpretationFallback,
-    semanticRepairInstruction,
     validateInterpretationSemantics,
 )
 from backend.app.cognition.streaming import (
@@ -1042,122 +1040,15 @@ class CognitionService:
         )
         semanticViolationCodes = list(semanticReport.violation_codes)
 
-        # 覆盖不足或启发式数字扫描命中只进入复核提示。它们不能让已经通过
-        # JSON、引用 allowlist、内容安全和投资建议边界的正常回答消失，也不应
-        # 为了满足正则再向供应商计费一次。
-        if semanticReport.valid and semanticReport.advisory_violation_codes:
+        # 自然语言语义检查依赖关键词、数字扫描和方向词正则，不能可靠地区分
+        # “引用一个反例”与“模型自己下结论”。因此它只负责给人工复核留下诊断，
+        # 绝不能覆盖已经通过 JSON Schema、引用 allowlist、内容安全和投资建议
+        # 边界的模型回答，也不能为了迎合启发式规则再次向供应商发起修复请求。
+        # 只有上述确定性硬门禁失败时，_execute 才会进入结构修复或安全回退。
+        if semanticReport.violation_codes:
             semanticStatus = "COMPLETED_WITH_WARNINGS"
 
-        if not semanticReport.valid:
-            # 结构合格但语义不合格的候选只保留在当前内存中。这里最多发起一次
-            # 精确语义修复；只有修复通过校验或确定性模板才能成为持久化终态。
-            repairUsed = True
-            await emitModelStreamProgress(
-                progressObserver,
-                ModelStreamProgress(stage=ModelStreamStage.REPAIRING, repair=True),
-            )
-            semanticRepairPayload = {
-                **answerPayload,
-                "semantic_repair_instruction": semanticRepairInstruction(
-                    answerResult.data,
-                    semanticReport,
-                    language=language,
-                    catalog=buildResultFactCatalog(result),
-                ),
-            }
-            semanticRepairRequest = self._buildRequest(
-                runtime=runtime,
-                sessionId=sessionId,
-                requestId=self._newRequestId("result-semantic-repair"),
-                prompt=RESULT_INTERPRETATION_PROMPT,
-                userContent=buildResultInterpretationUserMessage(semanticRepairPayload),
-                agentConfigHash=canonicalHash(
-                    {
-                        "workflow": RESULT_INTERPRETATION_PROMPT.version,
-                        "language": language,
-                        "includeAnalysisSummary": includeAnalysisSummary,
-                        "tools": [tool.value for tool in selectedTools],
-                        "semanticRepair": True,
-                        "semanticViolationCodes": [
-                            code.value for code in semanticReport.violation_codes
-                        ],
-                    }
-                ),
-                observationHash=canonicalHash(semanticRepairPayload),
-                allowedEvidenceIds=allowedEvidenceIds,
-                maxTokens=4_096,
-                streamResponse=True,
-                streamObserver=progressObserver,
-            )
-            try:
-                semanticRepairResult = await self._execute(
-                    request=semanticRepairRequest,
-                    schema=ResultInterpretationAnswer,
-                    policy=self._interpretationPolicy(stage="answer"),
-                    resultValidator=validateInterpretation,
-                    useDecisionCache=False,
-                )
-                semanticRepairResult = replace(
-                    semanticRepairResult,
-                    data=self._normalizeInterpretationAnswer(
-                        semanticRepairResult.data,
-                        language=language,
-                        includeAnalysisSummary=includeAnalysisSummary,
-                    ),
-                )
-                usage = usage.plus(semanticRepairResult.usage)
-                latencyMs += semanticRepairResult.latencyMs
-                cacheHit = cacheHit and semanticRepairResult.cacheHit
-                repairUsed = semanticRepairResult.repairUsed or repairUsed
-                transportAttempts += semanticRepairResult.transportAttempts
-                uncertainBillableAttempts += semanticRepairResult.uncertainBillableAttempts
-                failureCodes.extend(semanticRepairResult.failureCodes)
-                repairedSemanticReport = validateInterpretationSemantics(
-                    semanticRepairResult.data,
-                    result,
-                    requirePrimaryFinding=initial,
-                )
-                semanticViolationCodes.extend(repairedSemanticReport.violation_codes)
-                if repairedSemanticReport.valid:
-                    terminalAnswerResult = semanticRepairResult
-                    semanticStatus = (
-                        "COMPLETED_WITH_WARNINGS"
-                        if repairedSemanticReport.advisory_violation_codes
-                        else "REPAIRED"
-                    )
-                else:
-                    # 修复候选仍存在确定事实冲突时，只替换为服务器可核验摘要，
-                    # 不再把整个已计费请求变成空白错误页。
-                    deterministicFallbackUsed = True
-                    semanticStatus = "DETERMINISTIC_FALLBACK"
-                    terminalAnswerResult = replace(
-                        semanticRepairResult,
-                        data=deterministicInterpretationFallback(
-                            result,
-                            language=language,
-                            includeAnalysisSummary=includeAnalysisSummary,
-                        ),
-                    )
-            except ModelGatewayError as error:
-                # 初次结构化候选已经可读时，后续语义修复的网关故障不应抹掉
-                # 整轮结果。返回服务器核验摘要并透明记录修复失败。
-                cacheHit = False
-                repairUsed = error.repairUsed or repairUsed
-                transportAttempts += max(0, error.attempts)
-                uncertainBillableAttempts += max(0, error.uncertainBillableAttempts)
-                failureCodes.append(error.code)
-                deterministicFallbackUsed = True
-                semanticStatus = "DETERMINISTIC_FALLBACK"
-                terminalAnswerResult = replace(
-                    answerResult,
-                    data=deterministicInterpretationFallback(
-                        result,
-                        language=language,
-                        includeAnalysisSummary=includeAnalysisSummary,
-                    ),
-                )
-
-        # 同一代码可能同时出现在初始候选与修复候选中；历史只保留稳定去重集合。
+        # 历史只保留稳定去重集合，供技术详情与后续质量评估使用。
         semanticViolationCodeValues = tuple(sorted({code.value for code in semanticViolationCodes}))
         if plannerResult is not None:
             usage = plannerResult.usage.plus(usage)
