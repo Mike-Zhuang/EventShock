@@ -654,16 +654,16 @@ describe('移动主导航', () => {
     });
   });
 
-  it('默认英文首屏明确展示主要目标用户及其工作场景', async () => {
+  it('默认英文首屏按共同研究需求展示包容性的目标用户与使用边界', async () => {
     render(<App />);
 
     expect(await screen.findByRole('heading', { name: 'Change one condition. See whether the same shock gets worse.' })).toBeInTheDocument();
-    expect(await screen.findByText('Built for')).toBeInTheDocument();
-    expect(await screen.findByRole('heading', { name: 'Market event-risk analysts' })).toBeInTheDocument();
-    expect(screen.getByText(/asset managers, banks, exchanges/i)).toBeInTheDocument();
-    expect(screen.getByText('Not for')).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Personal investment decisions' })).toBeInTheDocument();
-    expect(screen.getByText('whether to buy or sell')).toBeInTheDocument();
+    expect(await screen.findByText('Who it is for')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'People exploring market-event risk' })).toBeInTheDocument();
+    expect(screen.getByText(/individual investors, market-risk analysts, researchers, and educators/i)).toBeInTheDocument();
+    expect(screen.getByText('Use boundary')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Research support—not a signal service' })).toBeInTheDocument();
+    expect(screen.getByText('an unconditional forecast or guaranteed outcome')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'GitHub repository' })).toHaveAttribute(
       'href',
       'https://github.com/Mike-Zhuang/EventShock',
@@ -678,19 +678,19 @@ describe('移动主导航', () => {
     });
   });
 
-  it('简体中文首屏明确展示主要目标用户及其工作场景', async () => {
+  it('简体中文首屏按共同研究需求展示包容性的目标用户与使用边界', async () => {
     const user = userEvent.setup();
     render(<App />);
 
     await user.click(await screen.findByRole('button', { name: '中文' }));
 
     expect(screen.getByRole('heading', { name: '改一个条件，看同一场冲击会不会更糟。' })).toBeInTheDocument();
-    expect(screen.getByText('主要用户')).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: '市场事件风险分析人员' })).toBeInTheDocument();
-    expect(screen.getByText(/资管机构、银行、交易所/)).toBeInTheDocument();
-    expect(screen.getByText('不服务于')).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: '个人投资决策' })).toBeInTheDocument();
-    expect(screen.getByText('应该买入还是卖出')).toBeInTheDocument();
+    expect(screen.getByText('适合谁使用')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '希望理解市场事件风险的人' })).toBeInTheDocument();
+    expect(screen.getByText(/个人投资者、市场风险分析人员、研究者和教育者/)).toBeInTheDocument();
+    expect(screen.getByText('使用边界')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '辅助研究，不是交易信号服务' })).toBeInTheDocument();
+    expect(screen.getByText('无条件的涨跌预测或结果保证')).toBeInTheDocument();
     expect(screen.getAllByRole('link', { name: '提交问题反馈' }).length).toBeGreaterThan(0);
   });
 
@@ -703,7 +703,9 @@ describe('移动主导航', () => {
     render(<App />);
 
     expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeInTheDocument();
-    expect(screen.getByText('Market event-risk analysts')).toBeInTheDocument();
+    expect(screen.getByText('People exploring market-event risk')).toBeInTheDocument();
+    expect(screen.getByText(/guided workspace for anyone who wants to understand how a market event could propagate/i)).toBeInTheDocument();
+    expect(screen.queryByText(/institutional event-risk research/i)).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'GitHub repository' })).toHaveAttribute(
       'href',
       'https://github.com/Mike-Zhuang/EventShock',
@@ -830,6 +832,7 @@ describe('移动主导航', () => {
     render(<App />);
 
     expect(await screen.findByRole('heading', { name: 'Choose how EventShock should guide you.' })).toBeInTheDocument();
+    expect(screen.getByText(/individual investors, analysts, researchers, and educators exploring event risk/i)).toBeInTheDocument();
     expect(api.getCases).not.toHaveBeenCalled();
     const continueButton = screen.getByRole('button', { name: 'Save and open workspace' });
     expect(continueButton).toBeDisabled();

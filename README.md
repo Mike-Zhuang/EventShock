@@ -24,7 +24,7 @@
   · <a href="https://github.com/Mike-Zhuang/EventShock/issues/new/choose">Report an issue</a>
 </p>
 
-EventShock Lab is a deployed research prototype for **market event-risk analysts, institutional research teams, and behavioral-finance educators**. It compares a baseline simulation with a matched simulation in which exactly one declared condition changes. The product helps people investigate a mechanism; it does not replace their judgment with a prediction.
+EventShock Lab is a deployed research prototype for **anyone who wants to understand how a market event could propagate**. Self-directed individual investors, market-risk analysts, researchers, and educators can compare a baseline simulation with a matched simulation in which exactly one declared condition changes. The product helps people investigate a mechanism; it does not replace their judgment with a prediction.
 
 > [!IMPORTANT]
 > Every price path, order book, flow, agent action, and counterfactual effect is synthetic. Results are conditional on the selected evidence, model, and assumptions; they are not forecasts or investment advice.
@@ -36,6 +36,16 @@ Traditional stress tests often start with a narrative and a fixed shock paramete
 The core research question is intentionally narrow:
 
 > **Holding a frozen event and all other settings constant, does changing one condition make the simulated shock materially better, worse, or different?**
+
+## Who it is for
+
+The audience is defined by a shared task, not by a job title. EventShock is for people who want more discipline than a market narrative or a one-line AI prediction can provide:
+
+- self-directed individual investors examining an event thesis without a quantitative research team;
+- analysts and research teams comparing event-risk mechanisms in a reviewable workflow;
+- researchers, educators, and students studying behavioral finance, market structure, or human–AI decision making.
+
+The guided and advanced workspaces serve the same audience at different levels of familiarity. Advanced controls describe the depth of the method—not a separate institutional-only product tier. EventShock may discuss directional implications **within a declared scenario**, but it does not know a user's portfolio, finances, risk tolerance, or live market conditions and does not provide personalized recommendations, automated execution, or guaranteed outcomes.
 
 ## Human in the loop, by design
 
@@ -214,7 +224,7 @@ usage_documents/     installation, AI-provider, workflow, Git, and deployment gu
 
 ## Project status and limitations
 
-EventShock Lab is an actively tested **course research prototype**, not an externally calibrated forecasting product. Its historical cases demonstrate the workflow and internal mechanisms; they do not establish real-world predictive validity. Ten matched seeds are useful for a classroom demo but not a production risk conclusion. Users must verify source rights, protect private data, and interpret every result within the declared model assumptions.
+EventShock Lab is an actively tested **course research prototype**, not an externally calibrated forecasting product. Its historical cases demonstrate the workflow and internal mechanisms; they do not establish real-world predictive validity. Ten matched seeds are useful for a classroom demo but not a production risk conclusion. Usability, comprehension, trust, and misuse testing across individual investors, professional analysts, researchers, and educators remains ongoing. Users must verify source rights, protect private data, and interpret every result within the declared model assumptions.
 
 ## Contributing and support
 
