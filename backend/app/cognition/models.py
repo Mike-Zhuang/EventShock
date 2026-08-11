@@ -12,18 +12,6 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 IDENTIFIER_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$"
 INLINE_RESULT_REFERENCE_PATTERN = re.compile(r"\[(result:[^\]\r\n]*)\]")
 VALID_RESULT_REFERENCE_PATTERN = re.compile(r"^result:[A-Za-z0-9][A-Za-z0-9._:-]{0,72}$")
-PROHIBITED_INVESTMENT_RECOMMENDATION_PATTERNS = (
-    re.compile(
-        r"\b(?:you should|i recommend|we recommend|consider)\s+"
-        r"(?:buy|buying|sell|selling|hold|holding|short|shorting|invest|investing|"
-        r"trade|trading|increase|increasing|decrease|decreasing)\b",
-        flags=re.IGNORECASE,
-    ),
-    re.compile(
-        r"(?<!不)(?:建议|应该|应当|不妨|可以考虑).{0,12}"
-        r"(?:买入|卖出|持有|做多|做空|投资|交易|加仓|减仓)"
-    ),
-)
 
 
 class StrictFrozenModel(BaseModel):
@@ -341,8 +329,18 @@ class ResultInterpretationAnswer(StrictFrozenModel):
     analysis_summary: str | None = Field(default=None, min_length=1, max_length=2_000)
     grounding_references: tuple[str, ...] = Field(default=(), max_length=20)
     follow_up_suggestions: tuple[str, ...] = Field(default=(), max_length=3)
-    scenario_not_forecast: Literal[True] = True
-    investment_advice_provided: Literal[False] = False
+    scenario_not_forecast: Literal[True] = Field(
+        default=True,
+        description="Always true because the answer is grounded in a synthetic scenario.",
+    )
+    investment_advice_provided: Literal[False] = Field(
+        default=False,
+        description=(
+            "Always false because the product displays a non-advice disclaimer; this does not "
+            "prevent a direct, scenario-conditioned answer about future direction or whether "
+            "the evidence leans toward buying, selling, or holding."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -371,8 +369,8 @@ class ResultInterpretationAnswer(StrictFrozenModel):
         }
         normalized = {key: item for key, item in normalized.items() if key in allowedFields}
 
-        # 这两个值是产品边界而不是由模型自由判断的内容；正文仍会独立扫描
-        # 投资建议，因此固定布尔值不会掩盖违规文本。
+        # 这两个值是产品边界而不是由模型自由判断的内容。回答可以讨论用户的
+        # 买卖问题，但必须以合成情景为条件并由服务端固定展示免责声明。
         normalized["schema_version"] = "result_interpretation_v1.0.0"
         normalized["scenario_not_forecast"] = True
         normalized["investment_advice_provided"] = False
@@ -429,11 +427,6 @@ class ResultInterpretationAnswer(StrictFrozenModel):
 
         object.__setattr__(self, "_reported_grounding_references", allReportedReferences)
         object.__setattr__(self, "grounding_references", normalizedReferences)
-        if any(
-            pattern.search(reviewableText)
-            for pattern in PROHIBITED_INVESTMENT_RECOMMENDATION_PATTERNS
-        ):
-            raise ValueError("result interpretation must not contain an investment recommendation")
         if any(not suggestion.strip() for suggestion in self.follow_up_suggestions):
             raise ValueError("follow_up_suggestions must not contain blank values")
         if any(len(suggestion) > 400 for suggestion in self.follow_up_suggestions):

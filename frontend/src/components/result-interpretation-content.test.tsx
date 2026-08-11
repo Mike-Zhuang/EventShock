@@ -95,8 +95,9 @@ describe('ResultInterpretationContent 技术审计', () => {
         />
       </I18nProvider>,
     );
-    expect(screen.getByText('Model interpretation returned with review notes')).toBeInTheDocument();
-    expect(screen.getByText(/Heuristic review notes no longer hide the answer/i)).toBeInTheDocument();
+    expect(screen.queryByText('Model interpretation returned with review notes')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Heuristic review notes no longer hide the answer/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/The registered overview was checked/)).toBeInTheDocument();
   });
 
   it('正文只显示技术状态的人类解释，原始枚举保留在折叠审计层', async () => {

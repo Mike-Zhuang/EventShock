@@ -182,7 +182,7 @@ describe('ResultsPage 结果证据导航', () => {
     expect(screen.getByRole('heading', { name: 'What these results are' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'What these results are not' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'What you can do with them' })).toBeInTheDocument();
-    expect(screen.getByText('what a person should buy, sell, hold, or short')).toBeInTheDocument();
+    expect(screen.getByText('a final real-world decision to buy, sell, hold, or short')).toBeInTheDocument();
     expect(screen.getByText('a real target price, return, or loss limit')).toBeInTheDocument();
     expect(screen.getAllByTestId('simulated-chart')).toHaveLength(4);
     expect(screen.getByRole('img', { name: /SIMULATED DATA: Paired seed differences/ })).toBeInTheDocument();

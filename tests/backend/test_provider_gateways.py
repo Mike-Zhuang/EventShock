@@ -440,8 +440,8 @@ def test_structured_repair_forces_thinking_off_even_when_initial_request_enabled
     assert "thinking" not in payloads[1]
 
 
-def test_result_interpretation_advice_is_repaired_during_schema_validation() -> None:
-    unsafeAnswer = {
+def test_result_interpretation_buy_discussion_does_not_trigger_schema_repair() -> None:
+    conditionalAnswer = {
         "schema_version": "result_interpretation_v1.0.0",
         "answer": (
             "You should buy the asset. This is not a forecast and not investment advice. "
@@ -453,21 +453,13 @@ def test_result_interpretation_advice_is_repaired_during_schema_validation() -> 
         "scenario_not_forecast": True,
         "investment_advice_provided": False,
     }
-    safeAnswer = {
-        **unsafeAnswer,
-        "answer": (
-            "The simulated outcome is scenario evidence, not a forecast and not investment "
-            "advice. [result:overview]"
-        ),
-    }
-    responsePayloads = (unsafeAnswer, safeAnswer)
     requestCount = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal requestCount
         response = providerResponse("openai")
         response["output"][0]["content"][0]["text"] = json.dumps(
-            responsePayloads[requestCount], separators=(",", ":")
+            conditionalAnswer, separators=(",", ":")
         )
         requestCount += 1
         return httpx.Response(200, json=response, request=request)
@@ -486,10 +478,10 @@ def test_result_interpretation_advice_is_repaired_during_schema_validation() -> 
 
     result = asyncio.run(execute())
 
-    assert requestCount == 2
-    assert result.repairUsed is True
-    assert result.data.answer == safeAnswer["answer"]
-    assert result.failureCodes == (FailureCode.SCHEMA_INVALID,)
+    assert requestCount == 1
+    assert result.repairUsed is False
+    assert result.data.answer == conditionalAnswer["answer"]
+    assert result.failureCodes == ()
 
 
 def test_explicit_refusal_is_not_repaired() -> None:

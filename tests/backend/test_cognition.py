@@ -340,7 +340,7 @@ def test_result_interpretation_prompt_requests_safe_gfm_and_prose_citations() ->
     prompt = RESULT_INTERPRETATION_PROMPT.systemPrompt
     normalizedPrompt = " ".join(prompt.split())
 
-    assert RESULT_INTERPRETATION_PROMPT.version == "result_interpretation_v1.7.0"
+    assert RESULT_INTERPRETATION_PROMPT.version == "result_interpretation_v1.8.0"
     assert "raw uppercase status codes" in RESULT_INTERPRETATION_PROMPT.systemPrompt
     assert RESULT_INTERPRETATION_PROMPT.schemaVersion == "result_interpretation_v1.0.0"
     assert "concise GFM" in prompt
@@ -349,6 +349,9 @@ def test_result_interpretation_prompt_requests_safe_gfm_and_prose_citations() ->
     assert "ordinary prose" in prompt
     assert "server will harmlessly normalize" in normalizedPrompt
     assert "Suggestions must be short plain-text questions" in normalizedPrompt
+    assert "do not refuse, evade, or answer only with a disclaimer" in normalizedPrompt
+    assert "whether to buy, sell, or hold are in scope" in normalizedPrompt
+    assert "Give a direct scenario-conditioned answer first" in normalizedPrompt
     assert sha256Text(prompt) == RESULT_INTERPRETATION_PROMPT.promptHash
 
 

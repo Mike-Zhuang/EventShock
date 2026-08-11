@@ -353,7 +353,7 @@ describe('结果解释助手', () => {
       'This is scenario analysis conditional on synthetic assumptions, not a prediction and not investment advice.',
     )).toBeInTheDocument();
     expect(within(assistantCard as HTMLElement).getByText(
-      'This explanation cannot establish real-world outcomes, recommend a trade, or generalize beyond the tested assumptions.',
+      'This explanation cannot guarantee real-world outcomes or generalize beyond the tested assumptions.',
     )).toBeInTheDocument();
 
     const reasoningSummary = screen.getByText('Analysis summary (not chain-of-thought)');
