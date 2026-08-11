@@ -179,22 +179,22 @@ course_context: "UC Berkeley ENGIN 170E — Technology Leadership and AI, Summer
 
 # 3. 用户、问题与价值命题
 
-## 3.1 首要用户
+## 3.1 首要用户需求
 
-**首要用户：市场事件风险分析师（Event-Risk Analyst）**
+**首要用户：希望系统理解市场事件风险如何传播的人。**
 
-可能位于：
+受众由共同任务而不是职位定义：用户希望核对来源、检验一个事件观点，只改变一个条件比较模拟结果，并理解证据强度、不确定性和局限。可能包括：
 
-- 资产管理机构风险或研究团队；
-- 券商市场风险、策略或研究团队；
-- 金融机构创新实验室；
-- 交易所、监管或大学研究环境。
+- 没有量化研究团队、但希望独立检验事件观点的个人投资者；
+- 资产管理机构、银行、券商、交易所或企业中的市场风险分析人员与研究团队；
+- 行为金融、市场微观结构、复杂系统和多智能体研究人员、教师与学生；
+- 上市公司投资者关系（IR）或危机沟通团队。
 
-## 3.2 次要用户
+AI 引导和高级工作区服务于同一广泛受众的不同熟练程度，不是“个人版”和“机构版”。专业级描述的是方法与审计深度，不是使用资格。
 
-- 上市公司投资者关系（IR）或危机沟通团队；
-- 行为金融、市场微观结构课程教师；
-- 复杂系统和多智能体研究人员。
+## 3.2 用户边界
+
+个人投资者可以将系统用于学习、研究和情景比较，专业用户也可用于受控研究试验。系统不了解用户的持仓、财务状况、风险承受能力或实时市场，不提供个性化荐股、仓位/交易时点指令、自动执行或收益保证。任何真实高后果决策仍需产品之外的数据、判断与责任主体。
 
 ## 3.3 用户当前工作中的缺口
 
@@ -4775,7 +4775,8 @@ Event-risk analysis can quantify historical reactions but often struggles to tes
 behavioral propagation, social cascades, passive flows and liquidity feedback in a controlled way.
 
 User
-Market event-risk analysts; secondary users are IR/crisis teams and educators.
+People who want to understand market-event risk, including self-directed individual
+investors, professional analysts, researchers and educators.
 
 Core product
 A sourced, reproducible hybrid-agent laboratory that compares a baseline and one
