@@ -340,7 +340,7 @@ def test_result_interpretation_prompt_requests_safe_gfm_and_prose_citations() ->
     prompt = RESULT_INTERPRETATION_PROMPT.systemPrompt
     normalizedPrompt = " ".join(prompt.split())
 
-    assert RESULT_INTERPRETATION_PROMPT.version == "result_interpretation_v1.6.0"
+    assert RESULT_INTERPRETATION_PROMPT.version == "result_interpretation_v1.7.0"
     assert "raw uppercase status codes" in RESULT_INTERPRETATION_PROMPT.systemPrompt
     assert RESULT_INTERPRETATION_PROMPT.schemaVersion == "result_interpretation_v1.0.0"
     assert "concise GFM" in prompt

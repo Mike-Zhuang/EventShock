@@ -411,13 +411,9 @@ def test_initial_interpretation_uses_bounded_summary_tools_and_one_model_call() 
     assert run.semantic_violation_codes == ()
 
 
-def test_semantically_invalid_answer_is_repaired_once_before_return() -> None:
-    rejectedAnswer = metricAnswer("The maxSpreadBps paired median decreased by 1.5.")
-    repairedAnswer = metricAnswer(
-        "The maxSpreadBps paired median increased by 1.5, while the 95% interval "
-        "[-0.2, 3.1] crosses zero."
-    )
-    service, harness = configuredService([FakeOutcome(rejectedAnswer), FakeOutcome(repairedAnswer)])
+def test_semantic_heuristic_mismatch_keeps_the_model_answer_without_repair() -> None:
+    answer = metricAnswer("The maxSpreadBps paired median decreased by 1.5.")
+    service, harness = configuredService([FakeOutcome(answer)])
 
     run = asyncio.run(
         service.interpretExperimentResult(
@@ -430,23 +426,19 @@ def test_semantically_invalid_answer_is_repaired_once_before_return() -> None:
         )
     )
 
-    assert run.interpretation.answer.endswith(repairedAnswer.answer)
-    assert rejectedAnswer.answer not in run.interpretation.answer
-    assert run.semantic_validation_status == "REPAIRED"
+    assert run.interpretation.answer.endswith(answer.answer)
+    assert run.semantic_validation_status == "COMPLETED_WITH_WARNINGS"
     assert run.deterministic_fallback_used is False
     assert run.semantic_violation_codes == (SemanticViolationCode.DIRECTION_MISMATCH.value,)
-    assert run.repair_used is True
-    assert run.model_calls == 2
-    assert run.usage.totalTokens == 300
-    assert harness.schemas == [ResultInterpretationAnswer, ResultInterpretationAnswer]
-    assert "DIRECTION_MISMATCH" in harness.requests[1].userContent
-    assert "REJECTED_CANDIDATE_JSON" in harness.requests[1].userContent
-    assert harness.requests[1].allowedEvidenceIds == harness.requests[0].allowedEvidenceIds
+    assert run.repair_used is False
+    assert run.model_calls == 1
+    assert run.usage.totalTokens == 150
+    assert harness.schemas == [ResultInterpretationAnswer]
 
 
-def test_semantic_repair_failure_returns_server_verified_fallback() -> None:
-    rejectedAnswer = metricAnswer("The maxSpreadBps paired median decreased by 1.5.")
-    service, harness = configuredService([FakeOutcome(rejectedAnswer), FakeOutcome(rejectedAnswer)])
+def test_semantic_heuristics_never_replace_a_model_answer_with_server_fallback() -> None:
+    answer = metricAnswer("The maxSpreadBps paired median decreased by 1.5.")
+    service, harness = configuredService([FakeOutcome(answer)])
 
     run = asyncio.run(
         service.interpretExperimentResult(
@@ -459,18 +451,18 @@ def test_semantic_repair_failure_returns_server_verified_fallback() -> None:
         )
     )
 
-    assert run.semantic_validation_status == "DETERMINISTIC_FALLBACK"
-    assert run.deterministic_fallback_used is True
-    assert "Server-verified results" in run.interpretation.answer
+    assert run.semantic_validation_status == "COMPLETED_WITH_WARNINGS"
+    assert run.deterministic_fallback_used is False
+    assert run.interpretation.answer.endswith(answer.answer)
     assert SemanticViolationCode.DIRECTION_MISMATCH.value in run.semantic_violation_codes
-    assert len(harness.requests) == 2
+    assert len(harness.requests) == 1
 
 
-def test_semantic_repair_gateway_error_returns_server_verified_fallback() -> None:
-    rejectedAnswer = metricAnswer("The maxSpreadBps paired median decreased by 1.5.")
-    service, _harness = configuredService(
+def test_semantic_warning_does_not_dispatch_a_second_provider_request() -> None:
+    answer = metricAnswer("The maxSpreadBps paired median decreased by 1.5.")
+    service, harness = configuredService(
         [
-            FakeOutcome(rejectedAnswer),
+            FakeOutcome(answer),
             FakeOutcome(
                 ModelGatewayError(
                     FailureCode.MODEL_TIMEOUT,
@@ -494,10 +486,11 @@ def test_semantic_repair_gateway_error_returns_server_verified_fallback() -> Non
         )
     )
 
-    assert run.semantic_validation_status == "DETERMINISTIC_FALLBACK"
-    assert run.deterministic_fallback_used is True
-    assert run.repair_used is True
-    assert FailureCode.MODEL_TIMEOUT.value in run.failure_codes
+    assert run.semantic_validation_status == "COMPLETED_WITH_WARNINGS"
+    assert run.deterministic_fallback_used is False
+    assert run.repair_used is False
+    assert FailureCode.MODEL_TIMEOUT.value not in run.failure_codes
+    assert len(harness.requests) == 1
 
 
 def test_advisory_semantic_findings_do_not_hide_a_usable_model_answer() -> None:

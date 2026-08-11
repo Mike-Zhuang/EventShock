@@ -346,7 +346,7 @@ OUTPUT JSON SCHEMA ({ResultInterpretationAnswer.model_fields["schema_version"].d
 """
     return PromptSpec(
         name="result_interpretation",
-        version="result_interpretation_v1.6.0",
+        version="result_interpretation_v1.7.0",
         schemaVersion="result_interpretation_v1.0.0",
         systemPrompt=prompt,
     )
