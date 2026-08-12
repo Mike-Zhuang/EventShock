@@ -1160,8 +1160,11 @@ describe('guided workflow page', () => {
       </I18nProvider>,
     );
 
-    expect(await screen.findByText('Generate this stage’s review candidate first'))
+    expect(await screen.findByRole('heading', { name: 'Choose your next message' }))
       .toBeInTheDocument();
+    expect(screen.getByRole('button', {
+      name: /I need one final preflight check before the staged run playback/,
+    })).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', {
       name: 'I reviewed this stage, continue',
@@ -1185,6 +1188,143 @@ describe('guided workflow page', () => {
     );
     expect(api.sendGuidedTurn).not.toHaveBeenCalled();
     expect(screen.getByText(/has not been sent/)).toBeInTheDocument();
+  });
+
+  it('reveals and focuses the next-stage message choices immediately after advancement', async () => {
+    const user = userEvent.setup();
+    const eventGoalAppliedWorkflow: GuidedWorkflow = {
+      ...guidedWorkflow,
+      version: 7,
+      pendingProposal: undefined,
+      pendingProposalId: undefined,
+      draft: {
+        ...guidedWorkflow.draft,
+        eventPackId: 'event-pack-prepared',
+        scenarioId: 'scenario-prepared',
+        experimentId: 'experiment-prepared',
+        eventMetadata: guidedWorkflow.pendingProposal!.proposedEventMetadata,
+      },
+      archivedProposals: [{
+        id: 'proposal-event-goal-applied',
+        proposal: {
+          ...guidedWorkflow.pendingProposal!,
+          reviewItems: [{
+            id: 'event-goal-review',
+            category: 'METADATA',
+            title: 'Event goal review',
+            detail: 'Verify the bounded event goal.',
+            requiresExplicitReview: true,
+          }],
+        },
+        status: 'APPLIED',
+        archivedAt: '2026-08-12T18:40:00Z',
+        reason: 'APPLIED_BY_HUMAN',
+      }],
+    };
+    const sourceMethodWorkflow: GuidedWorkflow = {
+      ...eventGoalAppliedWorkflow,
+      stage: 'SOURCE_METHOD',
+      version: 8,
+    };
+    vi.mocked(api.getGuidedWorkflows).mockResolvedValue([eventGoalAppliedWorkflow]);
+    vi.mocked(api.getGuidedWorkflow).mockResolvedValue(eventGoalAppliedWorkflow);
+    vi.mocked(api.advanceGuidedWorkflow).mockResolvedValue(sourceMethodWorkflow);
+
+    render(
+      <I18nProvider>
+        <GuidedWorkflowPage navigate={vi.fn()} />
+      </I18nProvider>,
+    );
+
+    await user.click(await screen.findByRole('button', {
+      name: 'I reviewed this stage, continue',
+    }));
+
+    await waitFor(() => expect(api.advanceGuidedWorkflow).toHaveBeenCalledWith(
+      eventGoalAppliedWorkflow.id,
+      eventGoalAppliedWorkflow.version,
+    ));
+    const heading = await screen.findByRole('heading', { name: 'Choose your next message' });
+    await waitFor(() => expect(heading).toHaveFocus());
+    expect(screen.getByRole('button', {
+      name: /Prepare the bounded source-method candidate/,
+    })).toBeInTheDocument();
+    expect(screen.getByRole('button', {
+      name: /I need to revise the source method before approval/,
+    })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', {
+      name: /Prepare the bounded source-method candidate/,
+    }));
+    expect((screen.getByLabelText(
+      'Answer this stage, or request field-level changes',
+    ) as HTMLTextAreaElement).value).toContain('Prepare the bounded source-method candidate');
+    expect(api.sendGuidedTurn).not.toHaveBeenCalled();
+  });
+
+  it('reveals the prepared experiment action when the final reviewed stage completes', async () => {
+    const user = userEvent.setup();
+    const readyWorkflow: GuidedWorkflow = {
+      ...guidedWorkflow,
+      stage: 'READY_TO_SUBMIT',
+      version: 20,
+      pendingProposal: undefined,
+      pendingProposalId: undefined,
+      draft: {
+        ...guidedWorkflow.draft,
+        eventPackId: 'event-pack-prepared',
+        scenarioId: 'scenario-prepared',
+        experimentId: 'experiment-prepared',
+      },
+      archivedProposals: [{
+        id: 'proposal-ready-applied',
+        proposal: {
+          ...guidedWorkflow.pendingProposal!,
+          stage: 'READY_TO_SUBMIT',
+          reviewItems: [{
+            id: 'ready-review',
+            category: 'PREFLIGHT',
+            title: 'Final submission review',
+            detail: 'Verify the prepared research chain.',
+            requiresExplicitReview: true,
+          }],
+        },
+        status: 'APPLIED',
+        archivedAt: '2026-08-12T18:45:00Z',
+        reason: 'APPLIED_BY_HUMAN',
+      }],
+    };
+    const completedWorkflow: GuidedWorkflow = {
+      ...readyWorkflow,
+      stage: 'COMPLETED',
+      status: 'COMPLETED',
+      version: 21,
+    };
+    vi.mocked(api.getGuidedWorkflows).mockResolvedValue([readyWorkflow]);
+    vi.mocked(api.getGuidedWorkflow).mockResolvedValue(readyWorkflow);
+    vi.mocked(api.advanceGuidedWorkflow).mockResolvedValue(completedWorkflow);
+
+    render(
+      <I18nProvider>
+        <GuidedWorkflowPage navigate={vi.fn()} />
+      </I18nProvider>,
+    );
+
+    await user.click(await screen.findByRole('button', {
+      name: 'I reviewed this stage, continue',
+    }));
+
+    const heading = await screen.findByRole('heading', {
+      name: 'The research chain is ready',
+    });
+    await waitFor(() => expect(heading).toHaveFocus());
+    expect(screen.getByText(/No further candidate message is required/)).toBeInTheDocument();
+    expect(screen.getByRole('button', {
+      name: 'Open staged experiment run',
+    })).toBeInTheDocument();
+    expect(screen.queryByRole('button', {
+      name: 'I reviewed this stage, continue',
+    })).not.toBeInTheDocument();
   });
 
   it('opens a linked prepared Event Pack for complete source-ledger review', async () => {

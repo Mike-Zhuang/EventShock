@@ -9978,12 +9978,13 @@ code {
 }
 
 .guided-suggestions--stage {
+  display: grid;
   flex: 1 1 520px;
-  justify-content: flex-end;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .guided-suggestions--stage button {
-  width: min(100%, 720px);
+  width: 100%;
   min-height: 64px;
 }
 
@@ -10009,8 +10010,14 @@ code {
   background: var(--accent-soft);
 }
 
-.guided-stage-prompt > div {
+.guided-stage-prompt > div:first-child {
   flex: 1 1 32rem;
+}
+
+.guided-stage-prompt h3 {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.35;
 }
 
 .guided-stage-prompt p {
@@ -10019,6 +10026,12 @@ code {
   color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.5;
+}
+
+@media (max-width: 720px) {
+  .guided-suggestions--stage {
+    grid-template-columns: 1fr;
+  }
 }
 
 .guided-composer__notice {
@@ -10043,6 +10056,35 @@ code {
   display: grid;
   gap: 10px;
   padding: 1px;
+}
+
+.guided-completion-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 20px;
+  border: 1px solid var(--accent);
+  border-left-width: 4px;
+  background: var(--accent-soft);
+}
+
+.guided-completion-action > div {
+  min-width: 0;
+}
+
+.guided-completion-action h3 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.35;
+}
+
+.guided-completion-action p {
+  max-width: 72ch;
+  margin: 6px 0 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .guided-stage-action.is-invalid {
@@ -10815,6 +10857,7 @@ code {
   .guided-stage-header,
   .guided-proposal > header,
   .guided-advance,
+  .guided-completion-action,
   .guided-review-link,
   .factory-overview,
   .factory-section > .section-heading,
@@ -10842,6 +10885,7 @@ code {
 
   .guided-composer > .cds--btn,
   .guided-advance .cds--btn,
+  .guided-completion-action .cds--btn,
   .factory-section > .cds--btn,
   .factory-search-form > .cds--btn,
   .factory-materialize form > .cds--btn {

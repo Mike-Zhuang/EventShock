@@ -366,6 +366,63 @@ function preparedStageReviewPrompt(stage: GuidedStage, isZh: boolean): string {
   return isZh ? prompts[stage].zh : prompts[stage].en;
 }
 
+function preparedStageRevisionPrompt(stage: GuidedStage, isZh: boolean): string {
+  const prompts: Record<GuidedStage, { en: string; zh: string }> = {
+    EVENT_GOAL: {
+      en: 'I need to revise one event-goal field before approval.',
+      zh: '我需要先修改一项事件目标字段，再进行批准。',
+    },
+    SOURCE_METHOD: {
+      en: 'I need to revise the source method before approval.',
+      zh: '我需要先修改证据来源方式，再进行批准。',
+    },
+    SOURCE_REVIEW: {
+      en: 'I need to inspect the complete bilingual source ledger before approval.',
+      zh: '我需要先检查完整的双语来源账本，再进行批准。',
+    },
+    CLAIM_REVIEW: {
+      en: 'I need to inspect every claim and its source link before approval.',
+      zh: '我需要先检查每条主张及其来源关联，再进行批准。',
+    },
+    PACK_METADATA_REVIEW: {
+      en: 'I need to revise the Event Pack metadata before approval.',
+      zh: '我需要先修改 Event Pack 元数据，再进行批准。',
+    },
+    PACK_FREEZE_REVIEW: {
+      en: 'I need one final Event Pack review before freezing it.',
+      zh: '冻结之前，我还需要最后检查一次 Event Pack。',
+    },
+    SCENARIO_INTERVENTION: {
+      en: 'I need to revise the intervention strength before approval.',
+      zh: '我需要先修改干预强度，再进行批准。',
+    },
+    SCENARIO_REVIEW: {
+      en: 'I need to inspect the complete scenario configuration before approval.',
+      zh: '我需要先检查完整的情景配置，再进行批准。',
+    },
+    PREFLIGHT: {
+      en: 'I need to inspect every preflight system check before approval.',
+      zh: '我需要先检查每一项运行前系统检查，再进行批准。',
+    },
+    READY_TO_SUBMIT: {
+      en: 'I need one final preflight check before the staged run playback.',
+      zh: '进入分阶段运行演示之前，我还需要最后检查一次运行前配置。',
+    },
+    COMPLETED: {
+      en: 'I need to review the completed research chain before opening the staged run.',
+      zh: '打开分阶段运行之前，我需要先复核已经完成的研究链路。',
+    },
+  };
+  return isZh ? prompts[stage].zh : prompts[stage].en;
+}
+
+function preparedStageSuggestionOptions(stage: GuidedStage, isZh: boolean): string[] {
+  return [
+    preparedStageReviewPrompt(stage, isZh),
+    preparedStageRevisionPrompt(stage, isZh),
+  ];
+}
+
 function guidedAdvanceBlocker(
   workflow: GuidedWorkflow,
   isZh: boolean,
@@ -1129,6 +1186,19 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
     && requiresPreparedStageReview(workflow)
     && !hasAppliedCurrentStageProposal(workflow),
   );
+  const revealedPreparedStageRef = useRef<string | undefined>(undefined);
+  const revealedCompletedStageRef = useRef<string | undefined>(undefined);
+
+  useEffect(() => {
+    if (!workflow || !needsPreparedStageProposal) return;
+    const stageKey = `${workflow.id}:${workflow.stage}`;
+    if (revealedPreparedStageRef.current === stageKey) return;
+    revealedPreparedStageRef.current = stageKey;
+    setSuccessNotice(isZh
+      ? `已进入“${STAGE_LABELS[workflow.stage].zh}”。请选择下一条建议消息，核对后发送。`
+      : `You entered “${STAGE_LABELS[workflow.stage].en}.” Choose the next suggested message, review it, and send.`);
+    focusGuidedTarget('guided-stage-prompt-heading');
+  }, [isZh, needsPreparedStageProposal, workflow]);
 
   const stageAction = useMemo(() => {
     if (!workflow) return undefined;
@@ -1160,6 +1230,22 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
     }
     return undefined;
   }, [isZh, workflow]);
+
+  useEffect(() => {
+    if (
+      !workflow
+      || workflow.status !== 'COMPLETED'
+      || workflow.stage !== 'COMPLETED'
+      || stageAction?.view !== 'runs'
+    ) return;
+    const completionKey = `${workflow.id}:${workflow.version}`;
+    if (revealedCompletedStageRef.current === completionKey) return;
+    revealedCompletedStageRef.current = completionKey;
+    setSuccessNotice(isZh
+      ? '全部阶段已经完成人工核对。无需再发送消息；下一步是打开已准备好的实验运行。'
+      : 'Every stage has been human-reviewed. No further message is needed; open the prepared experiment run next.');
+    focusGuidedTarget('guided-completion-heading');
+  }, [isZh, stageAction, workflow]);
 
   const selectLinkedEventPack = async (eventPackId: string) => {
     const pack = await api.getEventPack(eventPackId);
@@ -1782,24 +1868,33 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
             ) : null}
 
             {needsPreparedStageProposal ? (
-              <section className="guided-stage-prompt" aria-labelledby="guided-stage-prompt-heading">
+              <section
+                className="guided-stage-prompt"
+                aria-labelledby="guided-stage-prompt-heading"
+                aria-live="polite"
+              >
                 <div>
-                  <strong id="guided-stage-prompt-heading">
-                    {isZh ? '先生成本阶段的审核候选' : 'Generate this stage’s review candidate first'}
-                  </strong>
+                  <h3 id="guided-stage-prompt-heading" tabIndex={-1}>
+                    {isZh ? '选择下一条消息' : 'Choose your next message'}
+                  </h3>
                   <p>{isZh
-                    ? '你已进入新的审核阶段，但还没有应用属于本阶段的候选。使用下方建议会先填入输入框，不会自动发送；你仍可编辑后再提交。'
-                    : 'You entered a new review stage, but no candidate for this stage has been applied. The action below only fills the composer; you can edit it before sending.'}</p>
+                    ? '新阶段已经开始。选择一条建议只会填入输入框，不会自动发送；你可以先编辑，再生成本阶段的审核候选。'
+                    : 'The new stage is ready. Selecting a suggestion only fills the composer; you can edit it before generating this stage’s review candidate.'}</p>
                 </div>
                 <div className="guided-suggestions guided-suggestions--stage">
-                  <button
-                    type="button"
-                    disabled={Boolean(busyAction)}
-                    onClick={() => fillSuggestedAnswer(preparedStageReviewPrompt(workflow.stage, isZh))}
-                  >
-                    <span>{preparedStageReviewPrompt(workflow.stage, isZh)}</span>
-                    <small>{isZh ? '选择并填入输入框，确认后再发送' : 'Select, review in the composer, then send'}</small>
-                  </button>
+                  {preparedStageSuggestionOptions(workflow.stage, isZh).map((option, index) => (
+                    <button
+                      type="button"
+                      key={option}
+                      disabled={Boolean(busyAction)}
+                      onClick={() => fillSuggestedAnswer(option)}
+                    >
+                      <span>{option}</span>
+                      <small>{index === 0
+                        ? isZh ? '推荐 · 填入输入框' : 'Recommended · Fill composer'
+                        : isZh ? '需要调整 · 填入输入框' : 'Request changes · Fill composer'}</small>
+                    </button>
+                  ))}
                 </div>
               </section>
             ) : null}
@@ -1886,6 +1981,29 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
                   {busyAction === 'refresh'
                     ? isZh ? '正在核对服务器状态' : 'Checking server state'
                     : isZh ? '刷新并核对真实对象' : 'Refresh verified artifacts'}
+                </Button>
+              </section>
+            ) : stageAction?.view === 'runs' ? (
+              <section
+                className="guided-completion-action"
+                aria-labelledby="guided-completion-heading"
+              >
+                <div>
+                  <h3 id="guided-completion-heading" tabIndex={-1}>
+                    {isZh ? '研究链路已准备完成' : 'The research chain is ready'}
+                  </h3>
+                  <p>{isZh
+                    ? '所有引导阶段都已完成人工核对。这里不再要求发送候选消息；请打开已准备好的实验，查看认知层准备、配对运行和最终结果。'
+                    : 'Every guided stage has been human-reviewed. No further candidate message is required; open the prepared experiment to view cognition preparation, paired runs, and results.'}</p>
+                </div>
+                <Button
+                  id="guided-stage-workspace-action"
+                  kind="primary"
+                  renderIcon={ArrowRight}
+                  disabled={Boolean(busyAction)}
+                  onClick={() => void openStageWorkspace()}
+                >
+                  {stageAction.label}
                 </Button>
               </section>
             ) : stageAction ? (
