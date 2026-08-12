@@ -681,6 +681,26 @@ function normalizeGuidedProposal(value: unknown): GuidedWorkflowProposal {
   if (sourceMethod && !['PASTE', 'WEB_SEARCH', 'COMBINED', 'MANUAL'].includes(sourceMethod)) {
     throw new TypeError('Guided proposal source method is unsupported.');
   }
+  const reviewItems = unwrapItems(read(value, 'reviewItems', 'review_items'))
+    .map((item) => {
+      if (!isRecord(item)) return null;
+      const category = asOptionalString(read(item, 'category'));
+      if (!category || !['SOURCE', 'CLAIM', 'METADATA', 'FREEZE', 'SCENARIO', 'PREFLIGHT'].includes(category)) return null;
+      const id = asOptionalString(read(item, 'id'));
+      const title = asOptionalString(read(item, 'title'));
+      const detail = asOptionalString(read(item, 'detail'));
+      if (!id || !title || !detail) return null;
+      return {
+        id,
+        category: category as NonNullable<GuidedWorkflowProposal['reviewItems']>[number]['category'],
+        title,
+        detail,
+        requiresExplicitReview: asBoolean(
+          read(item, 'requiresExplicitReview', 'requires_explicit_review'),
+        ) ?? true,
+      };
+    })
+    .filter((item): item is NonNullable<GuidedWorkflowProposal['reviewItems']>[number] => item !== null);
   return {
     schemaVersion,
     stage: enumValue(read(value, 'stage'), GUIDED_STAGES, 'proposal.stage'),
@@ -720,6 +740,8 @@ function normalizeGuidedProposal(value: unknown): GuidedWorkflowProposal {
         return { field, reason } as NonNullable<GuidedWorkflowProposal['unresolvedFields']>[number];
       })
       .filter((item): item is NonNullable<GuidedWorkflowProposal['unresolvedFields']>[number] => item !== null),
+    reviewItems,
+    preparationSteps: asStringArray(read(value, 'preparationSteps', 'preparation_steps')),
   };
 }
 

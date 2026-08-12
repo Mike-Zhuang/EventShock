@@ -602,6 +602,14 @@ export interface GuidedIntervention {
   explanation: string;
 }
 
+export interface GuidedReviewItem {
+  id: string;
+  category: 'SOURCE' | 'CLAIM' | 'METADATA' | 'FREEZE' | 'SCENARIO' | 'PREFLIGHT';
+  title: string;
+  detail: string;
+  requiresExplicitReview: boolean;
+}
+
 export interface GuidedWorkflowProposal {
   schemaVersion: 'guided_proposal_v1.0.0';
   stage: GuidedStage;
@@ -619,6 +627,9 @@ export interface GuidedWorkflowProposal {
     field: 'title' | 'summary' | 'instrument' | 'asOf' | 'researchQuestion';
     reason: string;
   }>;
+  /** 老版本历史会话没有这些字段，读取时保持向后兼容。 */
+  reviewItems?: GuidedReviewItem[];
+  preparationSteps?: string[];
 }
 
 export interface GuidedWorkflowMessage {

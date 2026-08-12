@@ -17,6 +17,7 @@ import { EventPackFactoryPage } from './event-pack-factory-page';
 import { GuidedWorkflowPage } from './guided-workflow-page';
 
 const selectCase = vi.fn();
+const selectExperiment = vi.fn();
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -26,6 +27,7 @@ vi.mock('../state/workflow-context', () => ({
   useWorkflow: () => ({
     eventPack: undefined,
     selectCase,
+    selectExperiment,
   }),
 }));
 
@@ -651,6 +653,7 @@ describe('guided workflow page', () => {
       guidedWorkflow.id,
       guidedWorkflow.pendingProposalId,
       guidedWorkflow.version,
+      [],
     ));
     await waitFor(() => expect(advance).toBeEnabled());
     expect(api.advanceGuidedWorkflow).not.toHaveBeenCalled();
@@ -1139,9 +1142,10 @@ describe('guided workflow page', () => {
     );
 
     await user.click(await screen.findByRole('button', {
-      name: 'Open completed experiment results',
+      name: 'Open staged experiment run',
     }));
-    expect(navigate).toHaveBeenCalledWith('results', {
+    expect(selectExperiment).toHaveBeenCalledWith('exp-prepared-result');
+    expect(navigate).toHaveBeenCalledWith('runs', {
       experimentId: 'exp-prepared-result',
     });
   });

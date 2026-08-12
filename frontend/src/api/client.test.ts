@@ -562,7 +562,11 @@ describe('API client event stream', () => {
       2,
       '/api/v1/guided-workflows/guided-12345678/apply',
       expect.objectContaining({
-        body: JSON.stringify({ proposalId: 'proposal-12345678', expectedVersion: 2 }),
+        body: JSON.stringify({
+          proposalId: 'proposal-12345678',
+          expectedVersion: 2,
+          reviewedItemIds: [],
+        }),
       }),
     );
     expect(fetchMock).toHaveBeenNthCalledWith(

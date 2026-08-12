@@ -26,6 +26,7 @@ from backend.app.guided_workflow.models import (
 from backend.app.guided_workflow.repository import (
     GuidedCachedTurn,
     GuidedTurnClaim,
+    GuidedWorkflowConflictError,
     GuidedWorkflowRepository,
 )
 from backend.app.guided_workflow.stage_openings import (
@@ -452,6 +453,20 @@ class GuidedWorkflowService:
         ownerUserId: str,
         request: GuidedProposalActionRequest,
     ) -> GuidedWorkflowView:
+        current = self.repository.get(workflowId, ownerUserId)
+        if current.pendingProposalId != request.proposalId or current.pendingProposal is None:
+            raise GuidedWorkflowConflictError("the pending proposal is no longer current")
+        knownReviewIds = {item.id for item in current.pendingProposal.reviewItems}
+        reviewedIds = set(request.reviewedItemIds)
+        if not reviewedIds.issubset(knownReviewIds):
+            raise GuidedWorkflowConflictError("review acknowledgement contains an unknown item")
+        requiredReviewIds = {
+            item.id for item in current.pendingProposal.reviewItems if item.requiresExplicitReview
+        }
+        if not requiredReviewIds.issubset(reviewedIds):
+            raise GuidedWorkflowConflictError(
+                "every required review item must be explicitly acknowledged before applying"
+            )
         return self.repository.applyProposal(
             workflowId=workflowId,
             ownerUserId=ownerUserId,
@@ -471,6 +486,8 @@ class GuidedWorkflowService:
             raise ValueError("advancing requires explicit human review acknowledgement")
         current = self.repository.get(workflowId, ownerUserId)
         self._validateStageCompletion(current)
+        if self.preparedPath is not None:
+            self.preparedPath.assertStageReviewComplete(ownerUserId, current)
         preparedNextStage = (
             self.preparedPath.nextStage(ownerUserId, current.stage)
             if self.preparedPath is not None

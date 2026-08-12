@@ -1,8 +1,10 @@
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.cognition import FailureCode, ModelGatewayError
@@ -291,7 +293,18 @@ def _auditActionCount(client: TestClient, owner: str, action: str) -> int:
 
 def _enablePreparedGuidedPath(client: TestClient, owner: str) -> dict[str, str]:
     eventPack = _createEventPack(client, owner, frozen=True)
-    requestData = _scenarioConfig(eventPack["id"])
+    requestPayload = _scenarioConfig(eventPack["id"]).model_dump(mode="json")
+    requestPayload["llmPolicy"] = {
+        "mode": "HYBRID_LLM",
+        "provider": "zhipu",
+        "modelId": "glm-5.2",
+        "representativeAgentCount": 2,
+        "decisionIntervalSteps": 60,
+        "callBudget": 4,
+        "maxCostUsd": 40,
+        "fallbackToRules": False,
+    }
+    requestData = ExperimentRequest.model_validate(requestPayload)
     scenarioId = "scn-guided-prepared-path"
     experimentId = "exp-guided-prepared-path"
     client.app.state.database.saveScenario(
@@ -311,26 +324,77 @@ def _enablePreparedGuidedPath(client: TestClient, owner: str) -> dict[str, str]:
         connection.execute(
             """
             UPDATE experiments
-            SET status='COMPLETED', result_json='{}', progress=1,
+            SET status='COMPLETED', result_json=?, progress=100,
                 completed_pairs=total_pairs, completed_at=?, updated_at=?
             WHERE id=? AND owner_user_id=?
             """,
-            (datetime.now(UTC).isoformat(), datetime.now(UTC).isoformat(), experimentId, owner),
+            (
+                json.dumps(
+                    {
+                        "manifest": {
+                            "agentMode": "HYBRID_LLM",
+                            "llmExternalModelUsed": True,
+                            "llmFallbackCount": 0,
+                        },
+                        "cognition": {
+                            "resolvedMode": "HYBRID_LLM",
+                            "attemptedCalls": 4,
+                            "structuredValidCalls": 4,
+                            "calls": 4,
+                            "fallbackCount": 0,
+                        },
+                    }
+                ),
+                datetime.now(UTC).isoformat(),
+                datetime.now(UTC).isoformat(),
+                experimentId,
+                owner,
+            ),
         )
+    reviewStages = (
+        GuidedStage.EVENT_GOAL,
+        GuidedStage.SOURCE_METHOD,
+        GuidedStage.SOURCE_REVIEW,
+        GuidedStage.CLAIM_REVIEW,
+        GuidedStage.PACK_METADATA_REVIEW,
+        GuidedStage.PACK_FREEZE_REVIEW,
+        GuidedStage.SCENARIO_INTERVENTION,
+        GuidedStage.SCENARIO_REVIEW,
+        GuidedStage.PREFLIGHT,
+        GuidedStage.READY_TO_SUBMIT,
+    )
     stageCopy = {
         language: {
-            GuidedStage.EVENT_GOAL.value: {
-                "assistantMessage": "Review the prepared event fields before applying them.",
-                "nextQuestionOptions": ["Apply event fields"],
-            },
-            GuidedStage.SOURCE_METHOD.value: {
-                "assistantMessage": "Review the prepared source method before applying it.",
-                "nextQuestionOptions": ["Apply source method"],
-            },
-            GuidedStage.SCENARIO_INTERVENTION.value: {
-                "assistantMessage": "Review the prepared intervention before applying it.",
-                "nextQuestionOptions": ["Apply intervention"],
-            },
+            stage.value: {
+                "assistantMessage": (
+                    f"Review every required item for {stage.value} before applying it."
+                ),
+                "nextQuestionOptions": ["Apply reviewed stage"],
+                "preparationSteps": ["Load artifact", "Validate boundary"],
+                "reviewItems": [
+                    {
+                        "id": f"{language}-{stage.value.lower()}",
+                        "category": (
+                            "SOURCE"
+                            if stage in {GuidedStage.SOURCE_METHOD, GuidedStage.SOURCE_REVIEW}
+                            else "CLAIM"
+                            if stage is GuidedStage.CLAIM_REVIEW
+                            else "FREEZE"
+                            if stage is GuidedStage.PACK_FREEZE_REVIEW
+                            else "PREFLIGHT"
+                            if stage in {GuidedStage.PREFLIGHT, GuidedStage.READY_TO_SUBMIT}
+                            else "SCENARIO"
+                            if stage
+                            in {GuidedStage.SCENARIO_INTERVENTION, GuidedStage.SCENARIO_REVIEW}
+                            else "METADATA"
+                        ),
+                        "title": "Required review",
+                        "detail": "Confirm this stage against the linked server artifact.",
+                        "requiresExplicitReview": True,
+                    }
+                ],
+            }
+            for stage in reviewStages
         }
         for language in ("en", "zh-CN")
     }
@@ -543,7 +607,14 @@ def test_prepared_guided_path_is_reviewed_without_provider_calls(
         stages = (
             ("EVENT_GOAL", "我想研究黄金避险需求与流动性压力。"),
             ("SOURCE_METHOD", "采用人工审核的来源方案。"),
+            ("SOURCE_REVIEW", "我已逐项检查来源账本。"),
+            ("CLAIM_REVIEW", "我已逐项检查所有候选主张。"),
+            ("PACK_METADATA_REVIEW", "事件包元数据与证据一致。"),
+            ("PACK_FREEZE_REVIEW", "我理解并确认冻结边界。"),
             ("SCENARIO_INTERVENTION", "只调整做市能力并保持其他条件不变。"),
+            ("SCENARIO_REVIEW", "情景参数与混合 LLM 设置无误。"),
+            ("PREFLIGHT", "运行前检查已经核对。"),
+            ("READY_TO_SUBMIT", "进入分阶段实验运行。"),
         )
         for index, (expectedStage, message) in enumerate(stages, start=1):
             assert workflow["stage"] == expectedStage
@@ -560,12 +631,24 @@ def test_prepared_guided_path_is_reviewed_without_provider_calls(
             assert proposed.status_code == 200
             workflow = proposed.json()
             assert workflow["pendingProposal"]["readyForHumanReview"] is True
+            reviewIds = [item["id"] for item in workflow["pendingProposal"]["reviewItems"]]
+            unreviewed = client.post(
+                f"/api/v1/guided-workflows/{workflow['id']}/apply",
+                headers=_headers(owner),
+                json={
+                    "proposalId": workflow["pendingProposalId"],
+                    "expectedVersion": workflow["version"],
+                    "reviewedItemIds": [],
+                },
+            )
+            assert unreviewed.status_code == 409
             applied = client.post(
                 f"/api/v1/guided-workflows/{workflow['id']}/apply",
                 headers=_headers(owner),
                 json={
                     "proposalId": workflow["pendingProposalId"],
                     "expectedVersion": workflow["version"],
+                    "reviewedItemIds": reviewIds,
                 },
             )
             assert applied.status_code == 200
@@ -593,6 +676,29 @@ def test_prepared_guided_path_is_reviewed_without_provider_calls(
         }
         assert workflow["draft"]["experimentId"] == linked["experimentId"]
         assert fakeCognition.providerCalls == 0
+
+
+def test_prepared_guided_path_rejects_an_experiment_with_rule_fallback(
+    tmp_path: Path,
+) -> None:
+    owner = "guided-prepared-fallback-owner"
+    with TestClient(createApp(dataDir=tmp_path)) as client:
+        linked = _enablePreparedGuidedPath(client, owner)
+        stored = client.app.state.database.getExperiment(linked["experimentId"], owner)
+        result = stored["result"]
+        result["manifest"]["llmFallbackCount"] = 1
+        result["cognition"]["fallbackCount"] = 1
+        with (
+            client.app.state.database.writeLock,
+            client.app.state.database.connection() as connection,
+        ):
+            connection.execute(
+                "UPDATE experiments SET result_json=? WHERE id=? AND owner_user_id=?",
+                (json.dumps(result), linked["experimentId"], owner),
+            )
+
+        with pytest.raises(ValueError, match="must not contain rule fallbacks"):
+            client.app.state.preparedGuidedPathService.configuration(owner)
 
 
 def test_guided_workflow_api_rejects_unsafe_message_before_persistence(
