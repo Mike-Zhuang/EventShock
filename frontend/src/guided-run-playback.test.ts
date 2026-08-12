@@ -94,19 +94,19 @@ describe('guided run playback', () => {
   it('uses a concise default playback while preserving every presentation phase', () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_000);
     expect(startGuidedRunPlayback(completedExperiment.id)).toMatchObject({
-      durationMs: 52_000,
+      durationMs: 22_000,
     });
 
     const playback = readGuidedRunPlayback()!;
-    expect(guidedRunPresentation(playback, completedExperiment, 2_000, 'en').phase)
+    expect(guidedRunPresentation(playback, completedExperiment, 1_500, 'en').phase)
       .toBe('QUEUED');
-    expect(guidedRunPresentation(playback, completedExperiment, 10_000, 'en').phase)
+    expect(guidedRunPresentation(playback, completedExperiment, 5_000, 'en').phase)
       .toBe('COGNITION');
-    expect(guidedRunPresentation(playback, completedExperiment, 30_000, 'en').phase)
+    expect(guidedRunPresentation(playback, completedExperiment, 14_000, 'en').phase)
       .toBe('PAIRED_RUNS');
-    expect(guidedRunPresentation(playback, completedExperiment, 49_000, 'en').phase)
+    expect(guidedRunPresentation(playback, completedExperiment, 21_000, 'en').phase)
       .toBe('AGGREGATING');
-    expect(guidedRunPresentation(playback, completedExperiment, 54_000, 'en').phase)
+    expect(guidedRunPresentation(playback, completedExperiment, 24_000, 'en').phase)
       .toBe('COMPLETED');
   });
 

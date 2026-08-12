@@ -261,19 +261,21 @@ function localTurnProgress(
 function minimumGuidedResponseMs(stage: GuidedStage, useStagedPacing: boolean): number {
   if (import.meta.env.MODE === 'test') return 0;
   if (!useStagedPacing) return 0;
+  // 预置演示仍保留“请求已发送—整理阶段内容—候选就绪”的反馈节奏，
+  // 但每轮最多等待约三秒，避免十个引导阶段占满课堂演示时间。
   const durationByStage: Partial<Record<GuidedStage, number>> = {
-    EVENT_GOAL: 6_500,
-    SOURCE_METHOD: 5_500,
-    SOURCE_REVIEW: 8_500,
-    CLAIM_REVIEW: 9_000,
-    PACK_METADATA_REVIEW: 6_000,
-    PACK_FREEZE_REVIEW: 6_500,
-    SCENARIO_INTERVENTION: 6_000,
-    SCENARIO_REVIEW: 7_500,
-    PREFLIGHT: 8_000,
-    READY_TO_SUBMIT: 5_500,
+    EVENT_GOAL: 2_400,
+    SOURCE_METHOD: 2_200,
+    SOURCE_REVIEW: 2_800,
+    CLAIM_REVIEW: 3_000,
+    PACK_METADATA_REVIEW: 2_400,
+    PACK_FREEZE_REVIEW: 2_500,
+    SCENARIO_INTERVENTION: 2_400,
+    SCENARIO_REVIEW: 2_700,
+    PREFLIGHT: 2_800,
+    READY_TO_SUBMIT: 2_200,
   };
-  return durationByStage[stage] ?? 2_500;
+  return durationByStage[stage] ?? 2_000;
 }
 
 async function waitForMinimumDuration(startedAtMs: number, minimumMs: number): Promise<void> {
