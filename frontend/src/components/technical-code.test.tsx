@@ -36,7 +36,9 @@ describe('技术状态的人类可读展示', () => {
     expect(technicalCodeLabel('ModelGatewayError', 'en'))
       .toBe('The model service could not complete the request');
     expect(technicalCodeLabel('NEW_PROVIDER_STATE', 'zh-CN'))
-      .toBe('未收录的技术状态：new provider state');
+      .toBe('系统正在处理此步骤');
+    expect(technicalCodeLabel('NEW_PROVIDER_STATE', 'en'))
+      .toBe('The system is processing this step');
   });
 
   it('区分供应商连接失败、格式失败和证据审核阻塞原因', () => {
@@ -46,5 +48,9 @@ describe('技术状态的人类可读展示', () => {
       .toBe('No usable provider response was received');
     expect(technicalCodeLabel('EXTRACTION_NOT_ELIGIBLE', 'zh-CN'))
       .toBe('该来源暂不符合证据抽取条件');
+    expect(technicalCodeLabel('PREPARED_PROPOSAL_READY', 'zh-CN'))
+      .toBe('引导候选已通过校验，正在准备人工审核');
+    expect(technicalCodeLabel('PREPARED_PROPOSAL_READY', 'en'))
+      .toBe('The guided candidate is ready for human review');
   });
 });

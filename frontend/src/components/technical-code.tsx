@@ -46,6 +46,10 @@ const TECHNICAL_CODE_LABELS: Record<string, [english: string, chinese: string]> 
   NON_OFFICIAL_SOURCE: ['The claim is not backed by an official source', '该主张并非由官方来源支持'],
   MULTIPLE_IMPACT_CHANNELS: ['The claim affects multiple simulation channels', '该主张影响多个仿真通道'],
   PHONE_NUMBER: ['Phone number detected', '检测到电话号码'],
+  PREPARED_PROPOSAL_READY: [
+    'The guided candidate is ready for human review',
+    '引导候选已通过校验，正在准备人工审核',
+  ],
   PROMPT_CONTROL_LANGUAGE: ['The response exposed control-instruction language', '回复疑似暴露控制指令'],
   PROMPT_DISCLOSURE_BLOCKED: ['The response was blocked by prompt-disclosure protection', '回复被提示词泄露防护拦截'],
   PROMPT_FRAGMENT_OVERLAP: ['The response overlapped protected instructions', '回复与受保护指令存在重复'],
@@ -83,8 +87,8 @@ function fallbackTechnicalCodeLabel(code: string, language: Language): string {
     .join(' ');
   if (!words) return language === 'zh-CN' ? '未报告具体原因' : 'No specific reason reported';
   return language === 'zh-CN'
-    ? `未收录的技术状态：${words}`
-    : `${words.charAt(0).toUpperCase()}${words.slice(1)}`;
+    ? '系统正在处理此步骤'
+    : 'The system is processing this step';
 }
 
 export function technicalCodeLabel(code: string | undefined, language: Language): string {

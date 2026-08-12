@@ -298,6 +298,74 @@ function focusGuidedTarget(targetId: string): void {
   });
 }
 
+function hasAppliedCurrentStageProposal(workflow: GuidedWorkflow): boolean {
+  return Boolean(workflow.archivedProposals?.some((archived) => (
+    archived.status === 'APPLIED' && archived.proposal.stage === workflow.stage
+  )));
+}
+
+function requiresPreparedStageReview(workflow: GuidedWorkflow): boolean {
+  const hasPreparedResearchChain = Boolean(
+    workflow.draft.eventPackId
+    && workflow.draft.scenarioId
+    && workflow.draft.experimentId,
+  );
+  const hasExplicitReviewHistory = Boolean(workflow.archivedProposals?.some((archived) => (
+    archived.proposal.reviewItems?.some((item) => item.requiresExplicitReview)
+  )));
+  return hasPreparedResearchChain && hasExplicitReviewHistory;
+}
+
+function preparedStageReviewPrompt(stage: GuidedStage, isZh: boolean): string {
+  const prompts: Record<GuidedStage, { en: string; zh: string }> = {
+    EVENT_GOAL: {
+      en: 'Prepare the event goal as an editable candidate. Keep one synthetic research question and a clear non-forecast boundary.',
+      zh: '请把事件目标整理成可编辑候选，只保留一个合成研究问题，并明确非预测边界。',
+    },
+    SOURCE_METHOD: {
+      en: 'Prepare the bounded source-method candidate. Keep source authorization and every evidence decision under human review.',
+      zh: '请生成有边界的来源方式候选，来源授权和每项证据决定仍由人工审核。',
+    },
+    SOURCE_REVIEW: {
+      en: 'Prepare the source-ledger review candidate. Show what each source supports and what it cannot establish.',
+      zh: '请生成来源账本审核候选，说明每个来源支持什么，以及不能证明什么。',
+    },
+    CLAIM_REVIEW: {
+      en: 'Prepare the claim-review candidate. Keep every claim linked to its reviewed source and require an explicit human decision.',
+      zh: '请生成主张审核候选，让每条主张关联已审核来源，并要求明确的人工决定。',
+    },
+    PACK_METADATA_REVIEW: {
+      en: 'Prepare the Event Pack metadata review. Check that the title, point-in-time boundary, instrument, and research question remain aligned.',
+      zh: '请生成 Event Pack 元数据审核候选，核对标题、时点边界、研究对象和研究问题是否一致。',
+    },
+    PACK_FREEZE_REVIEW: {
+      en: 'Prepare the freeze review. Explain exactly which reviewed sources, claims, timestamps, and hashes will become immutable.',
+      zh: '请生成冻结审核候选，说明哪些已审核来源、主张、时间和哈希将被锁定。',
+    },
+    SCENARIO_INTERVENTION: {
+      en: 'Prepare one intervention candidate. Change only market-making capacity and keep the paired comparison interpretable.',
+      zh: '请生成单一干预候选，只改变做市能力，并保持配对比较可解释。',
+    },
+    SCENARIO_REVIEW: {
+      en: 'Prepare the scenario review candidate. Check paired seeds, agent settings, hybrid-LLM cognition, and the model authority boundary.',
+      zh: '请生成情景审核候选，核对配对随机种子、Agent 设置、混合 LLM 认知和模型权限边界。',
+    },
+    PREFLIGHT: {
+      en: 'Prepare the preflight review candidate. Check evidence freeze, the one-variable difference, LLM cost limits, structured output, and tool authority.',
+      zh: '请生成运行前审核候选，核对证据冻结、单变量差异、LLM 费用上限、结构化输出和工具权限。',
+    },
+    READY_TO_SUBMIT: {
+      en: 'Verify that the Event Pack, scenario, LLM cognition decisions, and experiment results belong to the same research chain. If ten valid paired runs and reproducibility metadata are ready, prepare the final submission candidate.',
+      zh: '请核对 Event Pack、情景、LLM 认知决策和实验结果是否属于同一研究链路。如果十组有效配对和可复现元数据都已准备好，请生成最终提交候选。',
+    },
+    COMPLETED: {
+      en: 'Summarize the completed research chain and open the staged experiment run.',
+      zh: '请总结已完成的研究链路，并进入分阶段实验运行。',
+    },
+  };
+  return isZh ? prompts[stage].zh : prompts[stage].en;
+}
+
 function guidedAdvanceBlocker(
   workflow: GuidedWorkflow,
   isZh: boolean,
@@ -308,6 +376,17 @@ function guidedAdvanceBlocker(
       message: isZh
         ? '请先核对并应用当前候选；如果候选不正确，请在对话框中要求修改。'
         : 'Review and apply the current candidate first, or ask for a correction in the conversation.',
+    };
+  }
+  if (
+    requiresPreparedStageReview(workflow)
+    && !hasAppliedCurrentStageProposal(workflow)
+  ) {
+    return {
+      targetId: 'guided-message',
+      message: isZh
+        ? '当前阶段还没有经过人工应用的候选。请先生成本阶段候选，逐项核对并应用，然后再继续。'
+        : 'This stage does not yet have a human-applied candidate. Generate it, review every required item, and apply it before continuing.',
     };
   }
   const draft = workflow.draft;
@@ -364,6 +443,11 @@ function guidedAdvanceBlocker(
 
 function guidedAdvanceErrorMessage(error: unknown, isZh: boolean): string {
   const message = error instanceof Error ? error.message : String(error);
+  if (message.includes('explicitly reviewed and applied proposal')) {
+    return isZh
+      ? '当前阶段还没有经过人工应用的候选。请先生成本阶段候选，逐项核对并应用，然后再继续。'
+      : 'This stage does not yet have a human-applied candidate. Generate it, review every required item, and apply it before continuing.';
+  }
   if (!isZh || !(error instanceof ApiError)) return message;
   if (message.includes('link the reviewed Event Pack')) {
     return '请先完成全文证据审核、生成 Event Pack，并将服务器返回的真实 Event Pack 关联到本引导。';
@@ -385,6 +469,9 @@ function guidedAdvanceErrorMessage(error: unknown, isZh: boolean): string {
 
 function guidedAdvanceErrorTarget(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
+  if (message.includes('explicitly reviewed and applied proposal')) {
+    return 'guided-message';
+  }
   if (
     message.includes('link the reviewed Event Pack')
     || message.includes('explicit human review decision')
@@ -1035,6 +1122,13 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
     'SCENARIO_REVIEW',
     'PREFLIGHT',
   ].includes(workflow.stage);
+  const needsPreparedStageProposal = Boolean(
+    workflow
+    && workflow.status === 'ACTIVE'
+    && !workflow.pendingProposal
+    && requiresPreparedStageReview(workflow)
+    && !hasAppliedCurrentStageProposal(workflow),
+  );
 
   const stageAction = useMemo(() => {
     if (!workflow) return undefined;
@@ -1680,6 +1774,27 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
                   </button>
                 ))}
               </div>
+            ) : null}
+
+            {needsPreparedStageProposal ? (
+              <section className="guided-stage-prompt" aria-labelledby="guided-stage-prompt-heading">
+                <div>
+                  <strong id="guided-stage-prompt-heading">
+                    {isZh ? '先生成本阶段的审核候选' : 'Generate this stage’s review candidate first'}
+                  </strong>
+                  <p>{isZh
+                    ? '你已进入新的审核阶段，但还没有应用属于本阶段的候选。使用下方建议会先填入输入框，不会自动发送；你仍可编辑后再提交。'
+                    : 'You entered a new review stage, but no candidate for this stage has been applied. The action below only fills the composer; you can edit it before sending.'}</p>
+                </div>
+                <Button
+                  kind="tertiary"
+                  size="sm"
+                  disabled={Boolean(busyAction)}
+                  onClick={() => fillSuggestedAnswer(preparedStageReviewPrompt(workflow.stage, isZh))}
+                >
+                  {isZh ? '填入本阶段审核请求' : 'Fill this stage’s review request'}
+                </Button>
+              </section>
             ) : null}
 
             {workflow.status === 'ACTIVE' ? (

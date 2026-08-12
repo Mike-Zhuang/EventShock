@@ -9943,6 +9943,30 @@ code {
   gap: 10px;
 }
 
+.guided-stage-prompt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px;
+  border: 1px solid var(--accent);
+  border-left-width: 4px;
+  background: var(--accent-soft);
+}
+
+.guided-stage-prompt > div {
+  flex: 1 1 32rem;
+}
+
+.guided-stage-prompt p {
+  max-width: 72ch;
+  margin: 6px 0 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .guided-composer__notice {
   margin: 0;
   color: var(--accent);
