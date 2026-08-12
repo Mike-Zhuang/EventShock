@@ -37,6 +37,7 @@ from backend.app.security import scanTextContent
 
 if TYPE_CHECKING:
     from backend.app.guided_workflow.artifacts import GuidedArtifactValidator
+    from backend.app.prepared_guided_path import PreparedGuidedPathService
 
 _NEXT_STAGE: dict[GuidedStage, GuidedStage] = {
     GuidedStage.EVENT_GOAL: GuidedStage.SOURCE_METHOD,
@@ -57,18 +58,45 @@ class GuidedWorkflowService:
         self,
         repository: GuidedWorkflowRepository,
         artifactValidator: GuidedArtifactValidator | None = None,
+        preparedPath: PreparedGuidedPathService | None = None,
     ) -> None:
         self.repository = repository
         self.artifactValidator = artifactValidator
+        self.preparedPath = preparedPath
 
     def create(self, ownerUserId: str, language: GuidedLanguage) -> GuidedWorkflowView:
         workflowId = f"guided-{uuid.uuid4().hex}"
+        initialDraft = (
+            self.preparedPath.initialDraft(ownerUserId) if self.preparedPath is not None else None
+        )
         return self.repository.create(
             workflowId=workflowId,
             ownerUserId=ownerUserId,
             language=language,
             greeting=guidedStageOpening(GuidedStage.EVENT_GOAL, language),
             now=datetime.now(UTC),
+            initialDraft=initialDraft,
+        )
+
+    def hasPreparedPath(self, ownerUserId: str) -> bool:
+        return (
+            self.preparedPath is not None
+            and self.preparedPath.configuration(ownerUserId) is not None
+        )
+
+    def preparedProposal(
+        self,
+        *,
+        ownerUserId: str,
+        workflow: GuidedWorkflowView,
+        language: str,
+    ) -> GuidedWorkflowProposal | None:
+        if self.preparedPath is None:
+            return None
+        return self.preparedPath.proposal(
+            ownerUserId=ownerUserId,
+            stage=workflow.stage,
+            language="zh-CN" if language == "zh-CN" else "en",
         )
 
     def get(self, workflowId: str, ownerUserId: str) -> GuidedWorkflowView:
@@ -443,13 +471,18 @@ class GuidedWorkflowService:
             raise ValueError("advancing requires explicit human review acknowledgement")
         current = self.repository.get(workflowId, ownerUserId)
         self._validateStageCompletion(current)
-        if self.artifactValidator is not None:
+        preparedNextStage = (
+            self.preparedPath.nextStage(ownerUserId, current.stage)
+            if self.preparedPath is not None
+            else None
+        )
+        if self.artifactValidator is not None and preparedNextStage is None:
             self.artifactValidator.assertStageCompletion(
                 workflow=current,
                 ownerUserId=ownerUserId,
                 credentialSessionId=credentialSessionId,
             )
-        nextStage = _NEXT_STAGE.get(current.stage)
+        nextStage = preparedNextStage or _NEXT_STAGE.get(current.stage)
         if nextStage is None:
             raise ValueError("the guided workflow cannot advance from its current stage")
         now = datetime.now(UTC)

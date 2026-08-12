@@ -650,6 +650,7 @@ export interface GuidedWorkflowDraft {
   eventPackBuildId?: string;
   eventPackId?: string;
   scenarioId?: string;
+  experimentId?: string;
 }
 
 export interface GuidedWorkflow {

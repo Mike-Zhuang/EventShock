@@ -170,6 +170,16 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_scenarios_session_updated
                 ON scenarios(session_id, updated_at DESC);
+                CREATE TABLE IF NOT EXISTS account_capabilities (
+                    user_id TEXT NOT NULL,
+                    capability TEXT NOT NULL,
+                    configuration_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(user_id, capability)
+                );
+                CREATE INDEX IF NOT EXISTS idx_account_capabilities_capability
+                ON account_capabilities(capability, updated_at DESC);
                 CREATE TABLE IF NOT EXISTS audit_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     session_id TEXT NOT NULL,

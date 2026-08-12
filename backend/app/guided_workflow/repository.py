@@ -408,6 +408,7 @@ class GuidedWorkflowRepository:
         language: str,
         greeting: str,
         now: datetime,
+        initialDraft: GuidedWorkflowDraft | None = None,
     ) -> GuidedWorkflowView:
         timestamp = _timestamp(now)
         with self.database.writeLock, self.database.connection() as connection:
@@ -422,7 +423,7 @@ class GuidedWorkflowRepository:
                     workflowId,
                     ownerUserId,
                     language,
-                    GuidedWorkflowDraft().model_dump_json(),
+                    (initialDraft or GuidedWorkflowDraft()).model_dump_json(),
                     timestamp,
                     timestamp,
                 ),

@@ -1114,4 +1114,35 @@ describe('guided workflow page', () => {
     })).toHaveFocus());
     expect(screen.getByText('The dedicated workspace is incomplete')).toBeInTheDocument();
   });
+
+  it('opens the linked completed experiment from a finished guided workflow', async () => {
+    const user = userEvent.setup();
+    const navigate = vi.fn();
+    const completedWorkflow: GuidedWorkflow = {
+      ...guidedWorkflow,
+      stage: 'COMPLETED',
+      status: 'COMPLETED',
+      pendingProposal: undefined,
+      pendingProposalId: undefined,
+      draft: {
+        ...guidedWorkflow.draft,
+        experimentId: 'exp-prepared-result',
+      },
+    };
+    vi.mocked(api.getGuidedWorkflows).mockResolvedValue([completedWorkflow]);
+    vi.mocked(api.getGuidedWorkflow).mockResolvedValue(completedWorkflow);
+
+    render(
+      <I18nProvider>
+        <GuidedWorkflowPage navigate={navigate} />
+      </I18nProvider>,
+    );
+
+    await user.click(await screen.findByRole('button', {
+      name: 'Open completed experiment results',
+    }));
+    expect(navigate).toHaveBeenCalledWith('results', {
+      experimentId: 'exp-prepared-result',
+    });
+  });
 });

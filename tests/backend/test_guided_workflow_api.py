@@ -22,6 +22,10 @@ from backend.app.guided_workflow.models import (
     ProposedIntervention,
 )
 from backend.app.main import createApp
+from backend.app.prepared_guided_path import (
+    PREPARED_GUIDED_PATH_CAPABILITY,
+    PreparedGuidedPathConfiguration,
+)
 from backend.app.schemas import (
     ClaimReviewRequest,
     EventPackCreateRequest,
@@ -285,15 +289,88 @@ def _auditActionCount(client: TestClient, owner: str, action: str) -> int:
     )
 
 
+def _enablePreparedGuidedPath(client: TestClient, owner: str) -> dict[str, str]:
+    eventPack = _createEventPack(client, owner, frozen=True)
+    requestData = _scenarioConfig(eventPack["id"])
+    scenarioId = "scn-guided-prepared-path"
+    experimentId = "exp-guided-prepared-path"
+    client.app.state.database.saveScenario(
+        scenarioId,
+        owner,
+        "Prepared guided workflow scenario",
+        requestData.model_dump(mode="json"),
+        True,
+    )
+    client.app.state.database.createExperiment(
+        experimentId,
+        owner,
+        requestData.model_dump(mode="json"),
+        "guided-prepared-path",
+    )
+    with client.app.state.database.writeLock, client.app.state.database.connection() as connection:
+        connection.execute(
+            """
+            UPDATE experiments
+            SET status='COMPLETED', result_json='{}', progress=1,
+                completed_pairs=total_pairs, completed_at=?, updated_at=?
+            WHERE id=? AND owner_user_id=?
+            """,
+            (datetime.now(UTC).isoformat(), datetime.now(UTC).isoformat(), experimentId, owner),
+        )
+    stageCopy = {
+        language: {
+            GuidedStage.EVENT_GOAL.value: {
+                "assistantMessage": "Review the prepared event fields before applying them.",
+                "nextQuestionOptions": ["Apply event fields"],
+            },
+            GuidedStage.SOURCE_METHOD.value: {
+                "assistantMessage": "Review the prepared source method before applying it.",
+                "nextQuestionOptions": ["Apply source method"],
+            },
+            GuidedStage.SCENARIO_INTERVENTION.value: {
+                "assistantMessage": "Review the prepared intervention before applying it.",
+                "nextQuestionOptions": ["Apply intervention"],
+            },
+        }
+        for language in ("en", "zh-CN")
+    }
+    configuration = PreparedGuidedPathConfiguration.model_validate(
+        {
+            "eventPackId": eventPack["id"],
+            "scenarioId": scenarioId,
+            "experimentId": experimentId,
+            "eventMetadata": _eventMetadata().model_dump(mode="json"),
+            "sourceMethod": "MANUAL",
+            "intervention": requestData.intervention.model_dump(mode="json")
+            | {"explanation": "Change one bounded liquidity assumption only."},
+            "stageCopy": stageCopy,
+        }
+    )
+    client.app.state.accountCapabilityRepository.grant(
+        userId=owner,
+        capability=PREPARED_GUIDED_PATH_CAPABILITY,
+        configuration=configuration.model_dump(mode="json"),
+    )
+    return {
+        "eventPackId": eventPack["id"],
+        "scenarioId": scenarioId,
+        "experimentId": experimentId,
+    }
+
+
 class FakeGuidedCognition:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(self, *, fail: bool = False, configured: bool = True) -> None:
         self.configCalls = 0
         self.providerCalls = 0
         self.fail = fail
+        self.configured = configured
 
     def getConfig(self, _sessionId: str) -> SimpleNamespace:
         self.configCalls += 1
-        return SimpleNamespace(configured=True)
+        return SimpleNamespace(
+            configured=self.configured,
+            credential_status="ACTIVE" if self.configured else "MISSING",
+        )
 
     async def proposeGuidedWorkflow(
         self,
@@ -439,6 +516,83 @@ def test_guided_turn_without_credential_preserves_unconsumed_message(
         assert stored["version"] == 1
         assert len(stored["messages"]) == 1
         assert operations["items"] == []
+
+
+def test_prepared_guided_path_is_reviewed_without_provider_calls(
+    tmp_path: Path,
+) -> None:
+    owner = "guided-prepared-owner"
+    with TestClient(createApp(dataDir=tmp_path)) as client:
+        linked = _enablePreparedGuidedPath(client, owner)
+        fakeCognition = FakeGuidedCognition(configured=False)
+        client.app.state.cognitionService = fakeCognition
+        workflow = client.post(
+            "/api/v1/guided-workflows",
+            headers=_headers(owner),
+            json={"language": "zh-CN"},
+        ).json()
+        assert workflow["draft"] == {
+            "eventMetadata": None,
+            "sourceMethod": None,
+            "searchQueries": [],
+            "intervention": None,
+            "eventPackBuildId": None,
+            **linked,
+        }
+
+        stages = (
+            ("EVENT_GOAL", "我想研究黄金避险需求与流动性压力。"),
+            ("SOURCE_METHOD", "采用人工审核的来源方案。"),
+            ("SCENARIO_INTERVENTION", "只调整做市能力并保持其他条件不变。"),
+        )
+        for index, (expectedStage, message) in enumerate(stages, start=1):
+            assert workflow["stage"] == expectedStage
+            proposed = client.post(
+                f"/api/v1/guided-workflows/{workflow['id']}/turn",
+                headers=_headers(owner),
+                json={
+                    "message": message,
+                    "language": "zh-CN",
+                    "expectedVersion": workflow["version"],
+                    "clientRequestId": f"prepared-guided-turn-{index:02d}",
+                },
+            )
+            assert proposed.status_code == 200
+            workflow = proposed.json()
+            assert workflow["pendingProposal"]["readyForHumanReview"] is True
+            applied = client.post(
+                f"/api/v1/guided-workflows/{workflow['id']}/apply",
+                headers=_headers(owner),
+                json={
+                    "proposalId": workflow["pendingProposalId"],
+                    "expectedVersion": workflow["version"],
+                },
+            )
+            assert applied.status_code == 200
+            workflow = applied.json()
+            advanced = client.post(
+                f"/api/v1/guided-workflows/{workflow['id']}/advance",
+                headers=_headers(owner),
+                json={
+                    "expectedVersion": workflow["version"],
+                    "acknowledgedHumanReview": True,
+                },
+            )
+            assert advanced.status_code == 200
+            workflow = advanced.json()
+
+        assert workflow["stage"] == "COMPLETED"
+        assert workflow["status"] == "COMPLETED"
+        assert workflow["draft"]["eventMetadata"]["instrument"] == "TEST"
+        assert workflow["draft"]["sourceMethod"] == "MANUAL"
+        assert workflow["draft"]["intervention"] == {
+            "parameter": "marketMakerCapacity",
+            "baselineValue": 1.0,
+            "interventionValue": 0.65,
+            "explanation": "Change one bounded liquidity assumption only.",
+        }
+        assert workflow["draft"]["experimentId"] == linked["experimentId"]
+        assert fakeCognition.providerCalls == 0
 
 
 def test_guided_workflow_api_rejects_unsafe_message_before_persistence(
