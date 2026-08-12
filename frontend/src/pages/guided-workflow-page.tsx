@@ -959,6 +959,12 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
     if (workflow.stage === 'PREFLIGHT' || workflow.stage === 'READY_TO_SUBMIT') {
       return { label: isZh ? '打开运行前检查' : 'Open Preflight', view: 'preflight' as const };
     }
+    if (workflow.stage === 'COMPLETED' && workflow.draft.experimentId) {
+      return {
+        label: isZh ? '打开已完成实验结果' : 'Open completed experiment results',
+        view: 'results' as const,
+      };
+    }
     return undefined;
   }, [isZh, workflow]);
 
@@ -1003,6 +1009,9 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
         const savedScenario = await api.getScenario(workflow.draft.scenarioId);
         await selectLinkedEventPack(workflow.draft.eventPackId);
         setScenario(savedScenario.config);
+      } else if (stageAction.view === 'results') {
+        navigate('results', { experimentId: workflow.draft.experimentId });
+        return;
       }
       navigate(stageAction.view);
     } catch (handoffError) {

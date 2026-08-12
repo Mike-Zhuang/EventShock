@@ -145,6 +145,14 @@ class AccountPrivacyService:
                     "SELECT * FROM scenarios WHERE owner_user_id=?",
                     (userId,),
                 ),
+                "accountCapabilities": _exportRows(
+                    connection,
+                    """
+                    SELECT capability, configuration_json, created_at, updated_at
+                    FROM account_capabilities WHERE user_id=?
+                    """,
+                    (userId,),
+                ),
                 "experiments": _exportRows(
                     connection,
                     """
@@ -225,6 +233,7 @@ class AccountPrivacyService:
                     (userId,),
                 )
             for tableName, predicate, value in (
+                ("account_capabilities", "user_id=?", userId),
                 ("guided_workflows", "owner_user_id=?", userId),
                 ("event_pack_factory_builds", "owner_user_id=?", userId),
                 ("result_interpretation_exchanges", "owner_user_id=?", userId),

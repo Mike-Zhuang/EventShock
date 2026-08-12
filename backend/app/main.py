@@ -27,6 +27,7 @@ from fastapi.responses import (
 )
 from starlette.concurrency import run_in_threadpool
 
+from backend.app.account_capabilities import AccountCapabilityRepository
 from backend.app.auth import (
     AuthContext,
     AuthenticationError,
@@ -152,6 +153,7 @@ from backend.app.guided_workflow import (
 from backend.app.guided_workflow.artifacts import GuidedArtifactValidator
 from backend.app.legal import publicLegalPayload
 from backend.app.observability import RuntimeMetrics
+from backend.app.prepared_guided_path import PreparedGuidedPathService
 from backend.app.privacy import (
     AccountNotFoundError,
     AccountPrivacyService,
@@ -437,6 +439,8 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
     async def lifespan(appInstance: FastAPI):
         database = Database(settings.databasePath)
         database.initialize()
+        accountCapabilityRepository = AccountCapabilityRepository(database)
+        accountCapabilityRepository.initialize()
         guidedWorkflowRepository = GuidedWorkflowRepository(database)
         guidedWorkflowRepository.initialize()
         factoryRepository = EventPackFactoryRepository(settings.databasePath)
@@ -523,6 +527,10 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             cognitionService,
         )
         scenarioService = ScenarioService(database, eventPackService)
+        preparedGuidedPathService = PreparedGuidedPathService(
+            database,
+            accountCapabilityRepository,
+        )
         guidedWorkflowService = GuidedWorkflowService(
             guidedWorkflowRepository,
             GuidedArtifactValidator(
@@ -531,6 +539,7 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
                 eventPacks=eventPackService,
                 scenarios=scenarioService,
             ),
+            preparedGuidedPathService,
         )
         experimentService = ExperimentService(database, eventPackService, cognitionService)
         studyService = StudyApiService(database)
@@ -548,6 +557,8 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
         appInstance.state.experimentService = experimentService
         appInstance.state.studyService = studyService
         appInstance.state.accountPrivacyService = accountPrivacyService
+        appInstance.state.accountCapabilityRepository = accountCapabilityRepository
+        appInstance.state.preparedGuidedPathService = preparedGuidedPathService
         appInstance.state.guidedWorkflowService = guidedWorkflowService
         appInstance.state.eventPackFactoryService = factoryService
         appInstance.state.resultInterpretationSingleFlight = resultInterpretationSingleFlight
@@ -1288,8 +1299,9 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             )
             if replayed is not None:
                 return replayed.model_dump(mode="json")
+            usePreparedPath = service.hasPreparedPath(ownerUserId)
             credentialView = cognition.getConfig(credentialId)
-            if not credentialView.configured:
+            if not usePreparedPath and not credentialView.configured:
                 if credentialView.credential_status == "EXPIRED":
                     raise ApiError(
                         "LLM_CREDENTIAL_EXPIRED",
@@ -1311,7 +1323,25 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             if claim.replayed:
                 return claim.workflow.model_dump(mode="json")
             try:
-                if credentialView.configured:
+                preparedProposal = service.preparedProposal(
+                    ownerUserId=ownerUserId,
+                    workflow=claim.workflow,
+                    language=payload.language,
+                )
+                if preparedProposal is not None:
+                    proposal = preparedProposal
+                    service.recordTurnProviderEvidence(
+                        workflowId=workflowId,
+                        ownerUserId=ownerUserId,
+                        request=payload,
+                        claim=claim,
+                        providerRequestId=None,
+                        httpResponseReceived=False,
+                        usageReceived=False,
+                        parseCompleted=True,
+                        failureStage="PREPARED_PROPOSAL_READY",
+                    )
+                elif credentialView.configured:
 
                     def recordGuidedProviderProgress(
                         stage: str,

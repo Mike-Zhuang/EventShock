@@ -146,6 +146,7 @@ describe('guided-workflow normalizer', () => {
       eventPackBuildId: null,
       eventPackId: null,
       scenarioId: null,
+      experimentId: 'exp-prepared-result',
     },
     pendingProposal: {
       schemaVersion: 'guided_proposal_v1.0.0',
@@ -190,6 +191,7 @@ describe('guided-workflow normalizer', () => {
         proposedEventMetadata: { instrument: 'EXAMPLE' },
       },
       messages: [{ role: 'assistant' }],
+      draft: { experimentId: 'exp-prepared-result' },
     });
   });
 

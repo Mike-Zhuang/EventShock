@@ -741,6 +741,7 @@ function normalizeGuidedDraft(value: unknown): GuidedWorkflowDraft {
     eventPackBuildId: asOptionalString(read(value, 'eventPackBuildId', 'event_pack_build_id')),
     eventPackId: asOptionalString(read(value, 'eventPackId', 'event_pack_id')),
     scenarioId: asOptionalString(read(value, 'scenarioId', 'scenario_id')),
+    experimentId: asOptionalString(read(value, 'experimentId', 'experiment_id')),
   };
 }
 

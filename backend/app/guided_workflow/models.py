@@ -225,6 +225,7 @@ class GuidedWorkflowDraft(StrictModel):
     eventPackBuildId: str | None = None
     eventPackId: str | None = None
     scenarioId: str | None = None
+    experimentId: str | None = None
 
 
 class GuidedArchivedProposal(StrictModel):
