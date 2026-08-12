@@ -36,10 +36,7 @@ def test_prepared_path_exposes_stage_specific_selectable_replies() -> None:
     assert len(replies) == len(set(replies))
     assert all(len(reply) > 40 for reply in replies)
     assert "five" in copy["en"][GuidedStage.SOURCE_REVIEW.value]["nextQuestionOptions"][0]
-    assert (
-        "zero rule fallback"
-        in copy["en"][GuidedStage.PREFLIGHT.value]["nextQuestionOptions"][0]
-    )
+    assert "zero rule fallback" in copy["en"][GuidedStage.PREFLIGHT.value]["nextQuestionOptions"][0]
 
 
 def _interpretationRun(*, deterministicFallbackUsed: bool = False) -> SimpleNamespace:
