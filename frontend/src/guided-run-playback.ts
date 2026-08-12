@@ -1,7 +1,9 @@
 import type { CognitionProgress, Experiment, ExperimentStatus } from './api/types';
 
 const STORAGE_KEY = 'eventshock-guided-run-playback-v1';
-const DEFAULT_DURATION_MS = 78_000;
+// 预置演示只播放已经完成且通过校验的实验。52 秒既能完整展示认知准备、
+// 十组配对运行和汇总阶段，也避免课堂演示在运行中心停留过久。
+const DEFAULT_DURATION_MS = 52_000;
 const MAX_PLAYBACK_AGE_MS = 15 * 60 * 1_000;
 
 export interface GuidedRunPlayback {
