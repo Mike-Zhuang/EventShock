@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import hashlib
+import json
 import time
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -26,27 +30,53 @@ from backend.app.prepared_guided_path import (
 from backend.app.schemas import EventPackCreateRequest, EventSourceInput, ExperimentRequest
 from backend.app.service import EventPackService, ExperimentService
 
-EVENT_PACK_ID = "custom-gold-liquidity-reviewed-v2"
-SCENARIO_ID = "scn-gold-liquidity-reviewed-v2"
-COGNITION_SESSION_ID = "guided-research-seeding-v2"
+EVENT_PACK_ID = "custom-gold-liquidity-reviewed-v3"
+SCENARIO_ID = "scn-gold-liquidity-reviewed-v3"
+COGNITION_SESSION_ID = "guided-research-seeding-v3"
 EXPERIMENT_IDEMPOTENCY_KEYS = (
-    "guided-gold-liquidity-hybrid-v2-a1",
-    "guided-gold-liquidity-hybrid-v2-a2",
-    "guided-gold-liquidity-hybrid-v2-a3",
-    "guided-gold-liquidity-hybrid-v2-a4",
+    "guided-gold-liquidity-hybrid-v3-a1",
+    "guided-gold-liquidity-hybrid-v3-a2",
+    "guided-gold-liquidity-hybrid-v3-a3",
+    "guided-gold-liquidity-hybrid-v3-a4",
+)
+INTERPRETATION_CONVERSATION_ID = "gold-research-summary-en-v1"
+INTERPRETATION_CLIENT_REQUEST_ID = "gold-research-summary-request-en-v1"
+INTERPRETATION_QUESTION = (
+    "War usually supports gold, so why could gold fall from its January 29 record high near "
+    "USD 5,600 to about USD 4,675 by March 20? Using this experiment, explain in plain English "
+    "how safe-haven demand, liquidity stress, an oil shock, and forced selling can compete; "
+    "what lower market-making capacity changed; how the validated hybrid-LLM cognition layer "
+    "participated; and what the biggest limitation is. Use the strongest server-verified "
+    "numbers and cite result claims with the supplied [result:*] evidence markers. End with one "
+    "practical takeaway for Xiaoming while making clear that this scenario neither proves the "
+    "historical price move nor provides a forecast or investment advice."
+)
+INTERPRETATION_REQUIRED_TERMS = (
+    "5,600",
+    "4,675",
+    "xiaoming",
+    "safe-haven",
+    "liquidity",
+    "oil",
+    "forced selling",
+    "market-making",
 )
 
 
 def _eventMetadata() -> dict[str, object]:
     return {
-        "title": "Gold Liquidity Stress: Safe-Haven Demand versus Forced Selling",
-        "titleZh": "黄金流动性压力：避险需求与被迫卖出",
+        "title": "Gold after a Record High: Safe-Haven Demand versus Liquidity Stress",
+        "titleZh": "黄金创新高后的反转：避险需求与流动性压力",
         "summary": (
-            "A bounded synthetic scenario examining how safe-haven demand, forced selling, "
-            "and liquidity provision can interact in a gold-linked market proxy."
+            "A bounded synthetic scenario based on a human-reviewed classroom narrative: gold "
+            "reached a record high near USD 5,600 on January 29, 2026, then fell to USD 4,675 "
+            "by March 20 as war-related safe-haven demand competed with liquidity stress, an "
+            "oil shock, and forced selling."
         ),
         "summaryZh": (
-            "一个有边界的合成情景，用于研究避险需求、被迫卖出和流动性供给如何在黄金关联市场代理中相互作用。"
+            "一个基于人工审核课堂叙事的有边界合成情景：黄金在 2026 年 1 月 29 日于 5,600 美元附近"
+            "创下高点，战争爆发后并未单向上涨，而是在避险需求、流动性压力、油价冲击与被迫卖出共同作用下，"
+            "于 3 月 20 日回落至 4,675 美元。"
         ),
         "instrument": "XAUUSD_SYNTH",
         "asOf": "2026-03-20T23:59:59Z",
@@ -160,17 +190,21 @@ def _stageCopy(*, provider: str, model: str) -> dict[str, dict[str, dict[str, An
         },
         GuidedStage.SOURCE_METHOD.value: {
             "assistantMessage": (
-                "下一步构建 Event Pack 的来源账本。本流程使用三份已整理的课程研究材料：研究边界、"
-                "流动性机制和风险控制。请确认采用人工审核来源；系统不会把它们冒充实时联网事实。"
+                "下一步构建 Event Pack 的来源账本。本流程使用五份已整理的课程研究材料：演讲时间线、"
+                "冲突与避险需求、油价与融资压力、流动性机制、研究边界与实验控制。"
+                "请确认采用人工审核来源；系统不会把课堂叙事冒充独立核验的实时行情。"
             ),
             "preparationSteps": [
-                "解析三份来源材料",
+                "解析五份来源材料",
                 "统一发布时间与可见时间",
                 "生成来源 ID、内容哈希和来源类型",
             ],
             "reviewItems": [
                 _reviewItem(
-                    "method-corpus", "SOURCE", "来源范围", "仅使用三份有边界的课程研究材料。"
+                    "method-corpus",
+                    "SOURCE",
+                    "来源范围",
+                    "仅使用五份有边界、经过人工复核的课程研究材料。",
                 ),
                 _reviewItem(
                     "method-ledger", "SOURCE", "来源账本", "每份材料保留来源 ID、时间和内容哈希。"
@@ -183,41 +217,56 @@ def _stageCopy(*, provider: str, model: str) -> dict[str, dict[str, dict[str, An
         },
         GuidedStage.SOURCE_REVIEW.value: {
             "assistantMessage": (
-                "Event Pack 来源账本已经建立，共 3 个来源。请逐份核对它们的用途和边界；"
+                "Event Pack 来源账本已经建立，共 5 个来源。请逐份核对它们的用途和边界；"
                 "此步骤只确认来源可以进入研究，不等于批准由来源抽取出的全部主张。"
             ),
             "preparationSteps": [
-                "写入 3 条来源账本记录",
+                "写入 5 条来源账本记录",
                 "计算并保存来源内容哈希",
                 "检查所有来源均不晚于时点边界",
             ],
             "reviewItems": [
                 _reviewItem(
-                    "source-boundary",
+                    "source-timeline",
                     "SOURCE",
-                    "研究边界材料",
-                    "定义合成研究对象、用途和非预测边界。",
+                    "演讲时间线",
+                    (
+                        "记录 1 月 29 日高点与 3 月 20 日回落；它是人工审核的课堂叙事，"
+                        "不是独立行情核验。"
+                    ),
                 ),
                 _reviewItem(
-                    "source-mechanism",
+                    "source-conflict",
+                    "SOURCE",
+                    "冲突与避险材料",
+                    "说明战争可提高避险需求，但不能单独决定价格方向。",
+                ),
+                _reviewItem(
+                    "source-oil",
+                    "SOURCE",
+                    "油价与融资材料",
+                    "说明油价冲击可经通胀、利率预期和融资压力影响信念与流动性。",
+                ),
+                _reviewItem(
+                    "source-liquidity",
                     "SOURCE",
                     "流动性机制材料",
-                    "描述避险需求与流动性供给的两条竞争机制。",
+                    "描述做市能力、保证金压力和被迫卖出通道。",
                 ),
                 _reviewItem(
-                    "source-controls",
+                    "source-boundary",
                     "SOURCE",
-                    "风险控制材料",
-                    "描述被迫卖出、配对随机种子与单变量设计。",
+                    "研究边界与控制",
+                    "定义合成研究对象、单变量配对设计和非预测边界。",
                 ),
             ],
-            "nextQuestionOptions": ("三份来源均已核对", "打开事件包查看完整来源账本"),
+            "nextQuestionOptions": ("五份来源均已核对", "打开事件包查看完整来源账本"),
         },
         GuidedStage.CLAIM_REVIEW.value: {
             "assistantMessage": (
-                "系统从来源材料整理出 6 条候选主张。请逐条阅读："
-                "前三条描述机制，后两条约束实验设计，"
-                "最后一条限定所有市场路径均为合成结果。未核对的主张不能进入冻结证据集。"
+                "系统从来源材料整理出 9 条候选主张。请逐条阅读：时间线只复述人工审核的课堂材料；"
+                "冲突、避险、油价、流动性和被迫卖出属于待检验机制；最后两条约束实验设计与解释边界。"
+                "未核对的主张不能进入冻结证据集。"
             ),
             "preparationSteps": [
                 "将跨句材料合并为完整主张",
@@ -226,10 +275,28 @@ def _stageCopy(*, provider: str, model: str) -> dict[str, dict[str, dict[str, An
             ],
             "reviewItems": [
                 _reviewItem(
+                    "claim-timeline",
+                    "CLAIM",
+                    "课堂时间线",
+                    "课堂叙事记录了创新高、战争与随后回落，但未把它标成独立行情核验。",
+                ),
+                _reviewItem(
                     "claim-competing", "CLAIM", "竞争机制", "避险买入与流动性压力可能同时存在。"
                 ),
                 _reviewItem(
                     "claim-demand", "CLAIM", "避险需求", "避险需求可改变参与者信念和买入偏好。"
+                ),
+                _reviewItem(
+                    "claim-oil",
+                    "CLAIM",
+                    "油价冲击",
+                    "油价冲击可能经通胀、利率预期与融资条件改变市场行为。",
+                ),
+                _reviewItem(
+                    "claim-interaction",
+                    "CLAIM",
+                    "机制交互",
+                    "战争并非单一方向信号；避险买入、油价冲击、融资压力和被迫卖出会共同作用。",
                 ),
                 _reviewItem(
                     "claim-capacity", "CLAIM", "做市能力", "较低做市能力可能降低深度并扩大价差。"
@@ -247,7 +314,7 @@ def _stageCopy(*, provider: str, model: str) -> dict[str, dict[str, dict[str, An
                     "价格、订单流和 Agent 行为均为模拟数据。",
                 ),
             ],
-            "nextQuestionOptions": ("六条主张均已逐项核对", "打开事件包逐条查看"),
+            "nextQuestionOptions": ("九条主张均已逐项核对", "打开事件包逐条查看"),
         },
         GuidedStage.PACK_METADATA_REVIEW.value: {
             "assistantMessage": (
@@ -255,7 +322,7 @@ def _stageCopy(*, provider: str, model: str) -> dict[str, dict[str, dict[str, An
                 "时点边界和研究问题必须与刚才批准的内容一致，避免证据和实验问题错配。"
             ),
             "preparationSteps": [
-                "关联 3 个来源与 6 条主张",
+                "关联 5 个来源与 9 条主张",
                 "核对中英文元数据",
                 "验证研究对象与时点一致",
             ],
@@ -277,8 +344,8 @@ def _stageCopy(*, provider: str, model: str) -> dict[str, dict[str, dict[str, An
         },
         GuidedStage.PACK_FREEZE_REVIEW.value: {
             "assistantMessage": (
-                "Event Pack 已达到可冻结状态。冻结会锁定 3 个来源、"
-                "6 条人工审核主张、时点边界和哈希；"
+                "Event Pack 已达到可冻结状态。冻结会锁定 5 个来源、"
+                "9 条人工审核主张、时点边界和哈希；"
                 "之后实验只能读取这个版本，不能悄悄覆盖证据。请确认冻结含义。"
             ),
             "preparationSteps": [
@@ -288,9 +355,9 @@ def _stageCopy(*, provider: str, model: str) -> dict[str, dict[str, dict[str, An
             ],
             "reviewItems": [
                 _reviewItem(
-                    "freeze-sources", "FREEZE", "锁定来源", "3 个来源及其内容哈希进入冻结版本。"
+                    "freeze-sources", "FREEZE", "锁定来源", "5 个来源及其内容哈希进入冻结版本。"
                 ),
-                _reviewItem("freeze-claims", "FREEZE", "锁定主张", "6 条已审核主张进入冻结版本。"),
+                _reviewItem("freeze-claims", "FREEZE", "锁定主张", "9 条已审核主张进入冻结版本。"),
                 _reviewItem("freeze-boundary", "FREEZE", "锁定边界", "后续信息不会进入本次实验。"),
             ],
             "nextQuestionOptions": ("理解并确认冻结证据", "打开事件包复核"),
@@ -427,13 +494,16 @@ def _stageCopy(*, provider: str, model: str) -> dict[str, dict[str, dict[str, An
             "Review the five event-goal fields before they enter the Event Pack draft."
         ),
         GuidedStage.SOURCE_METHOD.value: (
-            "Choose the bounded, human-reviewed source method used to build the Event Pack ledger."
+            "Build the Event Pack from five bounded, human-reviewed course materials. The supplied "
+            "price timeline remains a reviewed classroom narrative rather than an independently "
+            "verified market quote."
         ),
         GuidedStage.SOURCE_REVIEW.value: (
-            "Review all three source-ledger entries before claim review."
+            "Review all five source-ledger entries and their evidence boundaries before "
+            "claim review."
         ),
         GuidedStage.CLAIM_REVIEW.value: (
-            "Review all six source-linked candidate claims before freezing evidence."
+            "Review all nine source-linked candidate claims before freezing evidence."
         ),
         GuidedStage.PACK_METADATA_REVIEW.value: (
             "Confirm that Event Pack metadata matches the reviewed evidence and research question."
@@ -461,12 +531,12 @@ def _stageCopy(*, provider: str, model: str) -> dict[str, dict[str, dict[str, An
             "Validate the point-in-time boundary and synthetic instrument",
         ),
         GuidedStage.SOURCE_METHOD.value: (
-            "Parse three bounded research sources",
+            "Parse five bounded, human-reviewed research sources",
             "Normalize published-at and known-at timestamps",
             "Prepare source identifiers and content hashes",
         ),
         GuidedStage.SOURCE_REVIEW.value: (
-            "Write three entries to the source ledger",
+            "Write five entries to the source ledger",
             "Calculate and retain content hashes",
             "Check that every source precedes the point-in-time boundary",
         ),
@@ -476,7 +546,7 @@ def _stageCopy(*, provider: str, model: str) -> dict[str, dict[str, dict[str, An
             "Label impact channels and synthetic assumptions",
         ),
         GuidedStage.PACK_METADATA_REVIEW.value: (
-            "Link three sources and six reviewed claims",
+            "Link five sources and nine reviewed claims",
             "Check English and Chinese Event Pack metadata",
             "Confirm the instrument and point-in-time boundary",
         ),
@@ -508,7 +578,10 @@ def _stageCopy(*, provider: str, model: str) -> dict[str, dict[str, dict[str, An
     }
     englishReviewItems = {
         GuidedStage.EVENT_GOAL.value: (
-            ("Event title", "Gold Liquidity Stress: Safe-Haven Demand versus Forced Selling."),
+            (
+                "Event title",
+                "Gold after a Record High: Safe-Haven Demand versus Liquidity Stress.",
+            ),
             ("Research summary", "Study mechanism propagation, not a real-world price forecast."),
             ("Research instrument", "XAUUSD_SYNTH is a synthetic proxy, not a tradable quote."),
             ("Point-in-time boundary", "Evidence is frozen at 2026-03-20 23:59:59 UTC."),
@@ -518,24 +591,53 @@ def _stageCopy(*, provider: str, model: str) -> dict[str, dict[str, dict[str, An
             ),
         ),
         GuidedStage.SOURCE_METHOD.value: (
-            ("Source scope", "Use only the three bounded course research materials."),
+            ("Source scope", "Use only the five bounded, human-reviewed course materials."),
             ("Source ledger", "Keep a source ID, timestamp, and content hash for every source."),
             ("Human responsibility", "A person must decide on every source and candidate claim."),
         ),
         GuidedStage.SOURCE_REVIEW.value: (
             (
-                "Research boundary source",
-                "Defines the proxy, permitted use, and non-forecast boundary.",
+                "Presentation timeline",
+                "Records the January 29 high and March 20 decline as a reviewed classroom "
+                "narrative, not independent quote verification.",
             ),
-            ("Liquidity mechanism source", "Describes safe-haven demand and liquidity provision."),
             (
-                "Risk-control source",
-                "Describes forced selling, paired seeds, and one-variable design.",
+                "Conflict and safe-haven source",
+                "Explains why war can increase safe-haven demand without determining one "
+                "price direction.",
+            ),
+            (
+                "Oil and funding source",
+                "Connects an oil shock to inflation expectations, funding pressure, beliefs, "
+                "and liquidity.",
+            ),
+            (
+                "Liquidity mechanism source",
+                "Describes market-making capacity, margin pressure, and forced selling.",
+            ),
+            (
+                "Research boundary and controls",
+                "Defines the synthetic proxy, paired single-variable design, and non-forecast "
+                "boundary.",
             ),
         ),
         GuidedStage.CLAIM_REVIEW.value: (
+            (
+                "Classroom timeline",
+                "The reviewed presentation records a high near USD 5,600, the start of war, "
+                "and a later decline to USD 4,675; it is not independent quote verification.",
+            ),
+            (
+                "Conflict is not one lever",
+                "War may raise safe-haven demand but does not imply a one-direction price outcome.",
+            ),
             ("Competing mechanisms", "Safe-haven buying and liquidity pressure can coexist."),
             ("Safe-haven demand", "Demand can change beliefs and buying preferences."),
+            (
+                "Oil shock",
+                "Oil can alter inflation and rate expectations, funding conditions, and market "
+                "behavior.",
+            ),
             ("Market-making capacity", "Lower capacity may reduce depth and widen spreads."),
             ("Forced selling", "Margin pressure and deleveraging may create selling pressure."),
             ("Paired design", "Only capacity changes and the same seeds are reused."),
@@ -547,8 +649,8 @@ def _stageCopy(*, provider: str, model: str) -> dict[str, dict[str, dict[str, An
             ("Question consistency", "The question maps to one market-making intervention."),
         ),
         GuidedStage.PACK_FREEZE_REVIEW.value: (
-            ("Lock sources", "Freeze three sources and their content hashes."),
-            ("Lock claims", "Freeze the six human-reviewed claims."),
+            ("Lock sources", "Freeze five sources and their content hashes."),
+            ("Lock claims", "Freeze the nine human-reviewed claims."),
             ("Lock the boundary", "Later information cannot enter this experiment."),
         ),
         GuidedStage.SCENARIO_INTERVENTION.value: (
@@ -578,6 +680,59 @@ def _stageCopy(*, provider: str, model: str) -> dict[str, dict[str, dict[str, An
             ("Final boundary", "Outputs are synthetic scenario results, not price forecasts."),
         ),
     }
+    englishNextQuestionOptions = {
+        GuidedStage.EVENT_GOAL.value: (
+            "I reviewed the title, summary, synthetic instrument, time boundary, and research "
+            "question. Prepare this event-goal candidate for my approval.",
+            "I need to revise one event-goal field before approval.",
+        ),
+        GuidedStage.SOURCE_METHOD.value: (
+            "Use the five bounded, human-reviewed course materials and preserve the distinction "
+            "between the classroom timeline and independently verified market data.",
+            "I need to revise the source method before approval.",
+        ),
+        GuidedStage.SOURCE_REVIEW.value: (
+            "I reviewed all five source-ledger entries, their timestamps, hashes, and stated "
+            "evidence boundaries. Prepare the source-review candidate.",
+            "Open the Event Pack so I can inspect the complete bilingual source ledger.",
+        ),
+        GuidedStage.CLAIM_REVIEW.value: (
+            "I reviewed all nine claims and their source links. Keep facts, supplied narrative, "
+            "and mechanism hypotheses visibly distinct.",
+            "Open the Event Pack so I can inspect every claim before approval.",
+        ),
+        GuidedStage.PACK_METADATA_REVIEW.value: (
+            "The bilingual Event Pack metadata matches the reviewed evidence, synthetic "
+            "instrument, time boundary, and research question.",
+            "I need to revise the Event Pack metadata.",
+        ),
+        GuidedStage.PACK_FREEZE_REVIEW.value: (
+            "I understand that freezing locks the five sources, nine reviewed claims, timestamps, "
+            "and hashes for reproducible experiments.",
+            "Open the Event Pack for one final review before freezing.",
+        ),
+        GuidedStage.SCENARIO_INTERVENTION.value: (
+            "Apply one intervention only: reduce synthetic market-making capacity from 1.00 to "
+            "0.65 while holding all other settings fixed.",
+            "I need to revise the intervention strength.",
+        ),
+        GuidedStage.SCENARIO_REVIEW.value: (
+            f"I reviewed the ten paired seeds, 56 agents, 120 steps, and the bounded "
+            f"{provider}/{model} hybrid-cognition role. Prepare the scenario-review candidate.",
+            "Open Scenario Builder so I can inspect the complete configuration.",
+        ),
+        GuidedStage.PREFLIGHT.value: (
+            "I reviewed the frozen evidence, one-variable difference, structured cognition, "
+            "zero rule fallback, cost cap, and tool-authority boundary.",
+            "Open Preflight so I can inspect every system check.",
+        ),
+        GuidedStage.READY_TO_SUBMIT.value: (
+            "I verified that the Event Pack, scenario, frozen cognition decisions, ten paired "
+            "runs, and reproducibility metadata belong to one research chain. Prepare the final "
+            "handoff.",
+            "Open Preflight for one final check before the run playback.",
+        ),
+    }
     for stage, copy in zh.items():
         en[stage] = {
             "assistantMessage": englishMessages[stage],
@@ -591,7 +746,7 @@ def _stageCopy(*, provider: str, model: str) -> dict[str, dict[str, dict[str, An
                 )
                 for index, item in enumerate(copy["reviewItems"], start=1)
             ],
-            "nextQuestionOptions": ("I reviewed every required item", "Request a revision"),
+            "nextQuestionOptions": englishNextQuestionOptions[stage],
         }
     return {"zh-CN": zh, "en": en}
 
@@ -679,46 +834,112 @@ def _prepareEventPack(eventPacks: EventPackService, ownerUserId: str) -> None:
 
     asOf = datetime(2026, 3, 20, 23, 59, 59, tzinfo=UTC)
     sourceTexts = {
-        "course-gold-research-boundary": (
-            "This reviewed course research brief defines XAUUSD_SYNTH as a synthetic gold-linked "
-            "market proxy. Prices, order flow, and agent behavior are simulated; outputs are "
-            "mechanism scenarios, not forecasts or investment advice."
+        "course-gold-presentation-timeline": (
+            "The human-reviewed classroom presentation states that gold reached a record high "
+            "near USD 5,600 on January 29, 2026 and later stood at USD 4,675 by March 20, 2026 "
+            "after war began. This records the supplied narrative as a scenario input; it is not "
+            "independent market-price verification."
+        ),
+        "course-gold-conflict-safe-haven": (
+            "The reviewed mechanism brief states that war can increase safe-haven demand and "
+            "change participant beliefs and buying preferences. It does not imply a one-direction "
+            "price outcome because other channels may dominate."
+        ),
+        "course-gold-oil-funding": (
+            "The reviewed mechanism brief treats an oil shock as a possible channel through "
+            "inflation expectations, rate expectations, collateral and funding pressure. These "
+            "changes may alter beliefs and market liquidity; they remain hypotheses for testing."
         ),
         "course-gold-liquidity-mechanisms": (
-            "In this bounded mechanism hypothesis, safe-haven demand can shift participant beliefs "
-            "and buying preferences. Lower synthetic market-making capacity can reduce order-book "
-            "depth and widen spreads during stress."
+            "Lower synthetic market-making capacity can reduce order-book depth and widen spreads "
+            "during stress. Margin pressure and deleveraging can create a forced-selling channel. "
+            "Safe-haven buying, oil-related funding pressure, and forced selling may coexist."
         ),
-        "course-gold-risk-controls": (
-            "The reviewed design brief treats margin pressure and deleveraging as possible forced-"
-            "selling channels. The paired experiment changes only marketMakerCapacity from 1.00 "
-            "to 0.65 while reusing the same random seeds."
+        "course-gold-research-boundary": (
+            "This reviewed design brief defines XAUUSD_SYNTH as a synthetic gold-linked market "
+            "proxy. The paired experiment changes only marketMakerCapacity from 1.00 to 0.65 and "
+            "reuses identical random seeds. Prices, order flow, and agent behavior are simulated; "
+            "outputs are mechanism scenarios, not forecasts or investment advice."
         ),
     }
     sources = [
         EventSourceInput(
             sourceId=sourceId,
             title=title,
+            titleZh=titleZh,
             publisher="EventShock Lab course research",
             sourceType="USER_PROVIDED",
             publishedAt=asOf,
             knownAt=asOf,
             rawText=sourceTexts[sourceId],
         )
-        for sourceId, title in (
-            ("course-gold-research-boundary", "Gold proxy research boundary"),
-            ("course-gold-liquidity-mechanisms", "Gold liquidity mechanism notes"),
-            ("course-gold-risk-controls", "Paired stress-test design and controls"),
+        for sourceId, title, titleZh in (
+            (
+                "course-gold-presentation-timeline",
+                "Human-reviewed classroom gold timeline",
+                "人工审核的课堂黄金时间线",
+            ),
+            (
+                "course-gold-conflict-safe-haven",
+                "Conflict and safe-haven mechanism notes",
+                "冲突与避险需求机制材料",
+            ),
+            (
+                "course-gold-oil-funding",
+                "Oil shock and funding-pressure notes",
+                "油价冲击与融资压力材料",
+            ),
+            (
+                "course-gold-liquidity-mechanisms",
+                "Liquidity capacity and forced-selling notes",
+                "流动性能力与被迫卖出材料",
+            ),
+            (
+                "course-gold-research-boundary",
+                "Synthetic proxy, paired design, and research boundary",
+                "合成代理、配对设计与研究边界",
+            ),
         )
     ]
     claims = [
         _claim(
+            claimId="claim-gold-classroom-timeline",
+            text=(
+                "The human-reviewed classroom presentation records a gold high near USD 5,600 "
+                "on January 29, the start of war, and a later level of USD 4,675 on March 20."
+            ),
+            textZh=(
+                "经人工审核的课堂演讲材料记录了 1 月 29 日黄金在 5,600 美元附近创下高点、战争爆发，"
+                "以及 3 月 20 日回落至 4,675 美元的叙事。"
+            ),
+            claimType="FACT",
+            sourceId="course-gold-presentation-timeline",
+            sourceText=sourceTexts["course-gold-presentation-timeline"],
+            impactChannels=["belief", "liquidity"],
+            ownerUserId=ownerUserId,
+            asOf=asOf,
+        ),
+        _claim(
+            claimId="claim-gold-conflict-not-single-direction",
+            text=(
+                "War can increase safe-haven demand but does not imply a one-direction gold price "
+                "outcome when liquidity and funding channels compete."
+            ),
+            textZh="战争可以提高避险需求，但在流动性与融资通道竞争时并不意味着黄金价格只向一个方向变化。",
+            claimType="MECHANISM_HYPOTHESIS",
+            sourceId="course-gold-conflict-safe-haven",
+            sourceText=sourceTexts["course-gold-conflict-safe-haven"],
+            impactChannels=["belief", "liquidity"],
+            ownerUserId=ownerUserId,
+            asOf=asOf,
+        ),
+        _claim(
             claimId="claim-gold-competing-mechanisms",
             text=(
-                "Safe-haven demand and liquidity pressure are competing mechanisms "
-                "in this synthetic scenario."
+                "Safe-haven buying, oil-related funding pressure, and forced selling are competing "
+                "mechanisms in this synthetic scenario."
             ),
-            textZh="避险需求与流动性压力是本合成情景中的两条竞争机制。",
+            textZh="避险买入、油价相关融资压力与被迫卖出是本合成情景中的竞争机制。",
             claimType="MECHANISM_HYPOTHESIS",
             sourceId="course-gold-liquidity-mechanisms",
             sourceText=sourceTexts["course-gold-liquidity-mechanisms"],
@@ -731,9 +952,23 @@ def _prepareEventPack(eventPacks: EventPackService, ownerUserId: str) -> None:
             text="Safe-haven demand can shift participant beliefs and buying preferences.",
             textZh="避险需求可以改变参与者信念和买入偏好。",
             claimType="MECHANISM_HYPOTHESIS",
-            sourceId="course-gold-liquidity-mechanisms",
-            sourceText=sourceTexts["course-gold-liquidity-mechanisms"],
+            sourceId="course-gold-conflict-safe-haven",
+            sourceText=sourceTexts["course-gold-conflict-safe-haven"],
             impactChannels=["belief"],
+            ownerUserId=ownerUserId,
+            asOf=asOf,
+        ),
+        _claim(
+            claimId="claim-gold-oil-funding-pressure",
+            text=(
+                "An oil shock can alter inflation and rate expectations, collateral and funding "
+                "conditions, participant beliefs, and market liquidity."
+            ),
+            textZh="油价冲击可能改变通胀与利率预期、抵押品与融资条件、参与者信念和市场流动性。",
+            claimType="MECHANISM_HYPOTHESIS",
+            sourceId="course-gold-oil-funding",
+            sourceText=sourceTexts["course-gold-oil-funding"],
+            impactChannels=["belief", "liquidity"],
             ownerUserId=ownerUserId,
             asOf=asOf,
         ),
@@ -756,8 +991,8 @@ def _prepareEventPack(eventPacks: EventPackService, ownerUserId: str) -> None:
             text="Margin pressure and deleveraging can create a forced-selling channel.",
             textZh="保证金压力和去杠杆可以形成被迫卖出通道。",
             claimType="MECHANISM_HYPOTHESIS",
-            sourceId="course-gold-risk-controls",
-            sourceText=sourceTexts["course-gold-risk-controls"],
+            sourceId="course-gold-liquidity-mechanisms",
+            sourceText=sourceTexts["course-gold-liquidity-mechanisms"],
             impactChannels=["stopLoss", "liquidity"],
             ownerUserId=ownerUserId,
             asOf=asOf,
@@ -770,8 +1005,8 @@ def _prepareEventPack(eventPacks: EventPackService, ownerUserId: str) -> None:
             ),
             textZh="配对设计只把做市能力从 1.00 改为 0.65，并复用相同随机种子。",
             claimType="FACT",
-            sourceId="course-gold-risk-controls",
-            sourceText=sourceTexts["course-gold-risk-controls"],
+            sourceId="course-gold-research-boundary",
+            sourceText=sourceTexts["course-gold-research-boundary"],
             impactChannels=["liquidity"],
             ownerUserId=ownerUserId,
             asOf=asOf,
@@ -840,7 +1075,7 @@ def _persistentRuntime(
         provider=runtime.provider,
         model=runtime.model,
         thinkingEnabled=False,
-        maxTokens=min(runtime.maxTokens, 2_048),
+        maxTokens=min(runtime.maxTokens, 4_096),
         advancedParameters=runtime.advancedParameters,
     )
     return configStore, runtime.provider, runtime.model
@@ -928,6 +1163,206 @@ def _prepareExperiment(
     )
 
 
+def _validatePreparedInterpretation(
+    run: Any,
+    *,
+    provider: str,
+    model: str,
+) -> None:
+    """只接受真实模型生成且已通过证据约束的演示解释。"""
+
+    if run.provider != provider or run.model != model:
+        raise ValueError("prepared interpretation used an unexpected provider or model")
+    if run.deterministic_fallback_used:
+        raise ValueError("prepared interpretation used deterministic fallback text")
+    if run.semantic_validation_status not in {"PASSED", "COMPLETED_WITH_WARNINGS"}:
+        raise ValueError(
+            "prepared interpretation did not reach an accepted semantic terminal state"
+        )
+    if not run.interpretation.grounding_references:
+        raise ValueError("prepared interpretation did not include result evidence references")
+    _validatePreparedInterpretationContent(
+        answer=run.interpretation.answer,
+        groundingReferences=run.interpretation.grounding_references,
+    )
+
+
+def _validatePreparedInterpretationContent(
+    *,
+    answer: str,
+    groundingReferences: tuple[str, ...] | list[str],
+) -> None:
+    """确保课堂解释既有可核对证据，也完整回应黄金故事。"""
+
+    if not groundingReferences:
+        raise ValueError("prepared interpretation did not include result evidence references")
+    normalizedAnswer = answer.lower().replace("-", " ")
+    missingTerms = [
+        term
+        for term in INTERPRETATION_REQUIRED_TERMS
+        if term.replace("-", " ") not in normalizedAnswer
+    ]
+    if missingTerms:
+        raise ValueError(
+            "prepared interpretation omitted presentation anchors: " + ", ".join(missingTerms)
+        )
+    if "[result:" not in normalizedAnswer:
+        raise ValueError("prepared interpretation did not cite evidence markers inline")
+
+
+def _existingPreparedInterpretation(
+    *,
+    database: Database,
+    ownerUserId: str,
+    experimentId: str,
+    provider: str,
+    model: str,
+) -> dict[str, Any] | None:
+    """复用已通过校验的预置解释，避免重复准备时再次产生模型费用。"""
+
+    conversation = database.getResultInterpretationConversation(
+        ownerUserId=ownerUserId,
+        experimentId=experimentId,
+        conversationId=INTERPRETATION_CONVERSATION_ID,
+    )
+    if conversation is None:
+        return None
+    exchanges = conversation.get("exchanges")
+    if not isinstance(exchanges, list) or len(exchanges) != 1:
+        raise ValueError("prepared interpretation conversation has an unexpected shape")
+    exchange = exchanges[0]
+    assistant = exchange.get("assistantMessage")
+    if not isinstance(assistant, dict):
+        raise ValueError("prepared interpretation history has no assistant message")
+    if assistant.get("provider") != provider or assistant.get("model") != model:
+        raise ValueError("prepared interpretation history used an unexpected model route")
+    if assistant.get("deterministicFallbackUsed") is True:
+        raise ValueError("prepared interpretation history used deterministic fallback text")
+    if assistant.get("semanticValidationStatus") not in {
+        "PASSED",
+        "COMPLETED_WITH_WARNINGS",
+    }:
+        raise ValueError("prepared interpretation history failed semantic validation")
+    answer = assistant.get("answer")
+    groundingReferences = assistant.get("groundingReferences")
+    if not isinstance(answer, str) or not isinstance(groundingReferences, list):
+        raise ValueError("prepared interpretation history is missing grounded answer fields")
+    _validatePreparedInterpretationContent(
+        answer=answer,
+        groundingReferences=groundingReferences,
+    )
+    return exchange
+
+
+def _preparedInterpretationMessage(run: Any) -> dict[str, Any]:
+    """复用正式接口的持久化白名单结构，避免演示历史产生第二套格式。"""
+
+    answer = run.interpretation
+    return {
+        "id": f"interpretation-{uuid.uuid4().hex[:24]}",
+        "role": "assistant",
+        "language": "en",
+        "answer": answer.answer,
+        "analysisSummary": answer.analysis_summary,
+        "groundingReferences": list(answer.grounding_references),
+        "followUpSuggestions": list(answer.follow_up_suggestions),
+        "toolActivity": [
+            {
+                "tool": activity.tool.value,
+                "label": activity.label,
+                "itemCount": activity.item_count,
+                "truncated": activity.truncated,
+                "evidenceId": activity.evidence_id,
+            }
+            for activity in run.tool_activity
+        ],
+        "provider": run.provider,
+        "model": run.model,
+        "thinkingPreferenceEnabled": run.thinking_preference_enabled,
+        "thinkingEnabled": run.thinking_enabled,
+        "streamed": run.streamed,
+        "promptTokens": run.usage.promptTokens,
+        "completionTokens": run.usage.completionTokens,
+        "cachedTokens": run.usage.cachedTokens,
+        "totalTokens": run.usage.totalTokens,
+        "modelCalls": run.model_calls,
+        "transportAttempts": run.transport_attempts,
+        "uncertainBillableAttempts": run.uncertain_billable_attempts,
+        "cacheHit": run.cache_hit,
+        "repairUsed": run.repair_used,
+        "plannerUsed": run.planner_used,
+        "plannerFallbackUsed": run.planner_fallback_used,
+        "semanticValidationStatus": run.semantic_validation_status,
+        "deterministicFallbackUsed": run.deterministic_fallback_used,
+        "semanticViolationCodes": list(run.semantic_violation_codes),
+        "failureCodes": list(run.failure_codes),
+        "promptVersion": run.prompt_version,
+        "latencyMs": run.latency_ms,
+        "createdAt": datetime.now(UTC).isoformat(),
+    }
+
+
+def _prepareInterpretation(
+    *,
+    cognition: CognitionService,
+    database: Database,
+    ownerUserId: str,
+    experiment: dict[str, Any],
+    provider: str,
+    model: str,
+) -> dict[str, Any]:
+    """用真实完成结果生成一次英文解释，并保存为课堂期间可直接加载的历史。"""
+
+    authoritativeResult = experiment.get("result")
+    if not isinstance(authoritativeResult, dict):
+        raise ValueError("completed experiment does not contain an authoritative result")
+    existing = _existingPreparedInterpretation(
+        database=database,
+        ownerUserId=ownerUserId,
+        experimentId=experiment["id"],
+        provider=provider,
+        model=model,
+    )
+    if existing is not None:
+        return existing
+    run = asyncio.run(
+        cognition.interpretExperimentResult(
+            sessionId=COGNITION_SESSION_ID,
+            result=authoritativeResult,
+            messages=({"role": "user", "content": INTERPRETATION_QUESTION},),
+            language="en",
+            initial=True,
+            includeAnalysisSummary=False,
+        )
+    )
+    _validatePreparedInterpretation(run, provider=provider, model=model)
+    requestHash = hashlib.sha256(
+        json.dumps(
+            {
+                "conversationId": INTERPRETATION_CONVERSATION_ID,
+                "experimentId": experiment["id"],
+                "language": "en",
+                "question": INTERPRETATION_QUESTION,
+                "resultHash": run.result_hash,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    persisted, _created = database.saveResultInterpretationExchange(
+        ownerUserId=ownerUserId,
+        experimentId=experiment["id"],
+        conversationId=INTERPRETATION_CONVERSATION_ID,
+        clientRequestId=INTERPRETATION_CLIENT_REQUEST_ID,
+        requestHash=requestHash,
+        language="en",
+        userMessage=INTERPRETATION_QUESTION,
+        assistantMessage=_preparedInterpretationMessage(run),
+    )
+    return persisted
+
+
 def prepare(email: str) -> dict[str, str]:
     settings = loadSettings()
     database = Database(settings.databasePath)
@@ -955,6 +1390,14 @@ def prepare(email: str) -> dict[str, str]:
             provider=provider,
             model=model,
         )
+        interpretation = _prepareInterpretation(
+            cognition=cognition,
+            database=database,
+            ownerUserId=ownerUserId,
+            experiment=experiment,
+            provider=provider,
+            model=model,
+        )
         capabilities.grant(
             userId=ownerUserId,
             capability=PREPARED_GUIDED_PATH_CAPABILITY,
@@ -969,6 +1412,7 @@ def prepare(email: str) -> dict[str, str]:
             "eventPackId": EVENT_PACK_ID,
             "scenarioId": SCENARIO_ID,
             "experimentId": experiment["id"],
+            "interpretationConversationId": interpretation["conversationId"],
             "provider": provider,
             "model": model,
         }

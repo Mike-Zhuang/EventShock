@@ -298,6 +298,7 @@ class ScenarioValidateRequest(ExperimentRequest):
 class EventSourceInput(StrictModel):
     sourceId: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9._-]+$")
     title: str = Field(min_length=1, max_length=300)
+    titleZh: str | None = Field(default=None, max_length=300)
     publisher: str = Field(min_length=1, max_length=200)
     url: str | None = Field(default=None, max_length=2_000)
     sourceType: Literal["OFFICIAL", "REPORTING", "ESTIMATE", "USER_PROVIDED"]

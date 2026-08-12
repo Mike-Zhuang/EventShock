@@ -1396,7 +1396,7 @@ class EventPackService:
         return {
             "sourceId": source.sourceId,
             "title": source.title,
-            "titleZh": source.title,
+            "titleZh": source.titleZh or source.title,
             "publisher": source.publisher,
             "url": source.url,
             "sourceType": source.sourceType,

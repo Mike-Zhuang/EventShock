@@ -1369,6 +1369,8 @@ export interface ResultSourceSummary {
   eventPackId?: string;
   title?: string;
   titleZh?: string;
+  summary?: string;
+  summaryZh?: string;
   asOf?: string;
   frozenAt?: string;
   sourceCount: number;

@@ -9,6 +9,7 @@ from backend.app.event_pack_claims import (
     preprocessSourceText,
 )
 from backend.app.schemas import EventSourceInput
+from backend.app.service import EventPackService
 
 FAA_TEXT = """\
 AIRWORTHINESS DIRECTIVE
@@ -33,6 +34,7 @@ def source(rawText: str = FAA_TEXT) -> EventSourceInput:
     return EventSourceInput(
         sourceId="faa-ad-2024-02-51",
         title="Emergency Airworthiness Directive 2024-02-51",
+        titleZh="紧急适航指令 2024-02-51",
         publisher="Federal Aviation Administration",
         url="https://www.faa.gov/aircraft/safety/alerts/",
         sourceType="OFFICIAL",
@@ -40,6 +42,13 @@ def source(rawText: str = FAA_TEXT) -> EventSourceInput:
         knownAt=timestamp,
         rawText=rawText,
     )
+
+
+def test_source_record_preserves_bilingual_title() -> None:
+    record = EventPackService._sourceRecord(source())
+
+    assert record["title"] == "Emergency Airworthiness Directive 2024-02-51"
+    assert record["titleZh"] == "紧急适航指令 2024-02-51"
 
 
 def test_preprocessing_removes_document_noise_and_joins_wrapped_sentences() -> None:

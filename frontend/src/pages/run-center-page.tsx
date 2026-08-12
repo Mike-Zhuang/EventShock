@@ -83,6 +83,8 @@ export function RunCenterPage({ navigate }: { navigate: Navigate }) {
     experimentsState,
     experimentsError,
     activeExperiment,
+    results,
+    resultsState,
     refreshExperiments,
     selectExperiment,
     cancelActiveExperiment,
@@ -133,6 +135,20 @@ export function RunCenterPage({ navigate }: { navigate: Navigate }) {
     const timer = window.setInterval(() => setPresentationNow(Date.now()), 250);
     return () => window.clearInterval(timer);
   }, [guidedPlayback, presentationNow]);
+
+  useEffect(() => {
+    if (
+      !guidedPlayback
+      || !activeExperiment
+      || activeExperiment.id !== guidedPlayback.experimentId
+      || results?.experimentId === activeExperiment.id
+      || resultsState === 'loading'
+      || resultsState === 'error'
+    ) return;
+    // 准备路径播放的是已经完成并通过校验的真实实验。预加载同一实验的冻结证据和
+    // 认知决策，使演示能够展示自然语言证据如何进入认知层，而不是伪造实时模型输出。
+    void loadResults(activeExperiment.id).catch(() => undefined);
+  }, [activeExperiment, guidedPlayback, loadResults, results?.experimentId, resultsState]);
 
   useEffect(() => {
     if (playbackPaused || !activeExperiment || visibleLogCount >= activeExperiment.logs.length) return;
@@ -317,6 +333,44 @@ export function RunCenterPage({ navigate }: { navigate: Navigate }) {
                         );
                       })}
                     </ol>
+                  ) : null}
+                  {guidedPlayback ? (
+                    <section className="cognition-evidence-bridge" aria-label={language === 'zh-CN' ? '认知层证据与决策' : 'Cognition evidence and decision'}>
+                      <article>
+                        <span>{language === 'zh-CN' ? '自然语言输入' : 'Natural-language input'}</span>
+                        <strong>{language === 'zh-CN' ? '人工审核并冻结的 Event Pack' : 'Human-reviewed, frozen Event Pack'}</strong>
+                        {results?.sourceSummary ? (
+                          <p>{language === 'zh-CN'
+                            ? results.sourceSummary.summaryZh ?? results.sourceSummary.summary ?? results.questionZh ?? results.question
+                            : results.sourceSummary.summary ?? results.question ?? results.sourceSummary.summaryZh}</p>
+                        ) : (
+                          <p>{language === 'zh-CN'
+                            ? '正在载入同一实验保存的证据摘要。'
+                            : 'Loading the evidence summary saved with this experiment.'}</p>
+                        )}
+                        <small>{language === 'zh-CN'
+                          ? `${results?.sourceSummary?.sourceCount ?? 0} 个来源 · ${results?.sourceSummary?.claimCount ?? 0} 条已审核主张`
+                          : `${results?.sourceSummary?.sourceCount ?? 0} sources · ${results?.sourceSummary?.claimCount ?? 0} reviewed claims`}</small>
+                      </article>
+                      <span className="cognition-evidence-bridge__arrow" aria-hidden="true">→</span>
+                      <article>
+                        <span>{language === 'zh-CN' ? '受约束认知输出' : 'Bounded cognition output'}</span>
+                        <strong>{language === 'zh-CN' ? '代表性 Agent 的结构化决策' : 'Structured representative-agent decision'}</strong>
+                        {results?.cognition?.decisions[0] ? (
+                          <>
+                            <p>{results.cognition.decisions[0].decisionSummary
+                              ?? (language === 'zh-CN' ? '服务器未返回可展示的决策摘要。' : 'No reviewable decision summary was returned.')}</p>
+                            <small>{language === 'zh-CN'
+                              ? `偏好 ${results.cognition.decisions[0].actionPreference ?? '—'} · 置信度 ${new Intl.NumberFormat(language, { style: 'percent', maximumFractionDigits: 0 }).format(results.cognition.decisions[0].confidence ?? 0)} · 引用 ${results.cognition.decisions[0].evidenceIds.length} 条证据`
+                              : `Preference ${results.cognition.decisions[0].actionPreference ?? '—'} · confidence ${new Intl.NumberFormat(language, { style: 'percent', maximumFractionDigits: 0 }).format(results.cognition.decisions[0].confidence ?? 0)} · ${results.cognition.decisions[0].evidenceIds.length} evidence references`}</small>
+                          </>
+                        ) : (
+                          <p>{language === 'zh-CN'
+                            ? '正在载入经过 JSON Schema、证据引用和权限边界校验的冻结决策。'
+                            : 'Loading frozen decisions validated against JSON Schema, evidence references, and authority boundaries.'}</p>
+                        )}
+                      </article>
+                    </section>
                   ) : null}
                   {cognitionProgress.failureCode ? (
                     <TechnicalCodeDisplay codes={[cognitionProgress.failureCode]} language={language} />

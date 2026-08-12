@@ -1133,10 +1133,15 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
   const stageAction = useMemo(() => {
     if (!workflow) return undefined;
     if (workflow.stage === 'SOURCE_REVIEW') {
-      return {
-        label: isZh ? '打开 Event Pack Factory' : 'Open Event Pack Factory',
-        view: 'factory' as const,
-      };
+      return workflow.draft.eventPackId
+        ? {
+            label: isZh ? '审核完整来源账本' : 'Review the complete source ledger',
+            view: 'pack' as const,
+          }
+        : {
+            label: isZh ? '打开 Event Pack Factory' : 'Open Event Pack Factory',
+            view: 'factory' as const,
+          };
     }
     if (['CLAIM_REVIEW', 'PACK_METADATA_REVIEW', 'PACK_FREEZE_REVIEW'].includes(workflow.stage)) {
       return { label: isZh ? '打开事件包审核' : 'Open Event Pack review', view: 'pack' as const };
@@ -1786,14 +1791,16 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
                     ? '你已进入新的审核阶段，但还没有应用属于本阶段的候选。使用下方建议会先填入输入框，不会自动发送；你仍可编辑后再提交。'
                     : 'You entered a new review stage, but no candidate for this stage has been applied. The action below only fills the composer; you can edit it before sending.'}</p>
                 </div>
-                <Button
-                  kind="tertiary"
-                  size="sm"
-                  disabled={Boolean(busyAction)}
-                  onClick={() => fillSuggestedAnswer(preparedStageReviewPrompt(workflow.stage, isZh))}
-                >
-                  {isZh ? '填入本阶段审核请求' : 'Fill this stage’s review request'}
-                </Button>
+                <div className="guided-suggestions guided-suggestions--stage">
+                  <button
+                    type="button"
+                    disabled={Boolean(busyAction)}
+                    onClick={() => fillSuggestedAnswer(preparedStageReviewPrompt(workflow.stage, isZh))}
+                  >
+                    <span>{preparedStageReviewPrompt(workflow.stage, isZh)}</span>
+                    <small>{isZh ? '选择并填入输入框，确认后再发送' : 'Select, review in the composer, then send'}</small>
+                  </button>
+                </div>
               </section>
             ) : null}
 

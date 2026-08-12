@@ -234,6 +234,23 @@ describe('结果解释助手', () => {
     );
   });
 
+  it('当前实验只有一段已保存解释时自动恢复，不重复请求模型', async () => {
+    vi.mocked(api.getResultInterpretationConversations).mockResolvedValue({
+      schemaVersion: '1.0.0',
+      items: [createSavedSummary()],
+    });
+    renderAssistant();
+
+    expect(await screen.findByText(
+      'This validated answer was restored from server history.',
+    )).toBeInTheDocument();
+    expect(api.getResultInterpretationConversation).toHaveBeenCalledWith(
+      EXPERIMENT_ID,
+      SAVED_CONVERSATION_ID,
+    );
+    expect(api.streamChatAboutResults).not.toHaveBeenCalled();
+  });
+
   it('打开已保存对话后可在原 conversationId 继续追问', async () => {
     vi.mocked(api.getResultInterpretationConversations).mockResolvedValue({
       schemaVersion: '1.0.0',

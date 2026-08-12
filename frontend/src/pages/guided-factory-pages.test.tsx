@@ -1175,7 +1175,7 @@ describe('guided workflow page', () => {
     )).toHaveFocus());
 
     await user.click(screen.getByRole('button', {
-      name: 'Fill this stage’s review request',
+      name: /Verify that the Event Pack, scenario, LLM cognition decisions/,
     }));
 
     expect((screen.getByLabelText(
@@ -1185,6 +1185,74 @@ describe('guided workflow page', () => {
     );
     expect(api.sendGuidedTurn).not.toHaveBeenCalled();
     expect(screen.getByText(/has not been sent/)).toBeInTheDocument();
+  });
+
+  it('opens a linked prepared Event Pack for complete source-ledger review', async () => {
+    const user = userEvent.setup();
+    const navigate = vi.fn();
+    const linkedSourceReviewWorkflow: GuidedWorkflow = {
+      ...guidedWorkflow,
+      stage: 'SOURCE_REVIEW',
+      version: 6,
+      pendingProposal: undefined,
+      pendingProposalId: undefined,
+      draft: {
+        ...guidedWorkflow.draft,
+        eventPackId: 'custom-gold-liquidity-reviewed-v3',
+        scenarioId: 'scn-gold-liquidity-reviewed-v3',
+        experimentId: 'exp-gold-liquidity-reviewed-v3',
+      },
+      archivedProposals: [{
+        id: 'proposal-source-method-applied',
+        proposal: {
+          ...guidedWorkflow.pendingProposal!,
+          stage: 'SOURCE_METHOD',
+          reviewItems: [{
+            id: 'source-method-review',
+            category: 'SOURCE',
+            title: 'Source method',
+            detail: 'Use five bounded course-research sources.',
+            requiresExplicitReview: true,
+          }],
+        },
+        status: 'APPLIED',
+        archivedAt: '2026-08-12T18:40:00Z',
+        reason: 'APPLIED_BY_HUMAN',
+      }],
+    };
+    vi.mocked(api.getGuidedWorkflows).mockResolvedValue([linkedSourceReviewWorkflow]);
+    vi.mocked(api.getGuidedWorkflow).mockResolvedValue(linkedSourceReviewWorkflow);
+    vi.mocked(api.getEventPack).mockResolvedValue({
+      id: 'custom-gold-liquidity-reviewed-v3',
+      caseId: 'case-custom-gold-liquidity-reviewed-v3',
+      name: 'Gold after a Record High',
+      nameZh: '黄金创新高后的反转',
+      description: 'A bounded gold-liquidity scenario.',
+      descriptionZh: '有边界的黄金流动性情景。',
+      isSynthetic: true,
+      status: 'FROZEN',
+      pointInTime: '2026-03-20T23:59:59Z',
+      editableExtraction: false,
+      sources: [],
+      claims: [],
+      limitations: [],
+      limitationsZh: [],
+    });
+
+    render(
+      <I18nProvider>
+        <GuidedWorkflowPage navigate={navigate} />
+      </I18nProvider>,
+    );
+
+    await user.click(await screen.findByRole('button', {
+      name: 'Review the complete source ledger',
+    }));
+
+    await waitFor(() => expect(selectCase).toHaveBeenCalledWith(expect.objectContaining({
+      eventPackId: 'custom-gold-liquidity-reviewed-v3',
+    })));
+    expect(navigate).toHaveBeenCalledWith('pack');
   });
 
   it('translates a legacy current-stage review error and points to the composer', async () => {
