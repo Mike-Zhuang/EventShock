@@ -39,7 +39,7 @@ The core research question is intentionally narrow:
 
 ## Who it is for
 
-The audience is defined by a shared task, not by a job title. EventShock is for people who want more discipline than a market narrative or a one-line AI prediction can provide:
+The audience is defined by a shared task, not by a job title. EventShock is for **people who want more discipline** than a market narrative or a one-line AI prediction can provide:
 
 - self-directed individual investors examining an event thesis without a quantitative research team;
 - analysts and research teams comparing event-risk mechanisms in a reviewable workflow;
