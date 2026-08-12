@@ -31,7 +31,7 @@ EventShock Lab is a deployed research prototype for **anyone who wants to unders
 
 ## Why this project exists
 
-Traditional stress tests often start with a narrative and a fixed shock parameter. They do not make it easy to examine how evidence becomes belief, how beliefs propagate through a network, how orders meet limited liquidity, or where a cascade begins. EventShock turns that qualitative story into an inspectable, reproducible experiment while keeping consequential decisions with people.
+**Traditional stress tests** often start with a narrative and a fixed shock parameter. They do not make it easy to examine how evidence becomes belief, how beliefs propagate through a network, how orders meet limited liquidity, or where a cascade begins. **EventShock** turns that qualitative story into an inspectable, reproducible experiment while keeping consequential decisions with people.
 
 The core research question is intentionally narrow:
 
@@ -49,7 +49,7 @@ The guided and advanced workspaces serve the same audience at different levels o
 
 ## Human in the loop, by design
 
-AI assists with the labor-intensive parts of the workflow, but it never owns the research conclusion. The interface makes the handoff between AI and people explicit.
+AI assists with the labor-intensive parts of the workflow, but it **never** owns the research conclusion. The interface makes the **handoff** between AI and people explicit.
 
 | Stage | AI can help with | A person must do | Deterministic system enforces |
 | --- | --- | --- | --- |
