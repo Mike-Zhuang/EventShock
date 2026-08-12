@@ -9,6 +9,11 @@ import { TechnicalCodeDisplay, technicalCodeLabel } from '../components/technica
 import { translateLogLevel, useI18n } from '../i18n';
 import { getPageGuide } from '../page-guidance';
 import { getParameterHelp } from '../parameter-help';
+import {
+  guidedRunPresentation,
+  readGuidedRunPlayback,
+  type GuidedRunPlayback,
+} from '../guided-run-playback';
 import { useWorkflow } from '../state/workflow-context';
 
 const KNOWN_RUNTIME_LOG_CODES = new Set([
@@ -89,27 +94,56 @@ export function RunCenterPage({ navigate }: { navigate: Navigate }) {
   const [playbackPaused, setPlaybackPaused] = useState(false);
   const [playbackRate, setPlaybackRate] = useState<1 | 2 | 4>(1);
   const [visibleLogCount, setVisibleLogCount] = useState(0);
+  const [guidedPlayback, setGuidedPlayback] = useState<GuidedRunPlayback>();
+  const [presentationNow, setPresentationNow] = useState(Date.now());
   const liveState = activeExperiment?.liveState;
-  const cognitionProgress = liveState?.cognitionProgress;
-  const activeSnapshot = liveState?.phase === 'INTERVENTION'
-    ? liveState.intervention
-    : liveState?.baseline ?? liveState?.intervention;
+  const runPresentation = activeExperiment && guidedPlayback?.experimentId === activeExperiment.id
+    ? guidedRunPresentation(guidedPlayback, activeExperiment, presentationNow, language)
+    : undefined;
+  const displayedStatus = runPresentation?.status ?? activeExperiment?.status;
+  const displayedProgress = runPresentation?.progress ?? activeExperiment?.progress ?? 0;
+  const displayedValidSeeds = runPresentation?.validSeeds ?? activeExperiment?.validSeeds ?? 0;
+  const displayedMessage = runPresentation?.message ?? activeExperiment?.message;
+  const displayedPhase = runPresentation?.phase ?? liveState?.phase;
+  const cognitionProgress = runPresentation?.cognitionProgress ?? liveState?.cognitionProgress;
+  const playbackMarketVisible = !runPresentation
+    || ['PAIRED_RUNS', 'AGGREGATING', 'COMPLETED'].includes(runPresentation.phase);
+  const activeSnapshot = !playbackMarketVisible
+    ? undefined
+    : liveState?.phase === 'INTERVENTION'
+      ? liveState.intervention
+      : liveState?.baseline ?? liveState?.intervention;
   const formatValue = (value: number | undefined, maximumFractionDigits = 2) => value === undefined
     ? t('common.unavailable')
     : new Intl.NumberFormat(language, { maximumFractionDigits }).format(value);
 
   useEffect(() => {
-    setVisibleLogCount(activeExperiment?.logs.length ?? 0);
+    const restoredPlayback = readGuidedRunPlayback();
+    const matchingPlayback = restoredPlayback?.experimentId === activeExperiment?.id
+      ? restoredPlayback
+      : undefined;
+    setGuidedPlayback(matchingPlayback);
+    setPresentationNow(Date.now());
+    setVisibleLogCount(matchingPlayback ? 0 : activeExperiment?.logs.length ?? 0);
     setPlaybackPaused(false);
   }, [activeExperiment?.id]);
 
   useEffect(() => {
+    if (!guidedPlayback || presentationNow >= guidedPlayback.startedAtMs + guidedPlayback.durationMs) return;
+    const timer = window.setInterval(() => setPresentationNow(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, [guidedPlayback, presentationNow]);
+
+  useEffect(() => {
     if (playbackPaused || !activeExperiment || visibleLogCount >= activeExperiment.logs.length) return;
+    const intervalMs = guidedPlayback
+      ? Math.max(900, guidedPlayback.durationMs / Math.max(activeExperiment.logs.length, 1))
+      : 600;
     const timer = window.setTimeout(() => {
       setVisibleLogCount((current) => Math.min(activeExperiment.logs.length, current + playbackRate));
-    }, 600);
+    }, intervalMs);
     return () => window.clearTimeout(timer);
-  }, [activeExperiment, playbackPaused, playbackRate, visibleLogCount]);
+  }, [activeExperiment, guidedPlayback, playbackPaused, playbackRate, visibleLogCount]);
 
   const select = async (experimentId: string) => {
     setActionError(undefined);
@@ -185,8 +219,12 @@ export function RunCenterPage({ navigate }: { navigate: Navigate }) {
       {experiments.length > 0 ? (
         <div className="run-layout">
           <section className="run-list" aria-label={t('export.history')}>
-            {experiments.map((experiment) => (
-              <button
+            {experiments.map((experiment) => {
+              const rowPresentation = guidedPlayback?.experimentId === experiment.id
+                ? guidedRunPresentation(guidedPlayback, experiment, presentationNow, language)
+                : undefined;
+              return (
+                <button
                 key={experiment.id}
                 type="button"
                 className={`run-row ${activeExperiment?.id === experiment.id ? 'run-row--selected' : ''}`}
@@ -197,12 +235,13 @@ export function RunCenterPage({ navigate }: { navigate: Navigate }) {
                     <code>{experiment.id}</code><br />
                     <small>{experimentHistoryLabel(experiment, language, false, false)}</small>
                   </span>
-                  <StatusBadge status={experiment.status} />
+                  <StatusBadge status={rowPresentation?.status ?? experiment.status} />
                 </div>
                 <span>{experiment.createdAt ? new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(experiment.createdAt)) : t('common.unavailable')}</span>
-                <strong>{Math.round(experiment.progress)}%</strong>
-              </button>
-            ))}
+                <strong>{Math.round(rowPresentation?.progress ?? experiment.progress)}%</strong>
+                </button>
+              );
+            })}
           </section>
 
           {activeExperiment ? (
@@ -212,19 +251,19 @@ export function RunCenterPage({ navigate }: { navigate: Navigate }) {
                   <span>{t('runs.progress')}</span>
                   <h2><code>{activeExperiment.id}</code></h2>
                 </div>
-                <StatusBadge status={activeExperiment.status} />
+                <StatusBadge status={displayedStatus ?? activeExperiment.status} />
               </div>
 
               <ProgressBar
                 label={t('runs.progress')}
-                helperText={activeExperiment.message}
-                value={activeExperiment.progress}
+                helperText={displayedMessage}
+                value={displayedProgress}
                 max={100}
-                status={['FAILED', 'FAILED_FINAL', 'FAILED_RETRYABLE', 'INVALIDATED'].includes(activeExperiment.status) ? 'error' : activeExperiment.status === 'COMPLETED' ? 'finished' : 'active'}
+                status={['FAILED', 'FAILED_FINAL', 'FAILED_RETRYABLE', 'INVALIDATED'].includes(displayedStatus ?? '') ? 'error' : displayedStatus === 'COMPLETED' ? 'finished' : 'active'}
               />
 
               <div className="run-stats">
-                <div><span>{explained('matchedSeeds', t('runs.validSeeds'))}</span><strong>{activeExperiment.validSeeds ?? 0} / {activeExperiment.totalSeeds ?? t('common.unavailable')}</strong></div>
+                <div><span>{explained('matchedSeeds', t('runs.validSeeds'))}</span><strong>{displayedValidSeeds} / {activeExperiment.totalSeeds ?? t('common.unavailable')}</strong></div>
                 <div>
                   <span>{explained(
                     'rootSeed',
@@ -255,6 +294,30 @@ export function RunCenterPage({ navigate }: { navigate: Navigate }) {
                     max={Math.max(cognitionProgress.plannedCalls ?? 0, 1)}
                     status={cognitionProgress.status === 'COMPLETED' ? 'finished' : cognitionProgress.status === 'FAILED_CLOSED' ? 'error' : 'active'}
                   />
+                  {guidedPlayback ? (
+                    <ol className="cognition-stage-list" aria-label={language === 'zh-CN' ? 'AI 认知处理阶段' : 'AI cognition stages'}>
+                      {([
+                        ['OBSERVATION', language === 'zh-CN' ? '读取冻结证据与市场观察' : 'Read frozen evidence and market observation'],
+                        ['MODEL', language === 'zh-CN' ? '外部 LLM 生成结构化信念与行动偏好' : 'External LLM generates structured beliefs and action preferences'],
+                        ['VALIDATION', language === 'zh-CN' ? '校验 JSON Schema、证据引用与权限边界' : 'Validate JSON Schema, evidence references, and authority boundaries'],
+                        ['FREEZE', language === 'zh-CN' ? '冻结已验证认知决策供配对路径复用' : 'Freeze validated cognition decisions for paired paths'],
+                      ] as const).map(([stage, label], index) => {
+                        const completedStageCount = runPresentation?.phase === 'COGNITION'
+                          ? Math.min(3, Math.floor(((displayedProgress - 5) / 23) * 4))
+                          : ['PAIRED_RUNS', 'AGGREGATING', 'COMPLETED'].includes(runPresentation?.phase ?? '') ? 4 : 0;
+                        const state = index < completedStageCount
+                          ? 'complete'
+                          : index === completedStageCount && runPresentation?.phase === 'COGNITION'
+                            ? 'active'
+                            : 'pending';
+                        return (
+                          <li key={stage} className={`cognition-stage-list__item cognition-stage-list__item--${state}`}>
+                            <span>{index + 1}</span><strong>{label}</strong>
+                          </li>
+                        );
+                      })}
+                    </ol>
+                  ) : null}
                   {cognitionProgress.failureCode ? (
                     <TechnicalCodeDisplay codes={[cognitionProgress.failureCode]} language={language} />
                   ) : null}
@@ -325,7 +388,7 @@ export function RunCenterPage({ navigate }: { navigate: Navigate }) {
                           ? '当前在途请求可能仍会完成并计费；已校验的冻结决策会保留，剩余认知由确定性规则完成。'
                           : 'The in-flight request may still complete and be billed. Validated frozen decisions are preserved; deterministic rules complete the remainder.'}
                       />
-                    ) : liveState?.phase === 'COGNITION'
+                    ) : displayedPhase === 'COGNITION'
                       && activeExperiment.scenario?.llmPolicy?.mode === 'HYBRID_LLM'
                       && activeExperiment.scenario?.llmPolicy?.fallbackToRules ? (
                         <Button
@@ -338,7 +401,7 @@ export function RunCenterPage({ navigate }: { navigate: Navigate }) {
                             : 'Stop future LLM calls and finish with rules'}
                         </Button>
                       ) : null}
-                  {liveState?.phase === 'COGNITION'
+                  {displayedPhase === 'COGNITION'
                     && activeExperiment.scenario?.llmPolicy?.mode === 'HYBRID_LLM'
                     && !activeExperiment.scenario?.llmPolicy?.fallbackToRules
                     && ['FAILED_CLOSED', 'FAILED'].includes(cognitionProgress.status ?? '') ? (
@@ -394,7 +457,7 @@ export function RunCenterPage({ navigate }: { navigate: Navigate }) {
               <div className="live-market-status">
                 <div>
                   <span>{explained('runPhase', language === 'zh-CN' ? '运行阶段' : 'Run phase', language === 'zh-CN' ? '当前后端计算阶段，例如认知信号生成、基准路径、干预路径或聚合。' : 'Current backend phase, such as cognition generation, baseline, intervention, or aggregation.')}</span>
-                  <strong>{liveState?.phase ?? (language === 'zh-CN' ? '等待首个检查点' : 'Waiting for first checkpoint')}</strong>
+                  <strong>{displayedPhase ?? (language === 'zh-CN' ? '等待首个检查点' : 'Waiting for first checkpoint')}</strong>
                 </div>
                 <div>
                   <span>{language === 'zh-CN' ? '当前价格' : 'Current price'}</span>
@@ -414,7 +477,7 @@ export function RunCenterPage({ navigate }: { navigate: Navigate }) {
                 </div>
               </div>
 
-              {liveState?.baseline || liveState?.intervention ? (
+              {playbackMarketVisible && (liveState?.baseline || liveState?.intervention) ? (
                 <div className="live-scenario-comparison" aria-label={language === 'zh-CN' ? '实时场景对比' : 'Live scenario comparison'}>
                   {([
                     ['baseline', liveState.baseline],
@@ -473,10 +536,10 @@ export function RunCenterPage({ navigate }: { navigate: Navigate }) {
               </div>
 
               <div className="run-detail__actions">
-                {['QUEUED', 'RUNNING', 'AGGREGATING'].includes(activeExperiment.status) ? (
+                {['QUEUED', 'RUNNING', 'AGGREGATING'].includes(activeExperiment.status) && !guidedPlayback ? (
                   <Button kind="danger--tertiary" renderIcon={Stop} onClick={() => void cancel()}>{t('runs.cancel')}</Button>
                 ) : null}
-                {activeExperiment.status === 'COMPLETED' ? (
+                {displayedStatus === 'COMPLETED' ? (
                   <Button renderIcon={ChartLineUp} onClick={() => void openResults()}>{t('runs.openResults')}</Button>
                 ) : null}
               </div>

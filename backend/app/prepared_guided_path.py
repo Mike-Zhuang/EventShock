@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.account_capabilities import AccountCapabilityRepository
 from backend.app.database import Database
 from backend.app.guided_workflow.models import (
+    GuidedReviewItem,
     GuidedSourceMethod,
     GuidedStage,
     GuidedWorkflowDraft,
@@ -16,6 +17,9 @@ from backend.app.guided_workflow.models import (
     ProposedEventMetadata,
     ProposedIntervention,
 )
+
+if TYPE_CHECKING:
+    from backend.app.guided_workflow.models import GuidedWorkflowView
 
 PREPARED_GUIDED_PATH_CAPABILITY = "PREPARED_GUIDED_PATH_V1"
 
@@ -27,6 +31,8 @@ class _StrictModel(BaseModel):
 class PreparedStageCopy(_StrictModel):
     assistantMessage: str = Field(min_length=8, max_length=2_000)
     nextQuestionOptions: tuple[str, ...] = Field(default=(), max_length=5)
+    reviewItems: tuple[GuidedReviewItem, ...] = Field(default=(), max_length=24)
+    preparationSteps: tuple[str, ...] = Field(default=(), max_length=6)
 
 
 class PreparedGuidedPathConfiguration(_StrictModel):
@@ -93,6 +99,8 @@ class PreparedGuidedPathService:
             "clarificationRequired": False,
             "nextQuestionOptions": stageCopy.nextQuestionOptions,
             "readyForHumanReview": True,
+            "reviewItems": stageCopy.reviewItems,
+            "preparationSteps": stageCopy.preparationSteps,
         }
         if stage is GuidedStage.EVENT_GOAL:
             return GuidedWorkflowProposal(
@@ -109,18 +117,42 @@ class PreparedGuidedPathService:
                 **common,
                 proposedIntervention=configuration.intervention,
             )
-        return None
+        return GuidedWorkflowProposal(**common)
 
     def nextStage(self, ownerUserId: str, currentStage: GuidedStage) -> GuidedStage | None:
         configuration = self.configuration(ownerUserId)
         if configuration is None:
             return None
-        acceleratedStages = {
+        fullReviewStages = {
             GuidedStage.EVENT_GOAL: GuidedStage.SOURCE_METHOD,
-            GuidedStage.SOURCE_METHOD: GuidedStage.SCENARIO_INTERVENTION,
-            GuidedStage.SCENARIO_INTERVENTION: GuidedStage.COMPLETED,
+            GuidedStage.SOURCE_METHOD: GuidedStage.SOURCE_REVIEW,
+            GuidedStage.SOURCE_REVIEW: GuidedStage.CLAIM_REVIEW,
+            GuidedStage.CLAIM_REVIEW: GuidedStage.PACK_METADATA_REVIEW,
+            GuidedStage.PACK_METADATA_REVIEW: GuidedStage.PACK_FREEZE_REVIEW,
+            GuidedStage.PACK_FREEZE_REVIEW: GuidedStage.SCENARIO_INTERVENTION,
+            GuidedStage.SCENARIO_INTERVENTION: GuidedStage.SCENARIO_REVIEW,
+            GuidedStage.SCENARIO_REVIEW: GuidedStage.PREFLIGHT,
+            GuidedStage.PREFLIGHT: GuidedStage.READY_TO_SUBMIT,
+            GuidedStage.READY_TO_SUBMIT: GuidedStage.COMPLETED,
         }
-        return acceleratedStages.get(currentStage)
+        return fullReviewStages.get(currentStage)
+
+    def assertStageReviewComplete(
+        self,
+        ownerUserId: str,
+        workflow: GuidedWorkflowView,
+    ) -> None:
+        """受控路径也必须留下当前阶段候选已被人工应用的证据。"""
+
+        if self.configuration(ownerUserId) is None:
+            return
+        if not any(
+            archived.status.value == "APPLIED" and archived.proposal.stage is workflow.stage
+            for archived in workflow.archivedProposals
+        ):
+            raise ValueError(
+                "the current guided stage requires an explicitly reviewed and applied proposal"
+            )
 
     def _assertReady(
         self,
@@ -147,3 +179,22 @@ class PreparedGuidedPathService:
             raise ValueError("prepared guided path experiment must remain completed and owned")
         if experiment["request"].get("eventPackId") != configuration.eventPackId:
             raise ValueError("prepared guided path experiment and Event Pack do not match")
+        llmPolicy = experiment["request"].get("llmPolicy") or {}
+        manifest = (experiment.get("result") or {}).get("manifest") or {}
+        cognition = (experiment.get("result") or {}).get("cognition") or {}
+        if llmPolicy.get("mode") != "HYBRID_LLM":
+            raise ValueError("guided path experiment must use hybrid LLM cognition")
+        if manifest.get("agentMode") != "HYBRID_LLM" or not manifest.get("llmExternalModelUsed"):
+            raise ValueError("guided path experiment must contain verified external LLM decisions")
+        if (
+            int(manifest.get("llmFallbackCount") or 0) != 0
+            or int(cognition.get("fallbackCount") or 0) != 0
+        ):
+            raise ValueError("guided path experiment must not contain rule fallbacks")
+        if (
+            cognition.get("resolvedMode") != "HYBRID_LLM"
+            or int(cognition.get("attemptedCalls") or 0) <= 0
+            or int(cognition.get("structuredValidCalls") or 0) <= 0
+            or int(cognition.get("calls") or 0) <= 0
+        ):
+            raise ValueError("guided path experiment must contain validated LLM cognition calls")

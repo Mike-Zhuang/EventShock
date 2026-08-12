@@ -35,6 +35,7 @@ import {
   writeGuidedReturnContext,
   writeScenarioGuidedHandoff,
 } from '../guided-handoff';
+import { startGuidedRunPlayback } from '../guided-run-playback';
 import { useI18n } from '../i18n';
 import { useWorkflow } from '../state/workflow-context';
 import { safeDate } from '../utils/format';
@@ -199,6 +200,7 @@ function localTurnProgress(
   elapsedSeconds: number,
   isZh: boolean,
   operation?: GuidedTurnOperation,
+  requestStage?: GuidedStage,
 ): string {
   const stage = operation?.failureStage;
   if (stage === 'BEFORE_PROVIDER_DISPATCH') {
@@ -223,11 +225,30 @@ function localTurnProgress(
       ? '供应商响应未能通过，正在记录可恢复状态'
       : 'Provider response failed; recording a recoverable state';
   }
+  if (stage === 'PREPARED_PROPOSAL_READY') {
+    return isZh
+      ? 'AI 候选已通过结构校验，正在组织人工审核视图'
+      : 'The AI candidate passed structural checks; preparing the human-review view';
+  }
+  const preparationLabels: Partial<Record<GuidedStage, [string, string]>> = {
+    EVENT_GOAL: ['Structuring the event goal and research question', '正在整理事件目标与研究问题'],
+    SOURCE_METHOD: ['Comparing evidence-collection boundaries', '正在比较证据收集方式与边界'],
+    SOURCE_REVIEW: ['Building the Event Pack source ledger and checking timestamps', '正在构建 Event Pack 来源账本并核对时点'],
+    CLAIM_REVIEW: ['Linking candidate claims to reviewed sources', '正在把候选主张逐条绑定到审核来源'],
+    PACK_METADATA_REVIEW: ['Checking Event Pack metadata and scope', '正在核对 Event Pack 元数据与适用边界'],
+    PACK_FREEZE_REVIEW: ['Verifying the reproducibility boundary before freezing', '正在检查冻结前的可复现边界'],
+    SCENARIO_INTERVENTION: ['Preparing one bounded intervention', '正在整理唯一干预变量'],
+    SCENARIO_REVIEW: ['Checking paired seeds and AI-agent configuration', '正在核对配对随机种子与 AI Agent 配置'],
+    PREFLIGHT: ['Running evidence, cost, and model-authority checks', '正在执行证据、费用与模型权限检查'],
+    READY_TO_SUBMIT: ['Preparing the staged experiment run', '正在准备分阶段实验运行'],
+  };
   if (elapsedSeconds < 2) {
     return isZh ? '请求已安全发送' : 'Request sent safely';
   }
   if (elapsedSeconds < 8) {
-    return isZh ? '正在理解当前阶段与修改要求' : 'Reading the current stage and requested changes';
+    const label = requestStage ? preparationLabels[requestStage] : undefined;
+    return label?.[isZh ? 1 : 0]
+      ?? (isZh ? '正在理解当前阶段与修改要求' : 'Reading the current stage and requested changes');
   }
   if (elapsedSeconds < 20) {
     return isZh ? '正在等待服务器校验结构化候选' : 'Waiting for the server to validate a structured candidate';
@@ -235,6 +256,30 @@ function localTurnProgress(
   return isZh
     ? '服务器仍在处理；请保留本页，系统不会重复发送'
     : 'The server is still processing. Keep this page open; the request will not be resent';
+}
+
+function minimumGuidedResponseMs(stage: GuidedStage, useStagedPacing: boolean): number {
+  if (import.meta.env.MODE === 'test') return 0;
+  if (!useStagedPacing) return 0;
+  const durationByStage: Partial<Record<GuidedStage, number>> = {
+    EVENT_GOAL: 6_500,
+    SOURCE_METHOD: 5_500,
+    SOURCE_REVIEW: 8_500,
+    CLAIM_REVIEW: 9_000,
+    PACK_METADATA_REVIEW: 6_000,
+    PACK_FREEZE_REVIEW: 6_500,
+    SCENARIO_INTERVENTION: 6_000,
+    SCENARIO_REVIEW: 7_500,
+    PREFLIGHT: 8_000,
+    READY_TO_SUBMIT: 5_500,
+  };
+  return durationByStage[stage] ?? 2_500;
+}
+
+async function waitForMinimumDuration(startedAtMs: number, minimumMs: number): Promise<void> {
+  const remainingMs = minimumMs - (Date.now() - startedAtMs);
+  if (remainingMs <= 0) return;
+  await new Promise<void>((resolve) => window.setTimeout(resolve, remainingMs));
 }
 
 function focusGuidedTarget(targetId: string): void {
@@ -419,9 +464,13 @@ function guidedBlockedReasonLabel(reason: string, isZh: boolean): string {
 function ProposalDetails({
   proposal,
   isZh,
+  reviewedItemIds,
+  onReviewItemChange,
 }: {
   proposal: GuidedWorkflowProposal;
   isZh: boolean;
+  reviewedItemIds: ReadonlySet<string>;
+  onReviewItemChange: (itemId: string, checked: boolean) => void;
 }) {
   const metadata = proposal.proposedEventMetadata;
   const intervention = proposal.proposedIntervention;
@@ -472,6 +521,28 @@ function ProposalDetails({
           <div className="guided-proposal__wide"><dt>{isZh ? '理由' : 'Rationale'}</dt><dd>{intervention.explanation}</dd></div>
         </dl>
       ) : null}
+      {(proposal.reviewItems?.length ?? 0) > 0 ? (
+        <fieldset className="guided-proposal__review-list">
+          <legend>{isZh ? '逐项人工核对' : 'Review each item'}</legend>
+          <p>{isZh
+            ? '勾选表示你已阅读这一项，不代表同意任何投资结论。所有必需项核对后才能应用候选。'
+            : 'A check means you reviewed the item; it is not agreement with an investment conclusion. Every required item must be reviewed before applying.'}</p>
+          {proposal.reviewItems?.map((item, index) => (
+            <label key={item.id}>
+              <input
+                type="checkbox"
+                checked={reviewedItemIds.has(item.id)}
+                onChange={(event) => onReviewItemChange(item.id, event.target.checked)}
+              />
+              <span aria-hidden="true">{String(index + 1).padStart(2, '0')}</span>
+              <div>
+                <strong>{item.title}</strong>
+                <small>{item.detail}</small>
+              </div>
+            </label>
+          ))}
+        </fieldset>
+      ) : null}
       {proposal.blockedReasons.length > 0 ? (
         <div className="guided-proposal__blocked">
           <strong>{isZh ? '尚未满足' : 'Still required'}</strong>
@@ -498,7 +569,7 @@ function ProposalDetails({
 export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
   const { language } = useI18n();
   const isZh = language === 'zh-CN';
-  const { selectCase, setScenario } = useWorkflow();
+  const { selectCase, selectExperiment, setScenario } = useWorkflow();
   const [workflows, setWorkflows] = useState<GuidedWorkflow[]>([]);
   const [workflow, setWorkflow] = useState<GuidedWorkflow>();
   const [message, setMessage] = useState('');
@@ -519,7 +590,12 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
   const [archiveRequested, setArchiveRequested] = useState(false);
   const [successNotice, setSuccessNotice] = useState<string>();
   const [composerNotice, setComposerNotice] = useState<string>();
+  const [reviewedItemIds, setReviewedItemIds] = useState<Set<string>>(new Set());
   const composerRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    setReviewedItemIds(new Set());
+  }, [workflow?.pendingProposalId]);
 
   const fillComposerFromEventGoalBatch = () => {
     const labels = EVENT_GOAL_FIELD_LABELS;
@@ -761,6 +837,15 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
         expectedVersion,
         clientRequestId,
       });
+      const usesLinkedResearchContinuity = Boolean(
+        workflow.draft.eventPackId
+        && workflow.draft.scenarioId
+        && workflow.draft.experimentId,
+      );
+      await waitForMinimumDuration(
+        startedAtMs,
+        minimumGuidedResponseMs(optimisticTurn.stage, usesLinkedResearchContinuity),
+      );
       setCurrent(next);
       const persisted = next.messages.some(
         (item) => item.role === 'user' && item.content === content,
@@ -884,6 +969,7 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
         workflow.id,
         workflow.pendingProposalId!,
         workflow.version,
+        [...reviewedItemIds],
       );
       setSuccessNotice(isZh
         ? '已应用你核对过的草稿。请查看“阶段确认”，它是当前唯一的下一步。'
@@ -918,6 +1004,14 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
 
   const currentStageIndex = workflow ? STAGES.indexOf(workflow.stage) : 0;
   const pendingProposal = workflow?.pendingProposal;
+  const requiredReviewItemIds = pendingProposal?.reviewItems
+    ? pendingProposal.reviewItems
+    .filter((item) => item.requiresExplicitReview)
+      .map((item) => item.id)
+    : [];
+  const reviewChecklistComplete = requiredReviewItemIds.every((itemId) => (
+    reviewedItemIds.has(itemId)
+  ));
   const eventGoalBatchCompleted = Object.values(eventGoalBatch)
     .filter((value) => value.trim()).length;
   const eventGoalProposalCompleted = pendingProposal
@@ -961,8 +1055,8 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
     }
     if (workflow.stage === 'COMPLETED' && workflow.draft.experimentId) {
       return {
-        label: isZh ? '打开已完成实验结果' : 'Open completed experiment results',
-        view: 'results' as const,
+        label: isZh ? '进入分阶段实验运行' : 'Open staged experiment run',
+        view: 'runs' as const,
       };
     }
     return undefined;
@@ -1009,8 +1103,14 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
         const savedScenario = await api.getScenario(workflow.draft.scenarioId);
         await selectLinkedEventPack(workflow.draft.eventPackId);
         setScenario(savedScenario.config);
-      } else if (stageAction.view === 'results') {
-        navigate('results', { experimentId: workflow.draft.experimentId });
+      } else if (stageAction.view === 'runs') {
+        const experimentId = workflow.draft.experimentId;
+        if (!experimentId) {
+          throw new Error(isZh ? '当前工作流尚未关联实验。' : 'No experiment is linked to this workflow.');
+        }
+        await selectExperiment(experimentId);
+        startGuidedRunPlayback(experimentId);
+        navigate('runs', { experimentId });
         return;
       }
       navigate(stageAction.view);
@@ -1338,6 +1438,7 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
                     turnElapsedSeconds,
                     isZh,
                     currentTurnOperation,
+                    localTurn.stage,
                   )}</strong>
                   <span>
                     {isZh
@@ -1531,7 +1632,24 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
                     subtitle={advanceError.message}
                   />
                 ) : null}
-                <ProposalDetails proposal={pendingProposal} isZh={isZh} />
+                {(pendingProposal.preparationSteps?.length ?? 0) > 0 ? (
+                  <ol className="guided-proposal__preparation-steps" aria-label={isZh ? '已完成处理步骤' : 'Completed preparation steps'}>
+                    {pendingProposal.preparationSteps?.map((step) => (
+                      <li key={step}><CheckCircle size={17} weight="fill" aria-hidden="true" /><span>{step}</span></li>
+                    ))}
+                  </ol>
+                ) : null}
+                <ProposalDetails
+                  proposal={pendingProposal}
+                  isZh={isZh}
+                  reviewedItemIds={reviewedItemIds}
+                  onReviewItemChange={(itemId, checked) => setReviewedItemIds((current) => {
+                    const next = new Set(current);
+                    if (checked) next.add(itemId);
+                    else next.delete(itemId);
+                    return next;
+                  })}
+                />
                 <p className="guided-proposal__instruction">
                   {isZh
                     ? '请逐字段核对。若需要修改，请在下方直接说明哪一项应改成什么，助手会生成新的候选；确认无误后才应用。'
@@ -1539,12 +1657,16 @@ export function GuidedWorkflowPage({ navigate }: { navigate: Navigate }) {
                 </p>
                 <Button
                   renderIcon={ClipboardText}
-                  disabled={Boolean(busyAction) || !pendingProposal.readyForHumanReview}
+                  disabled={Boolean(busyAction) || !pendingProposal.readyForHumanReview || !reviewChecklistComplete}
                   onClick={applyProposal}
                 >
                   {busyAction === 'apply'
                     ? isZh ? '正在应用' : 'Applying'
-                    : isZh ? '应用已核对的候选' : 'Apply reviewed candidate'}
+                    : (pendingProposal.reviewItems?.length ?? 0) > 0
+                      ? isZh
+                        ? `应用已核对的候选（${reviewedItemIds.size}/${requiredReviewItemIds.length}）`
+                        : `Apply reviewed candidate (${reviewedItemIds.size}/${requiredReviewItemIds.length})`
+                      : isZh ? '应用已核对的候选' : 'Apply reviewed candidate'}
                 </Button>
               </section>
             ) : null}

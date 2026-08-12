@@ -828,12 +828,13 @@ export const api = {
     workflowId: string,
     proposalId: string,
     expectedVersion: number,
+    reviewedItemIds: string[] = [],
   ): Promise<GuidedWorkflow> {
     return normalizeGuidedWorkflow(await requestJson(
       `/v1/guided-workflows/${encodeURIComponent(workflowId)}/apply`,
       {
         method: 'POST',
-        body: JSON.stringify({ proposalId, expectedVersion }),
+        body: JSON.stringify({ proposalId, expectedVersion, reviewedItemIds }),
       },
     ));
   },

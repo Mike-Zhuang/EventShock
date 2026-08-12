@@ -1564,7 +1564,11 @@ def createApp(dataDir: Path | None = None, frontendDist: Path | None = None) -> 
             "GUIDED_WORKFLOW",
             workflowId,
             "PROPOSAL_APPLIED_BY_HUMAN",
-            {"stage": workflow.stage.value, "proposalId": payload.proposalId},
+            {
+                "stage": workflow.stage.value,
+                "proposalId": payload.proposalId,
+                "reviewedItemIds": list(payload.reviewedItemIds),
+            },
         )
         return workflow.model_dump(mode="json")
 
@@ -5103,6 +5107,13 @@ def _rateLimitRules(request: Request) -> list[RateLimitRule]:
             path,
         )
     )
+    isGuidedWorkflowWrite = bool(
+        re.fullmatch(
+            r"/api/v1/guided-workflows(?:/[^/]+(?:/(?:turn|apply|advance|links|archive))?"
+            r"|/[^/]+/operations/[^/]+/recover)?",
+            path,
+        )
+    )
     isLimitedWrite = (
         isExperimentCreate
         or isStudyRun
@@ -5145,9 +5156,12 @@ def _rateLimitRules(request: Request) -> list[RateLimitRule]:
         )[:128]
     )
     sessionDigest = hashlib.blake2s(rawSessionId.encode(), digest_size=8).hexdigest()
+    # 完整引导链路包含十个“生成候选→人工应用→阶段确认”检查点，正常完成
+    # 会超过通用写入桶的 30 次上限；单独放宽该有界工作流，其他写接口仍保持原限额。
+    writeLimit = 90 if isGuidedWorkflowWrite else 30
     rules = [
-        RateLimitRule(key=f"write:ip:{clientIp}", limit=30),
-        RateLimitRule(key=f"write:session:{sessionDigest}", limit=30),
+        RateLimitRule(key=f"write:ip:{clientIp}", limit=writeLimit),
+        RateLimitRule(key=f"write:session:{sessionDigest}", limit=writeLimit),
     ]
     if isExperimentCreate:
         rules.extend(

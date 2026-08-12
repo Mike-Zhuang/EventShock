@@ -121,6 +121,20 @@ class GuidedUnresolvedField(StrictModel):
     reason: str = Field(min_length=3, max_length=240)
 
 
+class GuidedReviewItem(StrictModel):
+    """需要用户逐项确认的来源、主张或研究边界。"""
+
+    id: str = Field(
+        min_length=3,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{2,99}$",
+    )
+    category: Literal["SOURCE", "CLAIM", "METADATA", "FREEZE", "SCENARIO", "PREFLIGHT"]
+    title: str = Field(min_length=2, max_length=240)
+    detail: str = Field(min_length=4, max_length=1_000)
+    requiresExplicitReview: bool = True
+
+
 class ProposedIntervention(StrictModel):
     parameter: Literal[
         "marketMakerCapacity",
@@ -171,6 +185,8 @@ class GuidedWorkflowProposal(StrictModel):
         Literal["title", "summary", "instrument", "asOf", "researchQuestion"], ...
     ] = Field(default=(), max_length=5)
     unresolvedFields: tuple[GuidedUnresolvedField, ...] = Field(default=(), max_length=5)
+    reviewItems: tuple[GuidedReviewItem, ...] = Field(default=(), max_length=24)
+    preparationSteps: tuple[str, ...] = Field(default=(), max_length=6)
 
     @model_validator(mode="after")
     def validateStageAuthority(self) -> GuidedWorkflowProposal:
@@ -205,6 +221,12 @@ class GuidedWorkflowProposal(StrictModel):
             raise ValueError("every unresolved field must also be declared missing")
         if self.readyForHumanReview and self.unresolvedFields:
             raise ValueError("a proposal with unresolved fields cannot be ready for human review")
+        reviewIds = [item.id for item in self.reviewItems]
+        if len(reviewIds) != len(set(reviewIds)):
+            raise ValueError("review item ids must be unique")
+        for step in self.preparationSteps:
+            if not 2 <= len(step.strip()) <= 120:
+                raise ValueError("each preparation step must contain 2 to 120 characters")
         return self
 
 
@@ -335,6 +357,7 @@ class GuidedProposalActionRequest(StrictModel):
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,79}$",
     )
     expectedVersion: int = Field(ge=1)
+    reviewedItemIds: tuple[str, ...] = Field(default=(), max_length=24)
 
 
 class GuidedAdvanceRequest(StrictModel):
