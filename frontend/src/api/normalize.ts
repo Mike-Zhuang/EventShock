@@ -2134,6 +2134,8 @@ function normalizeResultSourceSummary(value: unknown): ExperimentResults['source
     eventPackId: asOptionalString(read(value, 'id', 'eventPackId', 'event_pack_id')),
     title: asOptionalString(read(value, 'title', 'name')),
     titleZh: asOptionalString(read(value, 'titleZh', 'title_zh', 'nameZh', 'name_zh')),
+    summary: asOptionalString(read(value, 'summary', 'description')),
+    summaryZh: asOptionalString(read(value, 'summaryZh', 'summary_zh', 'descriptionZh', 'description_zh')),
     asOf: asOptionalString(read(value, 'asOf', 'as_of', 'pointInTime', 'point_in_time')),
     frozenAt: asOptionalString(read(value, 'frozenAt', 'frozen_at')),
     sourceCount: unwrapItems(read(value, 'sources')).length,

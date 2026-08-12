@@ -365,6 +365,7 @@ export function ResultInterpretationAssistant({
   const configGeneration = useRef(0);
   const historyGeneration = useRef(0);
   const historyDetailGeneration = useRef(0);
+  const autoOpenedHistoryExperiment = useRef<string | undefined>(undefined);
   const streamAbortController = useRef<AbortController | undefined>(undefined);
   const activeRequestInput = useRef<ResultInterpretationChatInput | undefined>(undefined);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -425,6 +426,7 @@ export function ResultInterpretationAssistant({
     setStreamState(undefined);
     setReasoningSummaryRequested(false);
     setSending(false);
+    autoOpenedHistoryExperiment.current = undefined;
     void loadConfig();
     void loadHistory();
     return () => {
@@ -645,6 +647,18 @@ export function ResultInterpretationAssistant({
       setHistoryDetailState('error');
     }
   };
+
+  useEffect(() => {
+    if (historyState !== 'ready'
+      || historyItems.length !== 1
+      || messages.length > 0
+      || conversationId
+      || autoOpenedHistoryExperiment.current === experimentId) return;
+    // 唯一历史通常就是刚完成实验的正式解释。自动恢复可避免用户在结果页
+    // 再次请求模型，也让刷新后的研究上下文保持连续。
+    autoOpenedHistoryExperiment.current = experimentId;
+    void openSavedConversation(historyItems[0].conversationId);
+  }, [conversationId, experimentId, historyItems, historyState, messages.length]);
 
   const deleteSavedConversation = async () => {
     if (!deleteTarget || deletingHistory || sending) return;
